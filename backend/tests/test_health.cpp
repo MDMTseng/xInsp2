@@ -121,7 +121,7 @@ int main() {
     // ---------------------------------------------------------------------
     SECTION("running → degraded is DERIVED from a caught instance fault");
     reset_events();
-    H.mark_instance_degraded("cam0", xi::kReasonPluginFault);   // SEH catch path
+    H.mark_instance_fault("cam0", CompHealth::Degraded, xi::kReasonPluginFault);   // SEH catch path
     CHECK(H.state() == SysState::Degraded);                 // auto-flip
     CHECK(event_count() == 1);
     CHECK(data_str(last_event(), "state") == "degraded");
@@ -133,13 +133,13 @@ int main() {
 
     // Coalesce: same fault again → no event, still degraded.
     reset_events();
-    H.mark_instance_degraded("cam0", xi::kReasonPluginFault);
+    H.mark_instance_fault("cam0", CompHealth::Degraded, xi::kReasonPluginFault);
     CHECK(event_count() == 0);
     CHECK(H.state() == SysState::Degraded);
 
     // Overlay is readable for the get_health merge.
-    { std::string r; int64_t s = 0;
-      CHECK(H.instance_degraded("cam0", r, s));
+    { std::string r; int64_t s = 0; CompHealth h;
+      CHECK(H.instance_fault("cam0", h, r, s));
       CHECK(r == "plugin_fault"); }
 
     // ---------------------------------------------------------------------
@@ -149,7 +149,7 @@ int main() {
     CHECK(H.state() == SysState::Running);                  // auto-flip back
     CHECK(event_count() == 1);
     CHECK(data_str(last_event(), "state") == "running");
-    { std::string r; int64_t s = 0; CHECK(!H.instance_degraded("cam0", r, s)); }
+    { std::string r; int64_t s = 0; CompHealth h; CHECK(!H.instance_fault("cam0", h, r, s)); }
     // Clearing a non-degraded instance is a no-op (no event).
     reset_events();
     CHECK(!H.clear_instance_degraded("cam0"));
@@ -208,7 +208,7 @@ int main() {
     SECTION("a fault OUTSIDE running records the component but does NOT flip state");
     reset_events();
     CHECK(H.state() == SysState::ProjectLoaded);
-    H.mark_instance_degraded("cam1", xi::kReasonPluginFault);
+    H.mark_instance_fault("cam1", CompHealth::Degraded, xi::kReasonPluginFault);
     CHECK(H.state() == SysState::ProjectLoaded);            // no derivation off-run
     CHECK(has_component(last_event()));
     CHECK(comp_str(last_event(), "name") == "cam1");
@@ -248,7 +248,7 @@ int main() {
         CHECK(mstate == "running");
         CHECK(mreason.empty());   // clean running clears any prior reason
 
-        H.mark_instance_degraded("cam0", xi::kReasonPluginFault);
+        H.mark_instance_fault("cam0", CompHealth::Degraded, xi::kReasonPluginFault);
         H.mirror_snapshot(mstate, msince, mreason);
         CHECK(mstate == "degraded");
         CHECK(mreason == "plugin_fault");   // the fault reason is mirrored
@@ -307,7 +307,7 @@ int main() {
         H.reset_for_test();
         H.set_state(SysState::Running);
         reset_events();
-        H.mark_instance_degraded("weird\"name\\with\ttabs", xi::kReasonPluginFault);
+        H.mark_instance_fault("weird\"name\\with\ttabs", CompHealth::Degraded, xi::kReasonPluginFault);
         // The emitted event must still parse.
         yyjson_doc* d = yyjson_read(last_event().data(), last_event().size(), 0);
         CHECK(d != nullptr);

@@ -426,13 +426,13 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                         // the lane for the duration of the jump. next_allowed_us
                         // holds steady-us (reset to 0 at lane start).
                         int64_t iv = (int64_t)lane->cfg.min_interval_ms * 1000;
-                        int64_t now = xi::steady_now_us(), prev = lane->next_allowed_us.load(std::memory_order_relaxed), slot;
+                        int64_t now = xi::mono_us(), prev = lane->next_allowed_us.load(std::memory_order_relaxed), slot;
                         do { slot = prev > now ? prev : now; }
                         while (!lane->next_allowed_us.compare_exchange_weak(prev, slot + iv, std::memory_order_acq_rel));
-                        for (int64_t w = slot - xi::steady_now_us(); w > 0 && g_eng.continuous.load(); w = slot - xi::steady_now_us())
+                        for (int64_t w = slot - xi::mono_us(); w > 0 && g_eng.continuous.load(); w = slot - xi::mono_us())
                             std::this_thread::sleep_for(std::chrono::microseconds(w > 20000 ? 20000 : w));
                     }
-                    ev.dequeued_at_us = xi::now_us();
+                    ev.dequeued_at_us = xi::wall_us();
                     lane->running.fetch_add(1);
                     int frame_seq = (int)rid;
                     // THE CUT: "is this a real trigger?" is now keyed on pack payload

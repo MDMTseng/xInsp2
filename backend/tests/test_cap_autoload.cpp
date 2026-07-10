@@ -150,7 +150,9 @@ int main() {
 
         // ---- 2. project precedence: a project instance displaces the machine
         //         provider (no double-register), and removing it reinstates it --
-        CHECK(pm.create_project(projdir.string(), "p"), "create a project");
+        // assert_no_dispatch: bare PluginManager under test, no dispatch pool exists.
+        CHECK(pm.create_project(xi::QuiesceToken::assert_no_dispatch(), projdir.string(), "p"),
+              "create a project");
         std::string err;
         auto* ii = pm.create_instance(xi::QuiesceToken::assert_no_dispatch(), "codec", "autolib", &err);
         CHECK(ii != nullptr,
@@ -189,7 +191,8 @@ int main() {
               "a crashing handler is charged to the lib instance (-2)");
         CHECK(call_echo(1, nullptr) == XI_CAP_EQUARANTINED,
               "on_fault=refuse quarantines it; the next call fails fast (-3)");
-        CHECK(pm.reload_machine_provider("autolib"),
+        // assert_no_dispatch: bare PluginManager under test, no dispatch pool exists.
+        CHECK(pm.reload_machine_provider(xi::QuiesceToken::assert_no_dispatch(), "autolib"),
               "machine-scoped recovery: reload the provider from a fresh factory");
         echoed = -1;
         CHECK(call_echo(5, &echoed) == XI_CAP_OK && echoed == 6,

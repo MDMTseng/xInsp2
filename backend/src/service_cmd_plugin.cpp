@@ -112,12 +112,9 @@ void cmd_export_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::Parse
         if (er.ok) {
             send_rsp_ok(srv, id, data);
         } else {
-            xp::Rsp r;
-            r.id = id;
-            r.ok = false;
-            r.error = er.error;
-            r.data_json = data;
-            srv.send_text(r.to_json());
+            // Wave-2 #2: the data-carrying send_rsp_err owns the recent-errors
+            // push this hand-rolled Rsp used to forget.
+            send_rsp_err(srv, id, er.error, data);
             if (!er.build_log.empty()) {
                 xp::LogMsg lm;
                 lm.level = "error";
@@ -171,12 +168,8 @@ void cmd_recompile_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::Pa
         if (rr.ok) {
             send_rsp_ok(srv, id, data);
         } else {
-            xp::Rsp r;
-            r.id = id;
-            r.ok = false;
-            r.error = rr.error;
-            r.data_json = data;
-            srv.send_text(r.to_json());
+            // Wave-2 #2: same as export above — send_rsp_err owns the push.
+            send_rsp_err(srv, id, rr.error, data);
             if (!rr.build_log.empty()) {
                 xp::LogMsg lm;
                 lm.level = "error";

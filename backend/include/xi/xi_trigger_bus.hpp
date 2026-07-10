@@ -38,8 +38,8 @@ struct TriggerEvent {
     int64_t        timestamp_us = 0;          // emit (capture) timestamp
     // Stamped by the dispatcher worker the moment this event is popped off the
     // dispatch queue. Same clock as timestamp_us (system_clock µs — see
-    // xi::now_us()), so scripts can compute queue_wait_us = dequeued_at_us -
-    // timestamp_us and inspect_us = xi::now_us() - dequeued_at_us. 0 until the
+    // xi::wall_us()), so scripts can compute queue_wait_us = dequeued_at_us -
+    // timestamp_us and inspect_us = xi::wall_us() - dequeued_at_us. 0 until the
     // worker stamps it.
     int64_t        dequeued_at_us = 0;
     // Arrival/run id, assigned by the backend dispatcher when the frame is
@@ -108,14 +108,6 @@ struct TriggerEvent {
     }
 };
 
-#ifndef XI_NOW_US_DEFINED
-#define XI_NOW_US_DEFINED
-// Thin compat aliases over the canonical clock (xi_clock.hpp). now_us() = wall,
-// steady_now_us() = monotonic; see xi_clock.hpp for the wall-vs-mono contract.
-inline int64_t now_us()        { return xi::wall_us(); }
-inline int64_t steady_now_us() { return xi::mono_us(); }
-#endif
-
 inline xi_trigger_id make_trigger_id() {
     // 128-bit identifier from a fast TLS PRNG. Not cryptographically random
     // but vanishingly unlikely to collide for any inspection workload.
@@ -174,18 +166,24 @@ public:
                     xi_pack_handle pack)
     {
         if (pack == XI_PACK_NULL) return;
-        if (ts_us == 0) ts_us = now_us();
+        if (ts_us == 0) ts_us = wall_us();
         xi_trigger_id id = xi_trigger_id_is_null(id_in) ? make_trigger_id() : id_in;
 
         // Liveness stamp (monotonic — NTP/DST safe): a source emitting packs is
         // alive, even if there's no sink. Lets dispatch_stats expose "ms since
         // the last frame" globally + per source, so a monitor/FE can detect a
         // CAMERA THAT STALLED. Stamped on every emit, before the sink check.
+        // B3-burr: ONE mu_ acquisition for the stamp AND the sink copy (they
+        // were two back-to-back lock_guard scopes with only local TriggerEvent
+        // field assignments between them — nothing depended on being unlocked,
+        // and stamp-then-copy order is preserved under the same lock).
+        Sink to_fire;
         {
-            int64_t mono = steady_now_us();
+            int64_t mono = mono_us();
             last_emit_mono_us_.store(mono, std::memory_order_relaxed);
             std::lock_guard<std::mutex> lk(mu_);
             source_last_emit_mono_us_[source] = mono;
+            to_fire = sink_;
         }
 
         TriggerEvent ev;
@@ -193,9 +191,6 @@ public:
         ev.timestamp_us  = ts_us;
         ev.leader_source = source;
         ev.pack          = pack;    // consume the caller's ref
-
-        Sink to_fire;
-        { std::lock_guard<std::mutex> lk(mu_); to_fire = sink_; }
 
         if (to_fire) {
             to_fire(std::move(ev));
@@ -263,7 +258,7 @@ public:
     // emitted yet. The "is the line getting frames at all" signal.
     int64_t last_emit_age_us() const {
         int64_t last = last_emit_mono_us_.load(std::memory_order_relaxed);
-        return last == 0 ? -1 : (steady_now_us() - last);
+        return last == 0 ? -1 : (mono_us() - last);
     }
     // Per-source age snapshot { source -> µs since its last emit }. Lets a monitor
     // spot which of N cameras stalled.
@@ -274,7 +269,7 @@ public:
         // which reads the clock after the atomic load). Sampling before the lock
         // races a concurrent emit_pack that stamps source_last_emit_mono_us_ with
         // a mono > our now, yielding a spurious negative age for that source.
-        int64_t now = steady_now_us();
+        int64_t now = mono_us();
         out.reserve(source_last_emit_mono_us_.size());
         for (auto& [s, t] : source_last_emit_mono_us_) out.emplace_back(s, now - t);
         return out;

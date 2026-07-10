@@ -208,6 +208,8 @@ inline bool PluginManager::register_plugin_folder_locked_(const std::string& fol
                 // provider still holds. The plugin stays registered and valid.
                 return true;
             }
+            // Raw FreeLibrary is fine here (no machine-provider evict needed):
+            // the in_use guard above already returned if one holds this module.
             FreeLibrary(existing->second.handle);   // TODO(linux): dlclose
             existing->second.handle    = nullptr;
             existing->second.c_factory = nullptr;

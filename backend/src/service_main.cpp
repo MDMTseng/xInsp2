@@ -205,6 +205,21 @@ void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err) {
     push_recent_error("rsp", std::move(err), id);
 }
 
+// Error rsp carrying a data payload (compile diagnostics, partial-commit
+// results, recipe warnings). Wave-2 #2: this overload OWNS the recent-errors
+// push — before it existed, handlers hand-built xp::Rsp{ok:false, data_json}
+// and 3 of 6 sites (compile failed / export failed / recompile failed) forgot
+// push_recent_error, so those failures never surfaced in cmd:recent_errors.
+void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err, std::string data_json) {
+    xp::Rsp r;
+    r.id = id;
+    r.ok = false;
+    r.error = err;
+    r.data_json = std::move(data_json);
+    srv.send_text(r.to_json());
+    push_recent_error("rsp", std::move(err), id);
+}
+
 // Send a log {level:error, msg:...} AND record it in the recent-error
 // ring so cmd:recent_errors can surface it. Most error logs go
 // through this; a few legacy sites still build the LogMsg inline —
@@ -421,8 +436,8 @@ int main(int argc, char** argv) {
                 "  --host=ADDR          bind address (default 127.0.0.1; use 0.0.0.0 for remote)\n"
                 "  --auth=SECRET        require Bearer SECRET in handshake\n"
                 "  --plugins-dir=DIR    extra plugin folder (repeatable)\n"
-                "  --watchdog=MS        per-inspect budget: cooperative-cancel, then exit\n"
-                "                       for FE respawn if ignored (default 0 = off)\n"
+                "  --watchdog=MS        per-inspect budget: a wedged frame gets a grace\n"
+                "                       window, then exit for FE respawn (default 0 = off)\n"
                 "  --project=DIR        headless autostart: open this project at boot\n"
                 "  --script=PATH        script to compile for --project (default: project.json's)\n"
                 "  --autostart-fps=N    with --project, start continuous mode at N fps (0 = off)\n"

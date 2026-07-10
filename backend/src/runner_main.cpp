@@ -74,6 +74,8 @@
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_trigger_bus.hpp>
 
+#include "xi_result_class.hpp"   // XI_SYS_* band + outcome_class_for_code + kRunResultSchema (shared with the service)
+
 #ifdef _WIN32
 #  ifndef NOMINMAX
 #    define NOMINMAX
@@ -126,12 +128,6 @@ static int use_exchange_cb(const char* name, const char* cmd,
     } catch (...) { return -1; }
 }
 
-// grab() was the legacy pull model (xi::ImageSource queue), removed — sources
-// now PUSH via emit_record and scripts read current_trigger().
-static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
-    return XI_IMAGE_NULL;
-}
-
 // polaris2 Gate P2 — minimal runner copy of the service's use_pack_process_cb:
 // drive the target's xi.pack@1 pack door for xi::use(...).process(ScriptPack).
 // Same return codes (0 ok / -1 miss / -2 crash / -4 no door / -5 sink target,
@@ -165,38 +161,19 @@ static int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_hand
 struct RunResult { int code = 0; std::string msg; bool set = false; };
 static thread_local RunResult g_run_result;
 
-// Framework reserved codes (mirror of service_main / xi_result.hpp). Anything
-// <= kResultSystemBand is the system-fail band; XI_SYS_* are named markers.
-static constexpr int kResultSystemBand = -990000;
-static constexpr int XI_SYS_CRASHED    = -999002;  // caught inspect crash/throw
-static constexpr int XI_SYS_NO_VERDICT = -999005;  // ran, set no result
+// Framework reserved band + code→class mapping + reserved-band rejection:
+// SHARED with the live backend via xi_result_class.hpp (included above) —
+// the former hand-mirrored copy is gone, so runner and service can't drift.
+// (The runner never emits XI_SYS_DROPPED; sharing the full mapping is harmless.)
 
 static void result_cb(int code, const char* msg) {
-    // Host is the trust boundary: a user code in the reserved system band is
-    // not accepted as a real verdict — record it as NA (0), preserving the
-    // offending code in the message (matches service_main::result_cb).
-    if (code <= kResultSystemBand) {
-        g_run_result.code = 0;
-        g_run_result.msg  = "[invalid result code " + std::to_string(code) +
-                            ", reserved band] ";
-        g_run_result.msg += (msg ? msg : "");
-        g_run_result.set  = true;
-        return;
+    // Host is the trust boundary: reserved-band codes are recorded as NA (0)
+    // with the offending code preserved in the message (shared rejection core).
+    if (!reject_reserved_result_code(code, msg, g_run_result.code, g_run_result.msg)) {
+        g_run_result.code = code;
+        g_run_result.msg.assign(msg ? msg : "");
     }
-    g_run_result.code = code;
-    g_run_result.msg.assign(msg ? msg : "");
-    g_run_result.set  = true;
-}
-
-// Derive the verdict class from the signed code (pure read; mirrors
-// service_main::outcome_class_for_code, minus the "dropped" runner-N/A case).
-static const char* verdict_class_for_code(int code) {
-    if (code == XI_SYS_CRASHED)     return "crashed";
-    if (code == XI_SYS_NO_VERDICT)  return "no_verdict";
-    if (code > 0)                   return "ok";
-    if (code == 0)                  return "na";
-    if (code > kResultSystemBand)   return "ng";   // valid ng band: <0 and > -990000
-    return "na";                                   // other reserved system codes
+    g_run_result.set = true;
 }
 
 // --- process identity (mirror of service_main's run_result envelope) -----
@@ -205,8 +182,8 @@ static const char* verdict_class_for_code(int code) {
 // backend's emit_run_result path, so it must GENERATE its own identity the same
 // way the live backend does. schema/boot_id/inspection_id are formatted
 // byte-for-byte like service_main.cpp (init_process_identity_ + emit_run_result)
-// so a headless report and a live run_result agree.
-static constexpr const char* kRunResultSchema = "xi.run-outcome/1";
+// so a headless report and a live run_result agree. kRunResultSchema comes from
+// the shared xi_result_class.hpp.
 
 // Format a 128-bit value as a 32-char lowercase hex string ("hi" then "lo",
 // each zero-padded to 16). Same encoding as service_main::trigger_id_hex.
@@ -448,11 +425,12 @@ int main(int argc, char** argv) {
     }
     if (script.set_use_callbacks) {
         // THE CUT: process_fn slot is nullptr (the Record process bridge is gone);
-        // the pack door is wired via set_use_pack_callback below. grab_fn is the
-        // legacy stub; both params are retained in the ABI signature.
+        // the pack door is wired via set_use_pack_callback below. grab_fn is
+        // nullptr too (SDK discards it); both params are retained in the ABI
+        // signature.
         script.set_use_callbacks(
             nullptr, (void*)use_exchange_cb,
-            (void*)use_grab_cb, (void*)&host_api);
+            nullptr, (void*)&host_api);
     }
     // polaris2 Gate P2: pack-door chaining (xi::use(name).process(pack)).
     // Optional symbol — older scripts don't export it.
@@ -498,7 +476,7 @@ int main(int argc, char** argv) {
     body += ",\"frames\":[";
 
     int crashed = 0;
-    // Additive per-class verdict tally (see verdict_class_for_code).
+    // Additive per-class verdict tally (see outcome_class_for_code).
     int c_ok = 0, c_ng = 0, c_na = 0, c_no_verdict = 0, c_crashed = 0;
     // Emit one frame object:
     //   {"frame":i,"run_id":i,"inspection_id":"<station>/<boot>/<i>",
@@ -566,7 +544,7 @@ int main(int argc, char** argv) {
         // value-tracking is the `expose` plugin's concern; result()/state live on
         // their own paths.
         int code = g_run_result.set ? g_run_result.code : XI_SYS_NO_VERDICT;
-        const char* cls = verdict_class_for_code(code);
+        const char* cls = outcome_class_for_code(code);
         if      (std::strcmp(cls, "ok") == 0)         ++c_ok;
         else if (std::strcmp(cls, "ng") == 0)         ++c_ng;
         else if (std::strcmp(cls, "no_verdict") == 0) ++c_no_verdict;

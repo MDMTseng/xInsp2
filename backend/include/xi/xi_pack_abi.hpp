@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string_view>
 #include <unordered_map>
 
@@ -76,15 +77,27 @@ public:
         return *r;
     }
 
+    // LOCKING (burr audit K1): mu_ is a shared_mutex so the per-key ABI read
+    // trampolines (10+ pack() resolutions per door call) no longer serialize
+    // parallel dispatch workers on one global mutex. Classification:
+    //   * SHARED  — pure map lookups / read-only scans that touch no slot state:
+    //     builder(), pack(), live_frames(), live_builders(), owner_refs().
+    //     (Node pointers are stable across concurrent insert/erase of OTHER
+    //     handles, and the caller holds a ref on its own handle — see the class
+    //     comment — so a resolved pointer stays valid after the lock drops,
+    //     exactly as before.)
+    //   * UNIQUE  — anything mutating map structure, rc, or the creator tag:
+    //     new_builder(), seal(), abandon(), retain_as(), release_as(), untag(),
+    //     release_all_for(). rc stays a plain int guarded by the unique lock.
     // ---- builder side (produce) --------------------------------------------
     xi_pack_builder new_builder() {
         uint64_t id = next_.fetch_add(1, std::memory_order_relaxed);
-        std::lock_guard<std::mutex> lk(mu_);
+        std::unique_lock<std::shared_mutex> lk(mu_);
         builders_.emplace(id, std::make_unique<PackBuilder>());
         return id;
     }
     PackBuilder* builder(xi_pack_builder b) {
-        std::lock_guard<std::mutex> lk(mu_);
+        std::shared_lock<std::shared_mutex> lk(mu_);
         auto it = builders_.find(b);
         return it == builders_.end() ? nullptr : it->second.get();
     }
@@ -93,7 +106,7 @@ public:
     xi_pack_handle seal(xi_pack_builder b) {
         std::unique_ptr<PackBuilder> fb;
         {
-            std::lock_guard<std::mutex> lk(mu_);
+            std::unique_lock<std::shared_mutex> lk(mu_);
             auto it = builders_.find(b);
             if (it == builders_.end()) return XI_PACK_NULL;
             fb = std::move(it->second);
@@ -109,18 +122,18 @@ public:
         // handle. Sealed with no owner context -> no creator tag, never swept.
         s.creator          = ImagePool::current_owner();
         s.creator_ref_live = (s.creator != 0);
-        std::lock_guard<std::mutex> lk(mu_);
+        std::unique_lock<std::shared_mutex> lk(mu_);
         frames_.emplace(id, std::move(s));
         return id;
     }
     void abandon(xi_pack_builder b) {
-        std::lock_guard<std::mutex> lk(mu_);
+        std::unique_lock<std::shared_mutex> lk(mu_);
         builders_.erase(b);   // ~PackBuilder releases any minted handles
     }
 
     // ---- pack side (consume) ----------------------------------------------
     Pack* pack(xi_pack_handle f) {
-        std::lock_guard<std::mutex> lk(mu_);
+        std::shared_lock<std::shared_mutex> lk(mu_);
         auto it = frames_.find(f);
         return it == frames_.end() ? nullptr : &it->second.pack;
     }
@@ -131,7 +144,7 @@ public:
     void retain(xi_pack_handle f) { retain_as(f, 0); }
     void retain_untagged(xi_pack_handle f) { retain_as(f, 0); }
     void retain_as(xi_pack_handle f, ImagePoolOwnerId /*owner*/) {
-        std::lock_guard<std::mutex> lk(mu_);
+        std::unique_lock<std::shared_mutex> lk(mu_);   // rc mutation ⇒ unique
         auto it = frames_.find(f);
         if (it == frames_.end()) return;
         ++it->second.rc;
@@ -140,7 +153,7 @@ public:
     void release_as(xi_pack_handle f, ImagePoolOwnerId owner) {
         Pack dropped;   // destroy OUTSIDE the lock (releases pool handles)
         {
-            std::lock_guard<std::mutex> lk(mu_);
+            std::unique_lock<std::shared_mutex> lk(mu_);   // rc + erase ⇒ unique
             auto it = frames_.find(f);
             if (it == frames_.end()) return;
             Slot& s = it->second;
@@ -158,7 +171,7 @@ public:
     // what was the creator's seal ref, so clear the creator tag WITHOUT touching
     // rc — the creator's teardown sweep must not reclaim a ref it handed off.
     void untag(xi_pack_handle f, ImagePoolOwnerId owner) {
-        std::lock_guard<std::mutex> lk(mu_);
+        std::unique_lock<std::shared_mutex> lk(mu_);   // creator-tag write ⇒ unique
         auto it = frames_.find(f);
         if (it == frames_.end()) return;
         Slot& s = it->second;
@@ -179,7 +192,7 @@ public:
         std::vector<Pack> dropped;   // destroyed OUTSIDE the lock
         int swept = 0;
         {
-            std::lock_guard<std::mutex> lk(mu_);
+            std::unique_lock<std::shared_mutex> lk(mu_);   // rc/tag/erase ⇒ unique
             for (auto it = frames_.begin(); it != frames_.end();) {
                 Slot& s = it->second;
                 if (s.creator == owner && s.creator_ref_live) {
@@ -199,12 +212,12 @@ public:
 
     // Test/diagnostic: how many live packs + builders the table holds. Used by
     // the pack-door tests as a leak oracle alongside ImagePool::cumulative().
-    size_t live_frames()   { std::lock_guard<std::mutex> lk(mu_); return frames_.size(); }
-    size_t live_builders() { std::lock_guard<std::mutex> lk(mu_); return builders_.size(); }
+    size_t live_frames()   { std::shared_lock<std::shared_mutex> lk(mu_); return frames_.size(); }
+    size_t live_builders() { std::shared_lock<std::shared_mutex> lk(mu_); return builders_.size(); }
     // Diagnostic: live packs whose creator seal ref is still charged to `owner`
     // (the amount a sweep would reclaim right now — at most 1 per slot).
     int owner_refs(ImagePoolOwnerId owner) {
-        std::lock_guard<std::mutex> lk(mu_);
+        std::shared_lock<std::shared_mutex> lk(mu_);
         int n = 0;
         for (auto& [id, s] : frames_)
             if (s.creator == owner && s.creator_ref_live) ++n;
@@ -219,7 +232,7 @@ private:
         bool creator_ref_live = false;  // creator's seal ref still outstanding
     };
 
-    std::mutex mu_;
+    std::shared_mutex mu_;   // K1: readers shared, mutators unique — see class comment
     std::unordered_map<uint64_t, std::unique_ptr<PackBuilder>> builders_;
     std::unordered_map<uint64_t, Slot> frames_;
     std::atomic<uint64_t> next_{1};

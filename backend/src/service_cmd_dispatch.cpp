@@ -15,13 +15,9 @@
 
 #include "service_internal.hpp"
 
-// Item-14 caught-fault policy helpers, DEFINED in service_sinks.cpp (given
-// external linkage there specifically so cmd_exchange_instance_ below can share
-// the exact same fault boundary as the script-side exchange/pack-door surfaces
-// — use_exchange_cb / use_pack_process_cb). Declared here rather than in
-// service_internal.hpp while these two TUs are the only sharers.
-void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* adapter);
-void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter);
+// Item-14 caught-fault policy helpers are DEFINED in service_sinks.cpp and
+// declared in service_internal.hpp (guarded_plugin_call — the shared plugin-
+// entry fault boundary — needs them from every cmd TU now).
 
 // ---- dispatch-control ------------------------------------------------------
 void cmd_set_timer_fps_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
@@ -241,10 +237,10 @@ void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         spawn_group_pool_(&srv, interval_ms);
 
         // The watchdog now tracks a per-inspect slot, so it protects every
-        // worker under N>1 (no longer bypassed). On a hard trip the backend
-        // exits for the FE to respawn; under N>1 the cooperative-cancel phase
-        // is global (aborts all in-flight frames that round). See
-        // run_one_inspection() + docs/guides/write-a-script.md.
+        // worker under N>1 (no longer bypassed). An overrunning inspect gets a
+        // grace window; if the same frame is still wedged after it, the backend
+        // exits for the FE to respawn. See the watchdog monitor thread in
+        // service_main.cpp + docs/guides/write-a-script.md.
 
         int n_threads = std::max(1, g_eng.plugin_mgr.project().dispatch_threads);
         // Health contract: dispatch is live → `running` (recompute may immediately
@@ -300,54 +296,46 @@ void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd
         }
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
-            // Item-14 fault surface — same gates as the script-side exchange
-            // boundary (use_exchange_cb, mirroring use_pack_process_cb in
-            // service_sinks.cpp): quarantined → refuse WITHOUT entering plugin
-            // code; a pending (on_fault=reinit) rebuild is applied first; and a
-            // caught crash below feeds note_instance_crash_ +
-            // apply_on_fault_policy_ so an exchange()-only crash-loop trips
-            // health/reinit/refuse like a process() one.
+            // Item-14 fault surface — the SAME guarded_plugin_call boundary as
+            // the script-side exchange (use_exchange_cb) / pack-door surfaces:
+            // quarantined → refuse WITHOUT entering plugin code (data plane ⇒
+            // gated); a pending (on_fault=reinit) rebuild is applied first; a
+            // caught crash feeds note_instance_crash_ + apply_on_fault_policy_
+            // so an exchange()-only crash-loop trips health/reinit/refuse.
             auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
-            if (adapter) {
-                if (adapter->quarantined()) {
-                    send_rsp_err(srv, id, "instance quarantined (on_fault=refuse): " + *iname);
-                    return;
-                }
-                if (adapter->reinit_pending()) {
-                    apply_pending_reinit_(iname->c_str(), adapter);
-                    if (adapter->quarantined()) {
-                        send_rsp_err(srv, id, "instance quarantined (on_fault=refuse): " + *iname);
-                        return;
-                    }
-                }
-            }
-            try {
-                std::string result = inst->exchange(cmd_str);
+            std::string result;
+            auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
+                                         "exchange()", /*gate_quarantined=*/true, [&] {
+                result = inst->exchange(cmd_str);
+            });
+            switch (r.kind) {
+            case PluginCallResult::Kind::Ok:
                 send_rsp_ok(srv, id, result);
-            } catch (const seh_exception& e) {
+                break;
+            case PluginCallResult::Kind::Quarantined:
+                send_rsp_err(srv, id, "instance quarantined (on_fault=refuse): " + *iname);
+                break;
+            case PluginCallResult::Kind::Crashed: {
                 char msg[256];
                 std::snprintf(msg, sizeof(msg), "exchange '%s' crashed: 0x%08X (%s)",
-                             iname->c_str(), e.code, e.what());
+                             iname->c_str(), r.seh_code, r.what.c_str());
                 send_rsp_err(srv, id, msg);
-                char why[96]; std::snprintf(why, sizeof(why), "exchange() crashed: 0x%08X", e.code);
-                note_instance_crash_(iname->c_str(), why);
-                if (adapter) apply_on_fault_policy_(iname->c_str(), adapter);
-                xi::recover_seh_stack_or_die(e.code, "cmd exchange_instance");
-            } catch (const std::exception& e) {
-                send_rsp_err(srv, id, std::string("exchange error: ") + e.what());
-                note_instance_crash_(iname->c_str(), "exchange() threw an exception");
-                if (adapter) apply_on_fault_policy_(iname->c_str(), adapter);
+                break;
+            }
+            case PluginCallResult::Kind::Threw:
+                send_rsp_err(srv, id, "exchange error: " + r.what);
+                break;
             }
         } else {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             if (g_eng.script.ok() && g_eng.script.exchange_instance) {
                 try {
                     std::vector<char> rsp(256 * 1024);
-                    int n = g_eng.script.exchange_instance(iname->c_str(), cmd_str.c_str(),
-                                                       rsp.data(), (int)rsp.size());
-                    if (n < 0) { rsp.resize((size_t)(-(int64_t)n) + 1024);
-                                 n = g_eng.script.exchange_instance(iname->c_str(), cmd_str.c_str(),
-                                                                rsp.data(), (int)rsp.size()); }
+                    // -1 = instance not found (terminal); other negatives = grow+retry.
+                    int n = script_grow_retry(rsp, /*minus_one_is_terminal=*/true,
+                        [&](char* b, int len) {
+                            return g_eng.script.exchange_instance(iname->c_str(), cmd_str.c_str(), b, len);
+                        });
                     if (n >= 0) send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "exchange_instance failed");
                 } catch (const seh_exception& e) {
@@ -384,16 +372,44 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
+            // Wave-2 #1: this site had DRIFTED to a bare `catch (const
+            // std::exception&)` — seh_exception derives from std::exception, so
+            // an SEH fault WAS caught here but recover_seh_stack_or_die never
+            // ran (a plugin STACK_OVERFLOW left this WS thread's stack guard
+            // page consumed → the next deep call corrupted memory instead of
+            // faulting), and there was no quarantine gate / crash bookkeeping.
+            // guarded_plugin_call restores the full ritual. prepare() is
+            // quarantine-GATED: unlike set_def/commit its success path does not
+            // set InstState::Active, so it can never lift a quarantine — refusing
+            // it costs no re-enable path.
+            auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
             bool ok = false;
-            try { ok = inst->prepare(def_str, folder ? *folder : std::string()); }
-            catch (const std::exception& e) {
-                set_inst_state(*iname, InstState::Faulted, e.what());
-                send_rsp_err(srv, id, std::string("prepare error: ") + e.what());
-                return;
+            auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
+                                         "prepare()", /*gate_quarantined=*/true, [&] {
+                ok = inst->prepare(def_str, folder ? *folder : std::string());
+            });
+            switch (r.kind) {
+            case PluginCallResult::Kind::Ok:
+                if (ok) send_rsp_ok(srv, id);
+                else { set_inst_state(*iname, InstState::Faulted, "prepare returned false");
+                       send_rsp_err(srv, id, "prepare returned false"); }
+                break;
+            case PluginCallResult::Kind::Quarantined:
+                send_rsp_err(srv, id, "instance quarantined (on_fault=refuse): " + *iname);
+                break;
+            case PluginCallResult::Kind::Crashed: {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg), "prepare '%s' crashed: 0x%08X (%s)",
+                             iname->c_str(), r.seh_code, r.what.c_str());
+                set_inst_state(*iname, InstState::Faulted, msg);
+                send_rsp_err(srv, id, msg);
+                break;
             }
-            if (ok) send_rsp_ok(srv, id);
-            else { set_inst_state(*iname, InstState::Faulted, "prepare returned false");
-                   send_rsp_err(srv, id, "prepare returned false"); }
+            case PluginCallResult::Kind::Threw:
+                set_inst_state(*iname, InstState::Faulted, r.what);
+                send_rsp_err(srv, id, "prepare error: " + r.what);
+                break;
+            }
         } else {
             // Script-side: exchange convention {command:"prepare", def, folder}.
             std::string cmd = "{\"command\":\"prepare\",\"def\":" + def_str;
@@ -405,11 +421,11 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 // path above (and exchange_instance) so a throw/fault isn't fatal.
                 try {
                     std::vector<char> buf(64 * 1024);
-                    int n = g_eng.script.exchange_instance(iname->c_str(), cmd.c_str(),
-                                                       buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                                 n = g_eng.script.exchange_instance(iname->c_str(), cmd.c_str(),
-                                                                buf.data(), (int)buf.size()); }
+                    // -1 = instance not found (terminal); other negatives = grow+retry.
+                    int n = script_grow_retry(buf, /*minus_one_is_terminal=*/true,
+                        [&](char* b, int len) {
+                            return g_eng.script.exchange_instance(iname->c_str(), cmd.c_str(), b, len);
+                        });
                     if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "prepare failed");
                 } catch (const seh_exception& e) {
@@ -492,9 +508,26 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
                 // First-class commit() slot (ABI v7): swap staging → live. The
                 // result echoes the now-live def. A plugin with no double-slot
                 // gets the InstanceBase no-op (it already swapped in set_def).
-                try { inst->commit(); r = inst->get_def(); ok = true; }
-                catch (const std::exception& e) {
-                    r = std::string("{\"error\":\"") + e.what() + "\"}";
+                // Wave-2 #1: this site had the same drifted bare std::exception
+                // catch as cmd_prepare_instance_ (no stack-guard recovery after
+                // an SEH fault, no crash bookkeeping) — inside the drain
+                // barrier. guarded_plugin_call restores the full ritual.
+                // NOT quarantine-gated: a successful commit runs
+                // set_inst_state(Active) below, which is the DOCUMENTED
+                // operator re-enable for an on_fault=refuse quarantine (the
+                // quarantine error message itself names commit_group) — gating
+                // it would make quarantine unrecoverable via its own remedy.
+                auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+                auto gr = guarded_plugin_call(targets[i].c_str(), adapter, inst->plugin_name(),
+                                              "commit()", /*gate_quarantined=*/false, [&] {
+                    inst->commit(); r = inst->get_def(); ok = true;
+                });
+                if (gr.kind == PluginCallResult::Kind::Crashed) {
+                    char em[256];
+                    std::snprintf(em, sizeof(em), "{\"error\":\"commit crashed: 0x%08X\"}", gr.seh_code);
+                    r = em; ok = false;
+                } else if (gr.kind == PluginCallResult::Kind::Threw) {
+                    r = "{\"error\":\"" + gr.what + "\"}"; ok = false;
                 }
             } else {
                 // Script-side instances keep the exchange convention.
@@ -506,11 +539,11 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
                     try {
                         const char* commit_cmd = R"({"command":"commit"})";
                         std::vector<char> buf(64 * 1024);
-                        int n = g_eng.script.exchange_instance(targets[i].c_str(), commit_cmd,
-                                                           buf.data(), (int)buf.size());
-                        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                                     n = g_eng.script.exchange_instance(targets[i].c_str(), commit_cmd,
-                                                                    buf.data(), (int)buf.size()); }
+                        // -1 = instance not found (terminal); other negatives = grow+retry.
+                        int n = script_grow_retry(buf, /*minus_one_is_terminal=*/true,
+                            [&](char* b, int len) {
+                                return g_eng.script.exchange_instance(targets[i].c_str(), commit_cmd, b, len);
+                            });
                         if (n >= 0) { r.assign(buf.data(), (size_t)n); ok = true; }
                     } catch (const seh_exception& e) {
                         char em[256];
@@ -553,11 +586,9 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             guard.skip_resume();
             set_status_internal("@commit",
                 "config fault: partial commit — dispatch stopped, operator intervention required");
-            xp::Rsp r; r.id = id; r.ok = false;
-            r.error = "one or more commits failed — partial commit, dispatch stopped (config fault latched)";
-            r.data_json = data;
-            srv.send_text(r.to_json());
-            push_recent_error("rsp", r.error, id);
+            send_rsp_err(srv, id,
+                "one or more commits failed — partial commit, dispatch stopped (config fault latched)",
+                data);
         } else {
             // All committed — clear any prior latched commit fault and let `guard`
             // resume dispatch at the prior fps at end-of-scope (config switch must not

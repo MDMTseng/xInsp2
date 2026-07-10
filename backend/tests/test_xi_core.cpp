@@ -220,7 +220,10 @@ class DummyPlugin : public xi::InstanceBase {
 public:
     explicit DummyPlugin(std::string n) : name_(std::move(n)) {}
     const std::string& name() const override { return name_; }
-    std::string plugin_name() const override { return "DummyPlugin"; }
+    const std::string& plugin_name() const override {
+        static const std::string kName = "DummyPlugin";
+        return kName;
+    }
     int counter = 0;
 private:
     std::string name_;

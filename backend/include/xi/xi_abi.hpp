@@ -33,6 +33,7 @@
 
 #include "xi_abi.h"
 #include "xi_image.hpp"
+#include "xi_json_escape.hpp"    // the ONE JSON string-escape primitive (std-only leaf)
 #include "xi_pack_contract.hpp"  // reserved $-keys + fault/provenance helpers (U1, doc 15)
 
 #include <cstdio>
@@ -153,12 +154,12 @@ private:
 // --- xi.pack@1 SDK sugar (polaris2 wave-2) --------------------------------
 //
 // Thin C++ wrappers over the host xi_pack_v1 C accessors (xi_abi.h). A pack
-// crosses the ABI as an OPAQUE HANDLE, so — unlike the in-process TypedPack
-// (xi_pack.hpp) — reads here resolve by key STRING through the host, not by a
-// compile-time offset slot. The PackSchema/TypedPack speed is a same-DLL
-// property; across the door a plugin reads/writes with its schema's key
-// CONSTANTS (still no string literals at call sites, still drift-proof), which
-// is what PackIn/PackOut give it.
+// crosses the ABI as an OPAQUE HANDLE, so — unlike the in-process Pack
+// container (xi_pack.hpp) — reads here resolve by key STRING through the
+// host, not by direct container access. Same-DLL container speed is a
+// same-DLL property; across the door a plugin reads/writes with its schema's
+// key CONSTANTS (still no string literals at call sites, still drift-proof),
+// which is what PackIn/PackOut give it.
 
 // The reserved pack keys ($fault/$fault_key/$fault_detail/$src/$prov) and the
 // shared fault/provenance helpers now live in xi_pack_contract.hpp (U1,
@@ -571,27 +572,8 @@ public:
     // P2-4: Surface unknown commands instead of silently dropping them.
     static std::string exchange_unknown_command(const std::string& cmd_name) {
         std::string out = "{\"error\":\"unknown_command\",\"command\":";
-        // Inline JSON escape — same minimal handling as everywhere else
-        // in xi_abi.hpp; cmd_name is plugin-controlled and short.
-        out.push_back('"');
-        for (char c : cmd_name) {
-            switch (c) {
-                case '"':  out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n";  break;
-                case '\r': out += "\\r";  break;
-                case '\t': out += "\\t";  break;
-                default:
-                    if ((unsigned char)c < 0x20) {
-                        char b[8];
-                        std::snprintf(b, sizeof(b), "\\u%04x", (unsigned)(unsigned char)c);
-                        out += b;
-                    } else {
-                        out.push_back(c);
-                    }
-            }
-        }
-        out += "\"}";
+        xi::json_escape_into(out, cmd_name);   // the ONE escape primitive
+        out += "}";
         return out;
     }
     virtual std::string get_def() const { return "{}"; }

@@ -1,27 +1,16 @@
 #pragma once
 //
-// xi_io.hpp — host-mediated file I/O + per-run context for inspection
-// scripts.
+// xi_io.hpp — per-run context accessors for inspection scripts.
 //
-// Scripts that need to read a frame from disk (typical AI-driven
-// workflow: agent points the backend at a PNG and asks for a result)
-// use:
+// Two accessors, both riding the A4 explicit per-run context:
+//   - `xi::current_frame_path()` — the optional cmd:run frame_path for
+//     THIS run.
+//   - `xi::run_id()` — the arrival/run id the host assigned this
+//     inspection at dequeue.
 //
-//   #include <xi/xi.hpp>      // pulls in xi_io.hpp
-//
-//   void xi_inspect_entry(int) {
-//       auto frame = xi::imread(xi::current_frame_path());
-//       VAR(input, frame);
-//       ...
-//   }
-//
-// Both pieces are necessary:
-//   - `current_frame_path()` reads the value the host sets per
-//     `cmd:run` via the `frame_path` arg.
-//   - `imread()` decodes PNG / JPEG / BMP / TGA / GIF / PSD / HDR / PIC
-//     into an xi::Image. Goes through host_api so the host's
-//     stb_image is the single decoder; the script DLL doesn't have to
-//     vendor / link it.
+// (Image decode is no longer here: xi::imread was deleted at the v12
+// cut — decode is the xi.image.decode capability or a source plugin's
+// job; see the note at the bottom of this file.)
 //
 // These accessors are script-only — they reach into globals defined
 // by xi_script_support.hpp (force-included into every script DLL).
@@ -29,11 +18,6 @@
 // don't bite plugin / backend translation units.
 //
 
-#include "xi_abi.h"
-#include "xi_image.hpp"
-
-#include <cstdio>
-#include <cstring>
 #include <string>
 
 // A4 explicit per-run context read thunks (host-side run_ctx_run_id_cb /
@@ -45,7 +29,6 @@
 // sentinel (portable degradation). See xi_script_support.hpp for the storage.
 extern void* g_run_ctx_run_id_fn_;      // long long(*)()
 extern void* g_run_ctx_frame_path_fn_;  // const char*(*)()
-extern void* g_use_host_api_;       // xi_script_support.hpp (xi_host_api*)
 
 namespace xi {
 

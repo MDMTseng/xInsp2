@@ -34,7 +34,8 @@
 #include <mutex>
 #include <string>
 
-#include "xi_clock.hpp"   // xi::wall_ms
+#include "xi_clock.hpp"        // xi::wall_ms
+#include "xi_json_escape.hpp"  // the ONE JSON string-escape primitive (std-only leaf)
 
 namespace xi {
 
@@ -83,30 +84,11 @@ inline const char* comp_health_name(CompHealth h) {
     return "ok";
 }
 
-// Append `s` to `out` as a JSON string literal (quoted + escaped). Kept local so
-// the header carries no dependency on xi_protocol's escaper (the unit test links
-// only this header + yyjson).
+// Append `s` to `out` as a JSON string literal (quoted + escaped). One-line
+// forwarder to the ONE escape primitive (xi_json_escape.hpp — a std-only leaf,
+// so the unit test still links only leaf headers + yyjson).
 inline void health_json_str(std::string& out, const std::string& s) {
-    out += '"';
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if ((unsigned char)c < 0x20) {
-                    static const char* hex = "0123456789abcdef";
-                    out += "\\u00";
-                    out += hex[((unsigned char)c >> 4) & 0xF];
-                    out += hex[(unsigned char)c & 0xF];
-                } else {
-                    out += c;
-                }
-        }
-    }
-    out += '"';
+    json_escape_into(out, s);
 }
 
 class HealthRegistry {
@@ -215,11 +197,6 @@ public:
         emit_(lk, &c);
     }
 
-    // Back-compat convenience: a runtime crash marks the instance `degraded`.
-    void mark_instance_degraded(const std::string& name, const std::string& reason) {
-        mark_instance_fault(name, CompHealth::Degraded, reason);
-    }
-
     // Clear an instance's runtime-fault overlay (re-activated / removed / project
     // closed). No-op (no event) if it wasn't degraded. Re-derives running/degraded
     // and emits a state-level event if the overlay actually changed.
@@ -250,13 +227,6 @@ public:
         health = it->second.health; reason = it->second.reason;
         since_ms = it->second.since_ms;
         return true;
-    }
-
-    // Back-compat: is there ANY runtime-fault overlay for `name`? (reason/since
-    // out; health folded away — callers that need it use instance_fault.)
-    bool instance_degraded(const std::string& name, std::string& reason,
-                           int64_t& since_ms) const {
-        CompHealth h; return instance_fault(name, h, reason, since_ms);
     }
 
     // --- snapshot helpers ----------------------------------------------------

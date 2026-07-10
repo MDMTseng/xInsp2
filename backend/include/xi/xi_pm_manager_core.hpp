@@ -143,7 +143,11 @@ public:
     bool plugin_location(const std::string& name, std::string& folder, std::string& dll);
 
     // ---- project management + working copy (xi_pm_project.hpp) ----
-    bool create_project(const std::string& folder, const std::string& name);
+    // DESTRUCTIVE: clears project_.instances + their registry entries (adapter
+    // dtors run) — the same teardown surface as close_project, so it takes the
+    // same proof-of-quiesce token.
+    bool create_project(const QuiesceToken& quiesced,
+                        const std::string& folder, const std::string& name);
     // DESTRUCTIVE: destroys every instance adapter + FreeLibrary's the
     // project's plugin DLLs (P0-AB-3).
     void close_project(const QuiesceToken& quiesced);
@@ -240,8 +244,12 @@ public:
     // (the analogue of an operator re-committing a project instance's config to
     // clear a quarantine). Evicts the current machine adapter for `plugin_name`
     // and re-autoloads it. Returns true if a provider is live afterwards.
+    // DESTRUCTIVE: evicts a live "@auto:" adapter (dtor + cap/owner sweeps) that
+    // dispatch workers could be mid-call into — hence the QuiesceToken (same
+    // convention as every other destructive method above).
     // (definition in xi_pm_load.hpp)
-    bool reload_machine_provider(const std::string& plugin_name);
+    bool reload_machine_provider(const QuiesceToken& quiesced,
+                                 const std::string& plugin_name);
     // Test/inspection: names of the plugins currently machine-provided.
     std::vector<std::string> machine_provider_plugins();
 
@@ -388,6 +396,18 @@ private:
     // instance of that plugin runs its factory, so the project instance registers
     // the slot cleanly (project precedence, no double-register).
     void evict_machine_provider_locked_(const std::string& plugin_name);
+    // THE one spelling of "unload this plugin's module": evict the machine
+    // provider, THEN FreeLibrary + null handle/factory. Root cause (RT5/N1
+    // family): a FreeLibrary without the evict leaves the "@auto:" provider's
+    // InstanceRegistry/CapRegistry handlers pointing into the unmapped DLL;
+    // sites kept re-spelling the pair (and one forgot the evict entirely).
+    // (defined in xi_pm_load.hpp)
+    void unload_module_locked_(const std::string& plugin_name);
+    // Targeted Leg-B reinstate: bring the machine autoload provider for `key`
+    // back up on pi's (re)loaded module. Same eligibility gates as the global
+    // reconciler but for THIS plugin only. (defined in xi_pm_load.hpp)
+    bool reinstate_machine_provider_locked_(PluginInfo& pi, const std::string& key,
+                                            const char* lane);
     // True if some project instance currently uses `plugin_name`.
     bool project_provides_plugin_locked_(const std::string& plugin_name) const;
 

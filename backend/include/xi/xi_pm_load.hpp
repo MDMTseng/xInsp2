@@ -85,6 +85,61 @@ inline void PluginManager::evict_machine_provider_locked_(const std::string& plu
     machine_instances_.erase(it);   // shared_ptr drop -> ~CAbiInstanceAdapter (cap sweep now a no-op)
 }
 
+// THE one spelling of "unload this plugin's module". Root cause (RT5/N1
+// crash family — handlers into an unmapped DLL): every FreeLibrary of a
+// plugin DLL must be PRECEDED by evict_machine_provider_locked_, or a machine
+// autoload provider backed by that module keeps its InstanceRegistry entry +
+// CapRegistry registrations ACTIVE with handlers pointing into freed code.
+// The evict+FreeLibrary pair used to be re-spelled at every teardown site —
+// and open_project's previous-project loop forgot the evict (the third evict
+// site, project-over-project reopen). Structure over ritual: unload through
+// this primitive only. mu_ MUST be held. No-op for an unknown/unloaded plugin.
+// (A raw FreeLibrary is legitimate ONLY for a just-loaded module that failed
+// its load gates before any provider could register against it.)
+inline void PluginManager::unload_module_locked_(const std::string& plugin_name) {
+    evict_machine_provider_locked_(plugin_name);   // BEFORE the unmap, always
+    auto it = plugins_.find(plugin_name);
+    if (it == plugins_.end()) return;
+    if (it->second.handle) {
+        FreeLibrary(it->second.handle);   // TODO(linux): dlclose
+        it->second.handle = nullptr;
+        it->second.c_factory = nullptr;
+    }
+}
+
+// Leg-B reinstate, targeted at ONE plugin: bring the machine autoload provider
+// for `key` back up on pi's freshly-(re)loaded module. Same eligibility gates
+// + instantiation as autoload_machine_providers_locked_ (autoload enabled,
+// plugin autoload-eligible, project precedence, synthetic "@auto:" name,
+// plugin-default on_fault) — but deliberately NOT the global reconciler, which
+// would LoadLibrary OTHER still-detached plugins mid-rebuild (Phase C reloads
+// one plugin at a time), making their own reattach false-positive the
+// stale-module check. Was byte-cloned at the three reload lanes (reattach /
+// compile drop-prior / recompile) — one primitive now. `lane` labels the log
+// line. Returns true if a provider is live afterwards. mu_ MUST be held.
+inline bool PluginManager::reinstate_machine_provider_locked_(PluginInfo& pi,
+        const std::string& key, const char* lane) {
+    if (!autoload_enabled_ || !pi.autoload
+            || machine_instances_.count(key)
+            || project_provides_plugin_locked_(key))
+        return machine_instances_.count(key) > 0;
+    const std::string minst_name = "@auto:" + key;
+    auto minst = make_adapter_guarded_(pi, key, minst_name,
+                                       /*max_concurrency=*/0, pi.default_on_fault);
+    if (!minst) {
+        std::fprintf(stderr, "[xinsp2] %s: factory failed re-establishing "
+                     "machine lib provider '%s' — capability lost until next "
+                     "autoload\n", lane, key.c_str());
+        return false;
+    }
+    InstanceRegistry::instance().add(minst);
+    machine_instances_[key] = minst;
+    std::fprintf(stderr, "[xinsp2] %s: machine lib provider '%s' back up "
+                 "on reloaded DLL (owner=%llu)\n", lane, key.c_str(),
+                 (unsigned long long)minst->owner_id());
+    return true;
+}
+
 inline int PluginManager::autoload_machine_providers_locked_() {
     if (!autoload_enabled_) return 0;   // deployment opt-in gate (V3)
     int created = 0;
@@ -125,7 +180,8 @@ inline int PluginManager::autoload_machine_providers() {
     return autoload_machine_providers_locked_();
 }
 
-inline bool PluginManager::reload_machine_provider(const std::string& plugin_name) {
+inline bool PluginManager::reload_machine_provider(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                                   const std::string& plugin_name) {
     std::lock_guard<std::mutex> lk(mu_);
     // Only meaningful for an autoload plugin with no project instance holding the
     // slot; if a project instance provides it, that one is authoritative.
@@ -173,23 +229,16 @@ inline std::vector<PluginManager::PendingInstance> PluginManager::detach_plugin_
     // CapRegistry registrations ACTIVE with handlers pointing into the UNMAPPED
     // module, so the FIRST capability call after the rebuild (even a host-
     // dispatch-thread call, e.g. expose's per-frame xi.jpeg.encode) jumped into
-    // freed code — a deterministic crash. Evict it NOW, before FreeLibrary, via
-    // the same helper create_instance / project-load use: it sweeps this
-    // owner's CapRegistry names SYNCHRONOUSLY (the N1 fix), so no cap entry can
-    // outlive the module. reattach_plugin_from_dll_locked_ re-runs the autoload
-    // reconciler once a module is mapped again, so the provider comes back on
-    // the NEW code (evict-and-reattach; worst case on a failed reload it stays
-    // evicted — a lost capability, fail-soft, never a dangling handler). This
-    // closes the rebuild-vs-machine-provider Leg B crash.
-    evict_machine_provider_locked_(plugin_name);
+    // freed code — a deterministic crash. unload_module_locked_ evicts it NOW,
+    // before FreeLibrary (its cap-name sweep is SYNCHRONOUS — the N1 fix), so
+    // no cap entry can outlive the module. reattach_plugin_from_dll_locked_
+    // reinstates the provider once a module is mapped again (evict-and-
+    // reattach; worst case on a failed reload it stays evicted — a lost
+    // capability, fail-soft, never a dangling handler).
     auto pi_it = plugins_.find(plugin_name);
     HMODULE base = (pi_it != plugins_.end()) ? pi_it->second.handle : nullptr;
     if (old_base_out) *old_base_out = base;
-    if (pi_it != plugins_.end() && pi_it->second.handle) {
-        FreeLibrary(pi_it->second.handle);
-        pi_it->second.handle = nullptr;
-        pi_it->second.c_factory = nullptr;
-    }
+    unload_module_locked_(plugin_name);
     return pending;
 }
 
@@ -246,7 +295,7 @@ inline bool PluginManager::reattach_plugin_from_dll_locked_(const std::string& p
 
     std::string aerr;
     if (!plugin_abi_compatible(pi.handle, plugin_name, pi.json_fallback, &aerr)) {
-        FreeLibrary(pi.handle);
+        FreeLibrary(pi.handle);   // raw is fine: just-loaded module failed its load gate — no provider ever registered against it (evict already ran in detach)
         pi.handle = nullptr;
         if (err) *err = aerr + " — instances for this plugin are gone; "
                                "reopen the project to recover";
@@ -255,7 +304,7 @@ inline bool PluginManager::reattach_plugin_from_dll_locked_(const std::string& p
     // LV2-style capability handshake on the rebuilt DLL (the manifest was
     // re-read above, so a newly-declared required interface re-gates here too).
     if (!plugin_caps_compatible(pi, &default_host_api(), plugin_name, &aerr)) {
-        FreeLibrary(pi.handle);
+        FreeLibrary(pi.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
         pi.handle = nullptr;
         if (err) *err = aerr + " — instances for this plugin are gone; "
                                "reopen the project to recover";
@@ -280,34 +329,13 @@ inline bool PluginManager::reattach_plugin_from_dll_locked_(const std::string& p
     // Leg B counterpart of the evict in detach_plugin_instances_locked_: the
     // machine autoload provider (if this plugin had one) was torn down there
     // BEFORE FreeLibrary; now that a module is mapped again, reinstate it so
-    // the "@auto:" adapter re-registers its capabilities on the reloaded code.
-    // Same eligibility gates + instantiation as autoload_machine_providers_
-    // locked_ (autoload enabled, plugin autoload-eligible, project precedence,
-    // synthetic "@auto:" name, plugin-default on_fault) — but targeted at THIS
-    // plugin only: the global reconciler would LoadLibrary OTHER still-detached
-    // plugins mid-rebuild (Phase C reloads one plugin at a time), making their
-    // own reattach false-positive the stale_module check below. Deliberately
-    // placed BEFORE that check: a stale module is still MAPPED, so (exactly
-    // like the project instances above) the provider re-attaches against
-    // old-but-live code rather than dangling or silently vanishing.
-    if (autoload_enabled_ && pi.autoload
-            && !machine_instances_.count(plugin_name)
-            && !project_provides_plugin_locked_(plugin_name)) {
-        const std::string minst_name = "@auto:" + plugin_name;
-        auto minst = make_adapter_guarded_(pi, plugin_name, minst_name,
-                                           /*max_concurrency=*/0, pi.default_on_fault);
-        if (minst) {
-            InstanceRegistry::instance().add(minst);
-            machine_instances_[plugin_name] = minst;
-            std::fprintf(stderr, "[xinsp2] reload: machine lib provider '%s' back up "
-                         "on rebuilt DLL (owner=%llu)\n", plugin_name.c_str(),
-                         (unsigned long long)minst->owner_id());
-        } else {
-            std::fprintf(stderr, "[xinsp2] reload: factory failed re-establishing "
-                         "machine lib provider '%s' — capability lost until next "
-                         "autoload\n", plugin_name.c_str());
-        }
-    }
+    // the "@auto:" adapter re-registers its capabilities on the reloaded code
+    // (see reinstate_machine_provider_locked_ for the targeted-vs-global
+    // rationale). Deliberately placed BEFORE the stale_module check below: a
+    // stale module is still MAPPED, so (exactly like the project instances
+    // above) the provider re-attaches against old-but-live code rather than
+    // dangling or silently vanishing.
+    reinstate_machine_provider_locked_(pi, plugin_name, "reload");
     // #18: stamp the change-gate ONLY on genuine success — AFTER the
     // stale_module check. If the old module is still pinned (NEW code is NOT
     // active), bumping loaded_dll_mtime here would poison the mtime gate so the
@@ -508,19 +536,15 @@ inline int PluginManager::compile_plugin_folders_locked_(const std::vector<std::
                 // entry and CapRegistry registrations ACTIVE with handlers
                 // pointing into the UNMAPPED module (same crash as the rebuild
                 // lanes fixed in detach_plugin_instances_locked_ /
-                // recompile_project_plugin). Evict NOW, before FreeLibrary —
-                // evict_machine_provider_locked_ sweeps this owner's cap names
-                // SYNCHRONOUSLY, so no handler can outlive the module. The
-                // provider is reinstated below once the NEW module loads
-                // (targeted single-plugin reinstate, mirroring the reattach
-                // lanes); every `continue` between here and there (LoadLibrary
-                // / ABI / caps / factory failure) leaves it evicted until the
-                // next autoload reconcile — a lost capability, fail-soft,
-                // never a dangling handler.
-                evict_machine_provider_locked_(manifest_name);
-                FreeLibrary(prev->second.handle);   // TODO(linux): dlclose
-                prev->second.handle = nullptr;
-                prev->second.c_factory = nullptr;
+                // recompile_project_plugin). unload_module_locked_ evicts
+                // BEFORE FreeLibrary (synchronous cap-name sweep, so no
+                // handler can outlive the module). The provider is reinstated
+                // below once the NEW module loads (targeted single-plugin
+                // reinstate, mirroring the reattach lanes); every `continue`
+                // between here and there (LoadLibrary / ABI / caps / factory
+                // failure) leaves it evicted until the next autoload reconcile
+                // — a lost capability, fail-soft, never a dangling handler.
+                unload_module_locked_(manifest_name);
             }
 
             PluginInfo pi;
@@ -569,7 +593,7 @@ inline int PluginManager::compile_plugin_folders_locked_(const std::vector<std::
                 if (!plugin_abi_compatible(pi.handle, pname, pi.json_fallback, &err)) {
                     last_open_warnings_.push_back({pname, pname, err});
                     std::fprintf(stderr, "[xinsp2] %s\n", err.c_str());
-                    FreeLibrary(pi.handle);
+                    FreeLibrary(pi.handle);   // raw is fine: just-loaded module failed its load gate — no provider registered against it
                     pi.handle = nullptr;
                     continue;
                 }
@@ -577,7 +601,7 @@ inline int PluginManager::compile_plugin_folders_locked_(const std::vector<std::
                 if (!plugin_caps_compatible(pi, &default_host_api(), pname, &err)) {
                     last_open_warnings_.push_back({pname, pname, err});
                     std::fprintf(stderr, "[xinsp2] %s\n", err.c_str());
-                    FreeLibrary(pi.handle);
+                    FreeLibrary(pi.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
                     pi.handle = nullptr;
                     continue;
                 }
@@ -591,7 +615,7 @@ inline int PluginManager::compile_plugin_folders_locked_(const std::vector<std::
                 std::fprintf(stderr,
                     "[xinsp2] project plugin '%s': factory '%s' not exported\n",
                     pname.c_str(), pi.factory_symbol.c_str());
-                FreeLibrary(pi.handle);
+                FreeLibrary(pi.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
                 pi.handle = nullptr;
                 continue;
             }
@@ -601,35 +625,12 @@ inline int PluginManager::compile_plugin_folders_locked_(const std::vector<std::
             plugins_[key] = std::move(pi);
             project_plugin_origin_[key] = entry.path().string();
             project_loaded_plugins_.insert(key);
-            // Leg B reinstate (compile lane): the drop-prior-version evict
+            // Leg B reinstate (compile lane): the drop-prior-version unload
             // above tore the machine autoload provider down (if one existed)
             // BEFORE FreeLibrary; the NEW module is now loaded + registered,
-            // so bring the "@auto:" adapter back up on the new code. Same
-            // eligibility gates + targeted single-plugin instantiation as
-            // reattach_plugin_from_dll_locked_ / recompile_project_plugin
-            // (autoload enabled, plugin autoload-eligible, project precedence,
-            // synthetic "@auto:" name, plugin-default on_fault) — see the
-            // rationale there. No-op when nothing was evicted and the plugin
-            // isn't autoload-eligible.
-            auto& npi = plugins_[key];
-            if (autoload_enabled_ && npi.autoload
-                    && !machine_instances_.count(key)
-                    && !project_provides_plugin_locked_(key)) {
-                const std::string minst_name = "@auto:" + key;
-                auto minst = make_adapter_guarded_(npi, key, minst_name,
-                                                   /*max_concurrency=*/0, npi.default_on_fault);
-                if (minst) {
-                    InstanceRegistry::instance().add(minst);
-                    machine_instances_[key] = minst;
-                    std::fprintf(stderr, "[xinsp2] compile: machine lib provider '%s' back up "
-                                 "on freshly-built DLL (owner=%llu)\n", key.c_str(),
-                                 (unsigned long long)minst->owner_id());
-                } else {
-                    std::fprintf(stderr, "[xinsp2] compile: factory failed re-establishing "
-                                 "machine lib provider '%s' — capability lost until next "
-                                 "autoload\n", key.c_str());
-                }
-            }
+            // so bring the "@auto:" adapter back up on the new code. No-op
+            // when nothing was evicted and the plugin isn't autoload-eligible.
+            reinstate_machine_provider_locked_(plugins_[key], key, "compile");
             ok_count++;
         } catch (const std::exception& e) {
             last_open_warnings_.push_back(
@@ -770,20 +771,30 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
         return r;
     }
     auto& pi = pi_it->second;
-    // RT5/N1 family — rebuild-vs-machine-provider Leg B, recompile lane: evict
-    // the machine autoload provider (if any) BEFORE the FreeLibrary below,
-    // exactly as detach_plugin_instances_locked_ now does for the cmake-rebuild
-    // lane. evict_machine_provider_locked_ sweeps this owner's CapRegistry
-    // names synchronously, so no capability handler can outlive the module.
-    // Reinstated on the NEW module by the autoload reconciler after step 4; the
-    // error returns between here and there leave it evicted (lost capability,
-    // fail-soft — matching their "instances are gone" contract), never a
-    // handler into unmapped code.
-    evict_machine_provider_locked_(plugin_name);
-    if (pi.handle) {
-        FreeLibrary(pi.handle);
-        pi.handle    = nullptr;
-        pi.c_factory = nullptr;
+    // RT5/N1 family — rebuild-vs-machine-provider Leg B, recompile lane:
+    // unload_module_locked_ evicts the machine autoload provider (if any)
+    // BEFORE the FreeLibrary, exactly as detach_plugin_instances_locked_ does
+    // for the cmake-rebuild lane (synchronous cap-name sweep — no capability
+    // handler can outlive the module). Reinstated on the NEW module after
+    // step 4; the error returns between here and there leave it evicted (lost
+    // capability, fail-soft — matching their "instances are gone" contract),
+    // never a handler into unmapped code.
+    // Stale-module fail-check (sibling of reattach_plugin_from_dll_locked_'s):
+    // remember the OLD module's on-disk path before unloading, so we can
+    // detect — with a refcount-neutral query — that FreeLibrary didn't
+    // actually drop its last ref (a lingering worker thread / pinning
+    // dependency DLL). Silently running stale code is the exact bug to
+    // surface; this lane used to have NO such check and reported ok.
+    const bool had_old_module = (pi.handle != nullptr);
+    const std::string old_dll_path =
+        (std::filesystem::path(pi.folder_path) / pi.dll_name).string();
+    unload_module_locked_(plugin_name);
+    bool stale_module = false;
+    if (had_old_module) {
+        HMODULE still = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               old_dll_path.c_str(), &still) && still != nullptr)
+            stale_module = true;
     }
     // After the FreeLibrary above, restore_against_old() can no
     // longer save us — the old DLL is gone. The remaining error
@@ -817,7 +828,7 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
         if (!plugin_abi_compatible(pi.handle, plugin_name, pi.json_fallback, &err)) {
             r.error = err + " — instances for this plugin are gone; "
                             "reopen the project to recover";
-            FreeLibrary(pi.handle);
+            FreeLibrary(pi.handle);   // raw is fine: just-loaded module failed its load gate — no provider registered against it
             pi.handle = nullptr;
             return r;
         }
@@ -826,7 +837,7 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
         if (!plugin_caps_compatible(pi, &default_host_api(), plugin_name, &err)) {
             r.error = err + " — instances for this plugin are gone; "
                             "reopen the project to recover";
-            FreeLibrary(pi.handle);
+            FreeLibrary(pi.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
             pi.handle = nullptr;
             return r;
         }
@@ -840,10 +851,6 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
         return r;
     }
 
-    // Refresh the change-gate stamp so a later reload_changed_plugins()
-    // doesn't see this freshly-recompiled DLL as "changed" and swap it again.
-    stamp_loaded_dll_(pi, cres.dll_path);
-
     // 4. Re-instantiate every preserved instance using the new factory.
     for (auto& p : pending) {
         auto inst = make_adapter_guarded_(pi, plugin_name, p.name, p.max_concurrency, p.on_fault);
@@ -854,27 +861,24 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
         r.reattached_instances.push_back(p.name);
     }
     // Leg B reattach (recompile lane): bring the machine autoload provider back
-    // on the NEW module — same targeted single-plugin reinstate as
-    // reattach_plugin_from_dll_locked_ (see the rationale there). No-op if a
+    // on the NEW module (see reinstate_machine_provider_locked_). No-op if a
     // project instance above provides the plugin, or it isn't autoload-eligible.
-    if (autoload_enabled_ && pi.autoload
-            && !machine_instances_.count(plugin_name)
-            && !project_provides_plugin_locked_(plugin_name)) {
-        const std::string minst_name = "@auto:" + plugin_name;
-        auto minst = make_adapter_guarded_(pi, plugin_name, minst_name,
-                                           /*max_concurrency=*/0, pi.default_on_fault);
-        if (minst) {
-            InstanceRegistry::instance().add(minst);
-            machine_instances_[plugin_name] = minst;
-            std::fprintf(stderr, "[xinsp2] recompile: machine lib provider '%s' back up "
-                         "on new DLL (owner=%llu)\n", plugin_name.c_str(),
-                         (unsigned long long)minst->owner_id());
-        } else {
-            std::fprintf(stderr, "[xinsp2] recompile: factory failed re-establishing "
-                         "machine lib provider '%s' — capability lost until next "
-                         "autoload\n", plugin_name.c_str());
-        }
+    reinstate_machine_provider_locked_(pi, plugin_name, "recompile");
+    // Stale-module fail-check — the recompile sibling of reattach_plugin_from_
+    // dll_locked_'s (#18): instances were re-attached above so nothing dangles,
+    // but the OLD module never unloaded, so its code keeps running (silently
+    // running stale code is the exact bug to surface). Report loudly and skip
+    // the change-gate stamp so the next recompile/rebuild retries the reload.
+    if (stale_module) {
+        r.error = "old DLL did not unload (module still mapped after recompile) — "
+                  "an instance likely left a worker thread or GPU context alive; "
+                  "the OLD code is still running";
+        return r;
     }
+    // Refresh the change-gate stamp so a later reload_changed_plugins()
+    // doesn't see this freshly-recompiled DLL as "changed" and swap it again.
+    // (#18: genuine success only — AFTER the stale_module check.)
+    stamp_loaded_dll_(pi, cres.dll_path);
     r.ok = true;
     return r;
 }
@@ -1083,7 +1087,7 @@ inline bool PluginManager::load_plugin_locked_(const std::string& name, std::str
         std::string aerr;
         if (!plugin_abi_compatible(pi.handle, name, pi.json_fallback, &aerr)) {
             std::fprintf(stderr, "[xinsp2] %s\n", aerr.c_str());
-            FreeLibrary(pi.handle);
+            FreeLibrary(pi.handle);   // raw is fine: just-loaded module failed its load gate — no provider registered against it
             pi.handle = nullptr;
             return fail(aerr);
         }
@@ -1095,7 +1099,7 @@ inline bool PluginManager::load_plugin_locked_(const std::string& name, std::str
         // not gated — the plugin null-checks them at runtime.
         if (!plugin_caps_compatible(pi, &default_host_api(), name, &aerr)) {
             std::fprintf(stderr, "[xinsp2] %s\n", aerr.c_str());
-            FreeLibrary(pi.handle);
+            FreeLibrary(pi.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
             pi.handle = nullptr;
             return fail(aerr);
         }

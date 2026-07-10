@@ -65,15 +65,12 @@ static std::atomic<int> g_failures{0};
 // the storage and points the trigger thunks at its own canned state. (The owner
 // thunks g_owner_get_fn_/g_owner_set_fn_ are inline-defined in xi_async.hpp —
 // we only assign them, below.)
-void* g_use_process_fn_   = nullptr;
 void* g_use_exchange_fn_  = nullptr;
-void* g_use_grab_fn_      = nullptr;
 void* g_use_host_api_     = nullptr;
 void* g_trigger_info_fn_  = nullptr;
 void* g_trigger_image_fn_ = nullptr;
 void* g_trigger_sources_fn_ = nullptr;
 void* g_trigger_leader_fn_  = nullptr;
-void* g_trigger_meta_fn_    = nullptr;
 // A4 explicit per-run context thunks (this TU plays the host — see xi_io.hpp /
 // xi_result.hpp externs). g_run_ctx_get_fn_/set_fn_ are inline globals in
 // xi_async.hpp (we only assign them, in wire_run_ctx_thunks below).
@@ -188,6 +185,7 @@ struct TestRunCtx {
     long long       run_id = 0;
     std::string     frame_path;
     TestRunResult*  result_slot = nullptr;   // the RUN's verdict slot (parent thread)
+    std::thread::id owner_tid;               // the dispatch thread (mirrors RunContext)
 };
 static thread_local const TestRunCtx* t_run_ctx = nullptr;   // installed context (null ⇒ off-run)
 
@@ -213,8 +211,11 @@ static void* test_run_ctx_snapshot() {
     if (!t_run_ctx) return nullptr;
     auto* s = new TestRunCtx(*t_run_ctx);
     s->result_slot = nullptr;               // detached: no live run slot to route into
-    return s;
+    return s;                               // owner_tid stays the PARENT's (Wave-2 #5 A4 symmetry)
 }
+// Wave-2 #5: install does NOT re-stamp owner_tid to the worker's own tid —
+// keeping the parent's tid is what lets the F4 off-thread detection fire on a
+// spawn_worker exactly like on async/parallel_for (mirrors run_ctx_install_worker_cb).
 static void test_run_ctx_install_worker(void* s) { t_run_ctx = static_cast<const TestRunCtx*>(s); }
 static void test_run_ctx_free(void* s) { delete static_cast<TestRunCtx*>(s); }
 
@@ -395,22 +396,31 @@ static void test_spawn_worker_outlives_inspect() {
     auto gate = std::make_shared<std::atomic<bool>>(false);
     std::atomic<long long> wid{-1};
     std::atomic<int>       path_ok{-1};
+    std::atomic<int>       parent_tid_kept{-1};
     std::atomic<bool>      body_done{false};
     TestRunResult          verdict;   // the run's slot — must stay UNSET (the worker's snapshot has none)
+    const std::thread::id  parent_tid = std::this_thread::get_id();
     std::thread th;
     {
         TestRunCtx ctx;
         ctx.run_id      = 7;
         ctx.frame_path  = "C:/frames/late.png";
         ctx.result_slot = &verdict;
+        ctx.owner_tid   = parent_tid;
         TestRunCtxScope scope(&ctx);
         // Snapshot is taken HERE (spawning thread, context live). The worker blocks
         // until we release the gate AFTER this scope + `ctx` have destructed.
         th = xi::spawn_worker("late-worker",
-            [gate, &wid, &path_ok, &body_done]() {
+            [gate, &wid, &path_ok, &parent_tid_kept, parent_tid, &body_done]() {
                 while (!gate->load(std::memory_order_acquire)) std::this_thread::yield();
                 wid.store(xi::run_id());                                  // snapshot → 7 (ctx is gone)
                 path_ok.store(xi::current_frame_path() == "C:/frames/late.png" ? 1 : 0);
+                // Wave-2 #5 (A4 symmetry): the snapshot KEEPS the parent dispatch
+                // thread's owner_tid — the worker's installed context must NOT have
+                // been re-stamped to the worker's own tid (that made the F4
+                // off-thread trigger-read detection unable to fire on spawn_worker).
+                parent_tid_kept.store(
+                    t_run_ctx && t_run_ctx->owner_tid == parent_tid ? 1 : 0);
                 xi::ok(1, "verdict from a detached worker");              // result_slot null → no-op
                 body_done.store(true);
             });
@@ -422,6 +432,7 @@ static void test_spawn_worker_outlives_inspect() {
     CHECK(body_done.load());
     CHECK(wid.load() == 7);                 // read the worker-OWNED snapshot, not the freed ctx (no UAF)
     CHECK(path_ok.load() == 1);
+    CHECK(parent_tid_kept.load() == 1);     // Wave-2 #5: owner_tid = the PARENT's, not the worker's
     CHECK(!verdict.set);                    // result() from the detached worker safely no-op'd
 }
 

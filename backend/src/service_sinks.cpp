@@ -120,30 +120,16 @@ static int use_push_pack_inline_(const char* name, xi_pack_handle pack) {
     if (!inst) return -1;
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (!adapter || !adapter->has_pack_door()) return -4;
-    if (adapter->quarantined()) return -3;
-    if (adapter->reinit_pending()) {
-        apply_pending_reinit_(name, adapter);
-        if (adapter->quarantined()) return -3;
-    }
-    stamp_culprit_(name, inst->plugin_name());
-    try {
+    // Wave-2 #1: the six-step ritual now lives in guarded_plugin_call (data
+    // plane ⇒ quarantine-gated). The ack pack is dropped (fire-and-forget).
+    auto r = guarded_plugin_call(name, adapter, inst->plugin_name(), "pack door",
+                                 /*gate_quarantined=*/true, [&] {
         xi_pack_handle ack = adapter->run_pack_door(pack);
         if (ack != XI_PACK_NULL) xi::PackRegistry::instance().release(ack);
-        return 0;
-    } catch (const seh_exception& e) {
-        std::fprintf(stderr, "[xinsp2] use(\"%s\").push(pack) crashed: 0x%08X (%s)\n",
-                     name, e.code, e.what());
-        char why[96]; std::snprintf(why, sizeof(why), "pack door crashed: 0x%08X", e.code);
-        note_instance_crash_(name, why);
-        apply_on_fault_policy_(name, adapter);
-        xi::recover_seh_stack_or_die(e.code, "plugin pack door");
-        return -2;
-    } catch (...) {
-        std::fprintf(stderr, "[xinsp2] use(\"%s\").push(pack) threw exception\n", name);
-        note_instance_crash_(name, "pack door threw an exception");
-        apply_on_fault_policy_(name, adapter);
-        return -2;
-    }
+    });
+    if (r.kind == PluginCallResult::Kind::Quarantined) return -3;
+    if (!r.ok()) return -2;
+    return 0;
 }
 
 // J4: reject a use(sink).push() issued off the dispatch thread. Defined below,
@@ -215,45 +201,22 @@ int use_exchange_cb(const char* name, const char* cmd,
     auto inst = xi::InstanceRegistry::instance().find(name);
     if (!inst) return -1;
     // Item-14 gates live on the C-ABI adapter; a non-adapter instance has no
-    // quarantine/reinit state and keeps the plain guarded call below.
+    // quarantine/reinit state — guarded_plugin_call skips the gates/policy for
+    // a null adapter but keeps the culprit stamp + catch + stack recovery.
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
-    if (adapter) {
-        if (adapter->quarantined()) return -3;
-        if (adapter->reinit_pending()) {
-            apply_pending_reinit_(name, adapter);
-            if (adapter->quarantined()) return -3;
-        }
-    }
-    stamp_culprit_(name, inst->plugin_name());
-    try {
+    int n = 0;
+    auto r = guarded_plugin_call(name, adapter, inst->plugin_name(), "exchange()",
+                                 /*gate_quarantined=*/true, [&] {
         std::string result = inst->exchange(cmd);
-        int n = (int)result.size();
-        if (rsplen < n + 1) return -n;
+        int need = (int)result.size();
+        if (rsplen < need + 1) { n = -need; return; }
         std::memcpy(rsp, result.data(), result.size());
         rsp[result.size()] = 0;
-        return n;
-    } catch (const seh_exception& e) {
-        std::fprintf(stderr, "[xinsp2] use_exchange('%s') crashed: 0x%08X (%s)\n",
-                     name, e.code, e.what());
-        char why[96]; std::snprintf(why, sizeof(why), "exchange() crashed: 0x%08X", e.code);
-        note_instance_crash_(name, why);
-        if (adapter) apply_on_fault_policy_(name, adapter);
-        // Swallowed on a surviving thread (lane worker under a script's use().exchange(),
-        // or the command thread) — restore the stack guard page after an overflow.
-        xi::recover_seh_stack_or_die(e.code, "plugin exchange()");
-        return -1;
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "[xinsp2] use_exchange('%s') threw: %s\n", name, e.what());
-        note_instance_crash_(name, "exchange() threw an exception");
-        if (adapter) apply_on_fault_policy_(name, adapter);
-        return -1;
-    }
-}
-
-// grab() was the legacy pull model (xi::ImageSource queue). Sources now PUSH via
-// emit_record and scripts read current_trigger(), so there's nothing to grab.
-xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
-    return XI_IMAGE_NULL;
+        n = need;
+    });
+    if (r.kind == PluginCallResult::Kind::Quarantined) return -3;
+    if (!r.ok()) return -1;   // crash/throw stays -1 — see the retry note above
+    return n;
 }
 
 // polaris2 Gate P2 — xi::use(...).process(ScriptPack) wired into the script DLL:
@@ -300,35 +263,18 @@ int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out
     // U3: static misuse — checked BEFORE the fault gates (the plugin is never
     // entered, no health/quarantine state is touched).
     if (adapter->is_sink()) return -5;
-    if (adapter->quarantined()) return -3;
-    if (adapter->reinit_pending()) {
-        apply_pending_reinit_(name, adapter);
-        if (adapter->quarantined()) return -3;
-    }
     if (!adapter->has_pack_door()) return -4;      // Record-only plugin
-    stamp_culprit_(name, inst->plugin_name());
-    try {
+    // Wave-2 #1: shared fault boundary (data plane ⇒ quarantine-gated).
+    auto r = guarded_plugin_call(name, adapter, inst->plugin_name(), "pack door",
+                                 /*gate_quarantined=*/true, [&] {
         *out = adapter->run_pack_door(in);         // OwnerGuard + CallScope inside
-        return 0;
-    } catch (const seh_exception& e) {
-        std::fprintf(stderr, "[xinsp2] use_pack_process('%s') crashed: 0x%08X (%s)\n",
-                     name, e.code, e.what());
-        char why[96]; std::snprintf(why, sizeof(why), "pack door crashed: 0x%08X", e.code);
-        note_instance_crash_(name, why);
-        apply_on_fault_policy_(name, adapter);
-        // Same rationale as use_process_inline_: this boundary swallows the fault
-        // and the inspect continues on this worker — restore the guard page (or
-        // hard-exit for respawn) before returning to the script.
-        xi::recover_seh_stack_or_die(e.code, "plugin pack door");
+    });
+    if (r.kind == PluginCallResult::Kind::Quarantined) return -3;
+    if (!r.ok()) {
         *out = XI_PACK_NULL;                       // a torn result is never handed out
         return -2;
-    } catch (...) {
-        std::fprintf(stderr, "[xinsp2] use_pack_process('%s') threw exception\n", name);
-        note_instance_crash_(name, "pack door threw an exception");
-        apply_on_fault_policy_(name, adapter);
-        *out = XI_PACK_NULL;
-        return -2;
     }
+    return 0;
 }
 
 // ---- Trigger loop state ----
@@ -408,13 +354,12 @@ xi::crash::Context& crash_ctx() { return xi::crash::ctx(); }
 // Per-worker deadlines: the parallel dispatch pool (parallelism.dispatch_threads
 // > 1) runs N inspects at once, so the watchdog tracks a SLOT per in-flight
 // inspect (each arms a free slot on entry, clears it on exit). The monitor scans
-// all slots. On a deadline breach it first asks the script to cancel cooperatively
-// (a GLOBAL flag — under N>1 this aborts every in-flight frame, which is the
-// intended "something's wedged, bail this round" signal); if the script ignores
-// that for the grace window, the process is unrecoverable (a forced thread kill
-// would leak the per-instance lock + risk heap corruption), so the backend
-// exits and the FE supervisor respawns a clean one. See docs/guides/writing-a-
-// script.md (Parallel dispatch) + internals/fe-be.md.
+// all slots. On a deadline breach the overrunning inspect gets a grace window
+// (a merely-slow frame finishes and is left alone); if the SAME inspect is
+// still overrun after the grace it is wedged, and the process is unrecoverable
+// (a forced thread kill would leak the per-instance lock + risk heap
+// corruption), so the backend exits and the FE supervisor respawns a clean one.
+// See docs/guides/writing-a-script.md (Parallel dispatch) + internals/fe-be.md.
 // Per-slot inspect deadline (steady_clock epoch-ms); 0 = free. Written by the
 // dispatch/run thread that owns the slot, read by the watchdog thread.
 // WATCHDOG_EXIT_CODE moved to service_internal.hpp.
@@ -493,9 +438,11 @@ static void warn_trigger_off_thread_() {
 // workers, so a tid mismatch means "spawned worker" for BOTH triggered and
 // timer-tick / cmd:run dispatch threads (each installs its own owner_tid). Off a
 // run entirely (g_run_ctx == null) nothing is staged, so allow. A DETACHED SNAPSHOT
-// (a spawn_worker context — result_slot nulled) has its own thread's owner_tid, but
-// its g_staged is never flushed either, so it is rejected on the result_slot marker
-// (structural — independent of the owner_tid comparison).
+// (a spawn_worker context — result_slot nulled) is rejected on the result_slot
+// marker FIRST (structural — independent of the owner_tid comparison). Wave-2 #5:
+// the snapshot now keeps the PARENT's owner_tid (A4 symmetry — the READ guard
+// warn_trigger_off_thread_ needs the tid mismatch to fire on a spawn_worker like
+// on async/parallel_for); this rejection never depended on the worker-tid stamp.
 static bool push_off_dispatch_thread_() {
     if (!g_run_ctx) return false;               // off any run: nothing staged here
     if (!g_run_ctx->result_slot) return true;   // detached snapshot (spawn_worker): never flushed → reject
@@ -509,6 +456,17 @@ static bool push_off_dispatch_thread_() {
 // visible programming error instead of a silent leak.
 static void warn_push_off_thread_(const char* name) {
     std::string key = name ? name : "";
+#ifdef NDEBUG
+    // E1 (burr audit): check-then-build, matching the xi_use.hpp warn-once
+    // siblings — the message string is only assembled on the FIRST (warning)
+    // pass per sink name; the steady-state repeat path does the map probe only.
+    static std::mutex mu;
+    static std::unordered_map<std::string, bool> warned;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (!warned.emplace(key, true).second) return;   // warned this sink already
+    }
+#endif
     std::string msg =
         "xi::use(\"" + key + "\").push(pack) called off the inspect/dispatch thread — "
         "push() stages into the dispatch thread's ordered-sink queue, which is never "
@@ -520,12 +478,6 @@ static void warn_push_off_thread_(const char* name) {
     std::fflush(stderr);
     std::abort();
 #else
-    static std::mutex mu;
-    static std::unordered_map<std::string, bool> warned;
-    {
-        std::lock_guard<std::mutex> lk(mu);
-        if (!warned.emplace(key, true).second) return;   // warned this sink already
-    }
     std::fprintf(stderr, "ERROR: %s\n", msg.c_str());
 #endif
 }
@@ -618,6 +570,16 @@ void flush_staged_emits_(int64_t run_id) {   // decl in header
             use_push_pack_inline_(it.target.c_str(), it.rec.pack);
         release_trigger_event_(it.rec);   // drops our staged pack ref on every path
     }
+    // B4 (burr audit): hand the local's CAPACITY back to g_staged so the next
+    // frame's push() doesn't re-allocate from zero (the move-out above stripped
+    // it every frame). Every element was released in the loop, so clear() drops
+    // no live ref. Guarded on g_staged.empty(): staging during the flush can't
+    // happen today (use(...).push is script-only and a sink's pack door can't
+    // re-enter the script), but if that ever changes a re-staged item must not
+    // be swapped away. On a mid-flush throw we skip the swap — losing capacity
+    // is fine; the throw-safety the move-out bought is unchanged.
+    staged.clear();
+    if (g_staged.empty()) g_staged.swap(staged);
 }
 
 // CurrentTriggerInfoC struct moved to service_internal.hpp.
@@ -663,5 +625,32 @@ void owner_set_cb(uint32_t id) {
 const xi_host_api* script_host_api_() {
     static xi_host_api use_host = xi::ImagePool::make_host_api();
     return &use_host;
+}
+
+// ---- project-boundary reset (Wave-2 #3) --------------------------------------
+// Drop every piece of engine state that belongs to the project being replaced:
+//   * the bus sink + per-source emit-time map (source names are per-project;
+//     a stale sink can fire into a torn-down project, and the emit-time map
+//     otherwise accumulates across every open→emit→close cycle);
+//   * the script replay shadows (param_cache / instance_def_cache) and the U2
+//     kv channel. open/close/create_project do NOT unload the inspection script
+//     DLL (script lifecycle is independent of the project's plugin DLLs), so
+//     without this the next project's compile_and_load would capture the PRIOR
+//     project's xi::kv() and replay the prior project's tuned param/def values
+//     over any same-named declarations — running project B with project A's
+//     calibration and silently mis-verdicting (the documented cross-project
+//     leak class).
+// Root cause of the extraction: this block was duplicated verbatim in
+// cmd_open_project_ and cmd_close_project_, and MISSING from
+// cmd_create_project_ (which also replaces the project) — one primitive, three
+// callers, no third copy to drift.
+void reset_project_boundary_state_() {   // decl in header (cross-TU)
+    xi::TriggerBus::instance().clear_sink();
+    xi::TriggerBus::instance().reset();
+    std::lock_guard<std::mutex> lk(g_eng.script_mu);
+    g_eng.param_cache.clear();
+    g_eng.instance_def_cache.clear();
+    g_eng.persistent_kv_bytes.clear();
+    g_eng.persistent_kv_schema = 0;
 }
 

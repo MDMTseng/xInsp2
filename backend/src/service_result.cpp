@@ -83,6 +83,14 @@ RunContextScope::~RunContextScope() { g_run_ctx = prev; }
 // (F4/J4-mirror/silent-result) — a worker of a live run now has the context
 // propagated, so this only fires when there is genuinely NO run on this thread.
 void run_context_fail_loud_(const char* what) {
+#ifdef NDEBUG
+    // E2 (burr audit): warn-once exchange BEFORE the snprintf, so the format
+    // only runs on the first (warning) pass — the steady-state repeat path is
+    // one relaxed atomic exchange. The Debug abort path below is unchanged
+    // (it always formats, then aborts).
+    static std::atomic<bool> warned{false};
+    if (warned.exchange(true, std::memory_order_relaxed)) return;
+#endif
     char msg[256];
     std::snprintf(msg, sizeof(msg),
         "%s called with NO live run context on this thread — a per-run accessor "
@@ -95,9 +103,7 @@ void run_context_fail_loud_(const char* what) {
     std::fflush(stderr);
     std::abort();
 #else
-    static std::atomic<bool> warned{false};
-    if (!warned.exchange(true, std::memory_order_relaxed))
-        std::fprintf(stderr, "ERROR: [xinsp2] %s\n", msg);
+    std::fprintf(stderr, "ERROR: [xinsp2] %s\n", msg);
 #endif
 }
 
@@ -120,18 +126,29 @@ const char* run_ctx_frame_path_cb() {
 // the spawning dispatch frame. Instead it OWNS a heap snapshot: run_id + frame_path
 // copied by value; result_slot NULLED (a worker that may outlive its inspect must
 // not route a verdict into a frame that could already be gone — result_cb no-ops a
-// null-slot context, and push_off_dispatch_thread_ rejects it). snapshot runs on
+// null-slot context, and push_off_dispatch_thread_ rejects it on result_slot ==
+// nullptr, structurally — independent of any tid comparison). snapshot runs on
 // the SPAWNING thread (g_run_ctx is the live inspect there); null when off a run
-// (the worker then simply has no context). install runs on the WORKER and stamps
-// owner_tid to the worker's own thread; free releases it when the worker exits.
+// (the worker then simply has no context). install runs on the WORKER; free
+// releases the snapshot when the worker exits.
+//
+// A4-symmetry (Wave-2 #5, root cause): install used to RE-STAMP the snapshot's
+// owner_tid to the worker's OWN tid. That made the F4 off-thread detection
+// (warn_trigger_off_thread_ in service_sinks.cpp, fires on had_trigger &&
+// owner_tid != self) structurally unable to fire on a spawn_worker thread — an
+// ambient current_trigger() read there silently got the inactive view, while
+// the IDENTICAL mistake on an xi::async / xi::parallel_for worker aborts in
+// Debug. Nothing needed the stamp: the write-path push rejection keys on
+// result_slot == nullptr FIRST (above), never on the tid. The snapshot now
+// KEEPS the PARENT dispatch thread's owner_tid so the F4 detection fires
+// consistently across all three spawn primitives.
 void* run_ctx_snapshot_cb() {
     if (!g_run_ctx) return nullptr;
     auto* s = new RunContext(*g_run_ctx);
     s->result_slot = nullptr;   // detached: no live run slot to route into
-    return s;
+    return s;                   // owner_tid stays the PARENT's (A4 symmetry, above)
 }
 void run_ctx_install_worker_cb(void* s) {
-    if (s) static_cast<RunContext*>(s)->owner_tid = std::this_thread::get_id();
     g_run_ctx = static_cast<const RunContext*>(s);
 }
 void run_ctx_free_cb(void* s) { delete static_cast<RunContext*>(s); }
@@ -166,7 +183,8 @@ void result_cb(int code, const char* msg) {
         return;
     }
     RunResult& rr = *g_run_ctx->result_slot;
-    if (code <= kResultSystemBand) {
+    if (reject_reserved_result_code(code, msg, rr.code, rr.msg)) {
+        // Backend-side observability on top of the shared rejection core.
         if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire)) {
             xp::LogMsg lm;
             lm.level = "warn";
@@ -175,9 +193,6 @@ void result_cb(int code, const char* msg) {
                      "NA (0) — fix the script's result code.";
             srv->send_text(lm.to_json());
         }
-        rr.code = 0;   // NA, not a fake ng1
-        rr.msg = "[invalid result code " + std::to_string(code) + ", reserved band] ";
-        rr.msg += (msg ? msg : "");
         rr.set = true;
         return;
     }
@@ -186,37 +201,19 @@ void result_cb(int code, const char* msg) {
     rr.set = true;
 }
 
-// Stable schema tag for the run_result wire event (bump on a breaking change to
-// the field set). Rides as an additive "schema" field so consumers can version.
-static constexpr const char* kRunResultSchema = "xi.run-outcome/1";
+// kRunResultSchema (the stable wire schema tag) lives in xi_result_class.hpp,
+// shared with the headless runner's report envelope.
 
-// Format a 128-bit trigger id as a 32-char lowercase hex string ("hi" then "lo",
-// each zero-padded to 16). A null id (0/0) → empty string (omitted on the wire).
+// Format a 128-bit trigger id as a 32-char lowercase hex string via the shared
+// SDK formatter (xi::trigger_id_hex128). The host adds the wire rule on top:
+// a null id (0/0) → empty string (omitted on the wire).
 std::string trigger_id_hex(xi_trigger_id id) {   // decl in header (cross-TU)
     if (id.hi == 0 && id.lo == 0) return {};
-    static const char* d = "0123456789abcdef";
-    std::string s;
-    s.reserve(32);
-    for (int shift = 60; shift >= 0; shift -= 4) s.push_back(d[(id.hi >> shift) & 0xF]);
-    for (int shift = 60; shift >= 0; shift -= 4) s.push_back(d[(id.lo >> shift) & 0xF]);
-    return s;
+    return xi::trigger_id_hex128(id.hi, id.lo);
 }
 
-// Derive the outcome class string from the EXISTING signed code — a pure read,
-// it never changes the numeric code. Bands: >0 → "ok"; ==0 → "na"; the reserved
-// system markers map to their own classes (dropped/crashed/no_verdict); a valid
-// ng code (<0 and above the reserved system band) → "ng"; anything else in the
-// system band → "na". The crash/no-verdict paths now emit their own reserved
-// codes, so class and code agree even when emit_run_result derives the class.
-static const char* outcome_class_for_code(int code) {
-    if (code == XI_SYS_DROPPED)     return "dropped";
-    if (code == XI_SYS_CRASHED)     return "crashed";
-    if (code == XI_SYS_NO_VERDICT)  return "no_verdict";
-    if (code > 0)                return "ok";
-    if (code == 0)               return "na";
-    if (code > kResultSystemBand) return "ng";   // valid ng band: <0 and > -990000
-    return "na";                                  // other reserved system codes
-}
+// outcome_class_for_code (code → class mapping) lives in xi_result_class.hpp,
+// shared with the headless runner.
 
 // Emit a `run_result` wire event. Fields ride directly in the event data (same
 // envelope shape as run_finished). Used by the inspect path (run_id >= 0) and the
@@ -230,8 +227,9 @@ static const char* outcome_class_for_code(int code) {
 // script_generation (the monotonic version of the active loaded script DLL that
 // produced the result; omitted when 0/unknown). The existing fields
 // (code/msg/run_id/ms/source/group) and their numeric values are UNCHANGED.
-// `cls`: if non-empty, overrides the code-derived class (used by the crash path,
-// which keeps code 0 but is "crashed"). `reason_code`: optional, omitted if empty.
+// `cls`: if non-empty, overrides the code-derived class (the crash path passes
+// XI_SYS_CRASHED + "crashed", so class and code agree either way).
+// `reason_code`: optional, omitted if empty.
 void emit_run_result(xi::ws::Server& srv, int code, const std::string& msg,
                             int64_t run_id, int64_t ms,
                             const std::string& source, const std::string& group,

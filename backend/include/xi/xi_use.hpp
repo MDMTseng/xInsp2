@@ -26,6 +26,7 @@
 #include "xi_script.hpp"   // XI_SCRIPT_EXPORT (A4 entry export macro)
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -113,21 +114,22 @@ extern void* g_use_push_pack_fn_;
 
 namespace xi {
 
-// Microseconds since the Unix epoch (system_clock). Same clock the host
-// uses to stamp TriggerEvent::timestamp_us / dequeued_at_us, so script-
-// side subtraction across the host/script boundary is meaningful.
-// Defined here (and not pulled from xi_trigger_bus.hpp) so scripts don't
-// have to include host-only headers to compute the latency split.
-// Guarded so the host's xi_trigger_bus.hpp can also define it without
-// ODR conflict when both headers land in the same TU.
-#ifndef XI_NOW_US_DEFINED
-#define XI_NOW_US_DEFINED
-// Thin compat aliases over the canonical clock (xi_clock.hpp). Both now_us and
-// steady_now_us are defined together so the guard can't leave one undefined
-// depending on header include order.
-inline int64_t now_us()        { return xi::wall_us(); }
-inline int64_t steady_now_us() { return xi::mono_us(); }
-#endif
+// Clock access is the canonical xi::wall_us() / xi::mono_us() (xi_clock.hpp).
+// wall_us is the same system_clock the host uses to stamp
+// TriggerEvent::timestamp_us / dequeued_at_us, so script-side subtraction
+// across the host/script boundary is meaningful. (The now_us/steady_now_us
+// compat aliases were deleted — no in-tree caller remained.)
+
+// One formatter for the 128-bit trigger id: 32-char lowercase hex ("hi" then
+// "lo", each zero-padded to 16). Shared by Trigger/TriggerSnapshot::id_string
+// and the host's trigger_id_hex (service_result.cpp), which adds its own
+// null-id → empty-string wire rule on top.
+inline std::string trigger_id_hex128(uint64_t hi, uint64_t lo) {
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%016llx%016llx",
+                  (unsigned long long)hi, (unsigned long long)lo);
+    return std::string(buf);
+}
 
 // Function pointer types for the callbacks
 // THE CUT (v12): UseProcessFn (the Record use()->process bridge, keyed on
@@ -168,7 +170,7 @@ struct CurrentTriggerInfo {
     int64_t       dequeued_at_us;   // moment dispatcher worker popped this event
                                     // off g_ev_queue (same clock as timestamp_us).
                                     // queue_wait_us = dequeued_at_us - timestamp_us
-                                    // inspect_us    = now_us()       - dequeued_at_us
+                                    // inspect_us    = wall_us()      - dequeued_at_us
 };
 using TriggerInfoFn    = void (*)(CurrentTriggerInfo* out);
 using TriggerImageFn   = xi_image_handle (*)(const char* source);
@@ -189,7 +191,7 @@ using TriggerLeaderFn  = int32_t (*)(char* buf, int32_t buflen);
 // surface — minimal, opaque-handle-backed, and SUBJECT TO CHANGE: the final
 // script Pack API is a wave-3+ decision (docs/new_gen/08 Wave 2, step 4).
 //
-// WHY OPAQUE, NOT the TypedPack<Schema> container directly: a script is a
+// WHY OPAQUE, NOT the Pack container directly: a script is a
 // separate JIT-compiled DLL. The Pack container (xi_pack.hpp) owns an arena +
 // pool handles minted host-side, and every inline singleton (PackRegistry) is
 // PER-DLL — so the script cannot touch the container's C++ layout. It reads the
@@ -324,8 +326,8 @@ public:
 
     // The declared-keyset TYPED view: get_i64<Schema::kSeq>() resolves the slot to
     // its key string at COMPILE TIME (Schema::keys[slot]) and reads it by string
-    // through the door. Schema is any struct with a constexpr `keys` array (an
-    // xi::PackSchema-derived type, or the wave-3 generated _keys, works as-is).
+    // through the door. Schema is any struct with a constexpr `keys` array —
+    // that is ALL ScriptTypedPack requires (e.g. the generated _keys structs).
     template <class Schema>
     ScriptTypedPack<Schema> typed() const { return ScriptTypedPack<Schema>(*this); }
 
@@ -481,7 +483,7 @@ public:
     // process()":
     //
     //   double queue_wait_us = (double)(t.dequeued_at_us() - t.timestamp_us());
-    //   double inspect_us    = (double)(xi::now_us()        - t.dequeued_at_us());
+    //   double inspect_us    = (double)(xi::wall_us()       - t.dequeued_at_us());
     //
     // 0 if the host hasn't stamped one (e.g. single-shot cmd:run path
     // before this field was introduced, or synthetic timer ticks with
@@ -498,19 +500,9 @@ public:
     std::string frame_path() const { return data_ ? data_->frame_path : std::string{}; }
 
     std::string id_string() const {
-        if (data_) {
-            char buf[40];
-            std::snprintf(buf, sizeof(buf), "%016llx%016llx",
-                          (unsigned long long)data_->info.id.hi,
-                          (unsigned long long)data_->info.id.lo);
-            return buf;
-        }
+        if (data_) return trigger_id_hex128(data_->info.id.hi, data_->info.id.lo);
         ensure();
-        char buf[40];
-        std::snprintf(buf, sizeof(buf), "%016llx%016llx",
-                      (unsigned long long)info_.id.hi,
-                      (unsigned long long)info_.id.lo);
-        return buf;
+        return trigger_id_hex128(info_.id.hi, info_.id.lo);
     }
 
     // Returns the named source's image as a zero-copy view over the
@@ -720,13 +712,7 @@ public:
     xi_trigger_id id() const           { return info_.id; }
     int64_t       timestamp_us() const { return info_.timestamp_us; }
     int64_t       dequeued_at_us() const { return info_.dequeued_at_us; }
-    std::string   id_string() const {
-        char buf[40];
-        std::snprintf(buf, sizeof(buf), "%016llx%016llx",
-                      (unsigned long long)info_.id.hi,
-                      (unsigned long long)info_.id.lo);
-        return buf;
-    }
+    std::string   id_string() const { return trigger_id_hex128(info_.id.hi, info_.id.lo); }
 
 private:
     friend TriggerSnapshot trigger_snapshot();
@@ -756,64 +742,57 @@ inline TriggerSnapshot trigger_snapshot() {
 }
 
 // Proxy object returned by xi::use()
+//
+// The once-per-key warn discipline shared by the three warn_use_* surfaces
+// below: a miss/misuse used to be silent (an empty result, no log), so a typo'd
+// name or a wrong-door call looked like "found nothing". Log it ONCE per key
+// through host->log so it's discoverable without flooding the per-frame path.
+inline void warn_once_(const xi_host_api* host, const std::string& key,
+                       const std::string& msg) {
+    if (!host || !host->log) return;
+    static std::mutex mu;
+    static std::unordered_map<std::string, bool> warned;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (!warned.emplace(key, true).second) return;   // warned this key already
+    }
+    host->log(3, msg.c_str());
+}
+
 // A miss on xi::use("name") — process/exchange returns -1 when no instance by
-// that name is registered — used to be silent (empty Record/Image, no log), so a
-// typo'd or not-yet-created instance name looked like "found nothing". Surface it
-// once per name as an error log so it's discoverable.
+// that name is registered (typo, or instance not created yet).
 inline void warn_use_miss_(const xi_host_api* host, const char* name) {
-    if (!host || !host->log) return;
-    static std::mutex mu;
-    static std::unordered_map<std::string, bool> warned;
     std::string key = name ? name : "";
-    {
-        std::lock_guard<std::mutex> lk(mu);
-        if (!warned.emplace(key, true).second) return;   // warned this name already
-    }
-    std::string msg = "xi::use(\"" + key + "\"): no such instance — process/exchange "
-                      "returns empty (typo, or instance not created yet?)";
-    host->log(3, msg.c_str());
+    warn_once_(host, "miss/" + key,
+        "xi::use(\"" + key + "\"): no such instance — process/exchange "
+        "returns empty (typo, or instance not created yet?)");
 }
 
-// polaris2 Gate P2: same once-per-name discipline for a pack-door miss — the
-// instance EXISTS but publishes no xi.pack@1 door (a Record-only plugin), so
-// use(name).process(ScriptPack) can only return an empty pack. Without this
-// log the silent empty looks identical to a real empty result.
+// polaris2 Gate P2: pack-door miss — the instance EXISTS but publishes no
+// xi.pack@1 door (a Record-only plugin), so use(name).process(ScriptPack) can
+// only return an empty pack. Without the log the silent empty looks identical
+// to a real empty result.
 inline void warn_use_no_pack_door_(const xi_host_api* host, const char* name) {
-    if (!host || !host->log) return;
-    static std::mutex mu;
-    static std::unordered_map<std::string, bool> warned;
     std::string key = name ? name : "";
-    {
-        std::lock_guard<std::mutex> lk(mu);
-        if (!warned.emplace(key, true).second) return;   // warned this name already
-    }
-    std::string msg = "xi::use(\"" + key + "\").process(pack): instance has no "
-                      "xi.pack@1 door — returns an empty pack (the target plugin "
-                      "publishes no pack door; it cannot be driven on the data plane)";
-    host->log(3, msg.c_str());
+    warn_once_(host, "no_pack_door/" + key,
+        "xi::use(\"" + key + "\").process(pack): instance has no "
+        "xi.pack@1 door — returns an empty pack (the target plugin "
+        "publishes no pack door; it cannot be driven on the data plane)");
 }
 
-// U3 (docs/new_gen/17): same once-per-name discipline for a process(pack) call
-// on a DECLARED ORDERED SINK (-5). process() is request-reply; a sink is fed
-// fire-and-forget via push() (staged + flushed in frame order). Rejected
-// fail-loud instead of staged: a staged call's reply cannot exist until the
-// post-inspect flush, so it could only return an empty pack indistinguishable
-// from a door hard failure.
+// U3 (docs/new_gen/17): process(pack) on a DECLARED ORDERED SINK (-5).
+// process() is request-reply; a sink is fed fire-and-forget via push() (staged
+// + flushed in frame order). Rejected fail-loud instead of staged: a staged
+// call's reply cannot exist until the post-inspect flush, so it could only
+// return an empty pack indistinguishable from a door hard failure.
 inline void warn_use_sink_target_(const xi_host_api* host, const char* name) {
-    if (!host || !host->log) return;
-    static std::mutex mu;
-    static std::unordered_map<std::string, bool> warned;
     std::string key = name ? name : "";
-    {
-        std::lock_guard<std::mutex> lk(mu);
-        if (!warned.emplace(key, true).second) return;   // warned this name already
-    }
-    std::string msg = "xi::use(\"" + key + "\").process(pack): target is a declared "
-                      "ordered sink — process() is request-reply and is rejected on "
-                      "sinks (returns an empty pack); feed the sink with "
-                      "xi::use(\"" + key + "\").push(pack) instead "
-                      "(staged + flushed in frame order; docs/new_gen/17)";
-    host->log(3, msg.c_str());
+    warn_once_(host, "sink_target/" + key,
+        "xi::use(\"" + key + "\").process(pack): target is a declared "
+        "ordered sink — process() is request-reply and is rejected on "
+        "sinks (returns an empty pack); feed the sink with "
+        "xi::use(\"" + key + "\").push(pack) instead "
+        "(staged + flushed in frame order; docs/new_gen/17)");
 }
 
 class UseProxy {
@@ -904,9 +883,9 @@ public:
     // emit_record into the trigger bus, and scripts read the CURRENT trigger
     // (xi::current_trigger().image("src") / the XI_INSPECT_ENTRY view) rather
     // than pulling a frame from an instance. The SDK-side landing pad
-    // (g_use_grab_fn_) is now gone too; the host still passes its use_grab_cb
-    // stub into the retained grab_fn ABI slot (xi_script_set_use_callbacks),
-    // where it is simply discarded until that slot is formally cut.
+    // (g_use_grab_fn_) is now gone too; the host passes nullptr into the
+    // retained grab_fn ABI slot (xi_script_set_use_callbacks), which is
+    // discarded until that slot is formally cut.
 
     // ─── polaris2 gate P2: expose-from-script (push a sealed Pack to a sink) ──
     //

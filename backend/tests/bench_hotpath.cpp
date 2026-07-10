@@ -201,7 +201,7 @@ static Result run_scenario(const Config& cfg) {
                 lane.cv.notify_one();
                 if (!have) continue;
 
-                ev.dequeued_at_us = xi::now_us();   // same stamp the real worker makes
+                ev.dequeued_at_us = xi::wall_us();   // same stamp the real worker makes
 
                 // --- read the frame back off the pack (the real consume path), then
                 //     the fixed tiny inspect, timed exactly like run_inspection_compute_
@@ -216,7 +216,7 @@ static Result run_scenario(const Config& cfg) {
                 xi::EmitTurn turn(&lane.gate, eseq, &keep_going);
                 turn.wait_turn();
                 // "emit the result": stamp end-to-end latency for this frame.
-                int64_t now = xi::steady_now_us();
+                int64_t now = xi::mono_us();
                 lat[(size_t)rid - 1] = now - ev.timestamp_us;   // timestamp_us == steady t_emit
                 turn.complete();
 
@@ -280,7 +280,7 @@ static Result run_scenario(const Config& cfg) {
         pk->builder_add_image(b, "frame", cfg.width, cfg.height, cfg.channels, pool.data(h));
         xi_pack_handle f = pk->builder_seal(b);   // seal ref (rc 1)
         pool.release(h);                          // pack copied the pixels; drop create ref
-        int64_t t_emit = xi::steady_now_us();
+        int64_t t_emit = xi::mono_us();
         pk->emit_pack("bench_cam", xi::make_trigger_id(), f, t_emit);  // event takes a 2nd ref
         pk->release(f);   // drop our seal ref; the event holds the dispatch ref
     }
