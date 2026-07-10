@@ -243,6 +243,16 @@ public:
     Future(const Future&) = delete;
     Future& operator=(const Future&) = delete;
 
+    // Dropping an unconsumed Future: cooperatively cancel the sibling task
+    // BEFORE the std::future member's dtor blocks on it, so a task that polls
+    // `xi::cancellation_requested()` can bail out promptly. Signal only —
+    // the blocking wait itself is unchanged.
+    ~Future() {
+        if (f_.valid()) {
+            if (token_) token_->cancelled.store(true, std::memory_order_relaxed);
+        }
+    }
+
     // The "await": implicit conversion blocks and returns the value.
     // Safe to call multiple times — caches the result after first get().
     operator T() { return get(); }
@@ -291,6 +301,13 @@ public:
     Future& operator=(Future&&) noexcept = default;
     Future(const Future&) = delete;
     Future& operator=(const Future&) = delete;
+
+    // Same as Future<T>::~Future: signal cancel before the blocking wait.
+    ~Future() {
+        if (f_.valid()) {
+            if (token_) token_->cancelled.store(true, std::memory_order_relaxed);
+        }
+    }
 
     void get() {
         if (!consumed_) { f_.get(); consumed_ = true; }

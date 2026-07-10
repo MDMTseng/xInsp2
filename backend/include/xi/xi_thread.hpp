@@ -18,6 +18,7 @@
 //
 
 #include "xi_seh.hpp"
+#include "xi_crash_dump.hpp"   // xi::crash::reserve_fault_stack — 128 KB dump headroom
 
 #include <cstdio>
 #include <exception>
@@ -34,6 +35,10 @@ std::thread spawn_worker(std::string name, F&& f, Args&&... args) {
         [name = std::move(name),
          fn   = std::forward<F>(f),
          tup  = std::make_tuple(std::forward<Args>(args)...)]() mutable {
+            // Reserve fault-stack headroom FIRST (mirrors xi_async / lane
+            // workers) so the crash filter can still write a minidump after
+            // a STACK_OVERFLOW on this worker; no-op on non-Windows.
+            xi::crash::reserve_fault_stack();
             xi::install_seh_translator();
             try {
                 std::apply(std::move(fn), std::move(tup));
