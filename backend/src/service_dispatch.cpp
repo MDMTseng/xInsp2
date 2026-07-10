@@ -625,7 +625,12 @@ void controlled_shutdown_teardown_() {
     // close_project, leaving ~PluginManager to do it at static destruction — after
     // FreeLibrary (destroy_fn into unmapped code) and after ImagePool was torn down
     // (release_all_for on a destroyed singleton). Idempotent: no-op if already closed.
-    g_eng.plugin_mgr.close_project();
+    // QuiesceToken: NOT a missing-guard site — this function IS the quiesce
+    // (begin_shutdown + clear_sink + stop_dispatch_pool_ + inflight drain +
+    // run_mu above are a terminal SUPERSET of quiesce_dispatch_for_lifecycle_
+    // op_, with no resume by design). Assert that explicitly instead of
+    // constructing a resume-shaped guard inside teardown.
+    g_eng.plugin_mgr.close_project(xi::QuiesceToken::assert_no_dispatch());
     g_eng.srv_for_bp = nullptr;                            // last: every emitter is quiesced now
     g_eng.teardown_done.store(true);                       // T2: unblock a waiting console handler
 }
@@ -715,11 +720,17 @@ void install_trigger_sink_(xi::ws::Server* srv) {
 // handler remembering to respawn — five handlers (recompile/rebuild/commit/discard/
 // export) used to quiesce and never resume, silently stopping the live stream on a
 // hot-recompile. An op that legitimately should NOT resume (the stream ends or is
-// replaced: unload_script / close_project / open_project) calls dismiss().
+// replaced: unload_script / close_project / open_project / a partial commit_group)
+// calls skip_resume(), which only clears the resume-continuous + restore-sink
+// flags — the launch PAUSE is always released in the destructor, never early
+// (the O2 fix, structurally; see DispatchPoolGuard::skip_resume).
+// QuiesceToken: the guard also carries the proof-of-quiesce capability
+// (guard.token()) that every destructive PluginManager method now REQUIRES —
+// an op that forgets this guard no longer compiles (xi_quiesce_token.hpp).
 // MOVE-ONLY: quiesce_dispatch_for_lifecycle_op_ returns one by value; a moved-from
 // guard won't resume. CALLERS MUST HOLD IT (`auto g = quiesce_...`) for the op's
 // duration — a discarded temporary would resume immediately, before the op runs.
-// DispatchPoolGuard struct (incl. its inline resume()/dismiss()) moved to
+// DispatchPoolGuard struct (incl. its inline resume()/skip_resume()) moved to
 // service_internal.hpp so lifecycle-op cmd handlers in other TUs can hold it.
 DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
                                                             xi::ws::Server* srv) {
@@ -731,8 +742,9 @@ DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
     // handler thread — so without this a source emitting mid-op could launch an
     // inspect that calls into a DLL being unloaded (use-after-unload). clear_sink stops
     // future fires; pause()+drain() is the Dekker handshake that also catches an emit
-    // already past the sink read but not yet counted. The guard reverses both (resume
-    // re-installs the sink + unpauses; dismiss unpauses without re-installing).
+    // already past the sink read but not yet counted. The guard reverses both in its
+    // DESTRUCTOR (resume unpauses + re-installs the sink; after skip_resume() it
+    // still unpauses at scope end but skips the sink re-install + continuous respawn).
     g_eng.inflight.pause();
     g.paused_launches_ = true;
     g.restore_sink_    = xi::TriggerBus::instance().has_sink();   // only restore if one existed

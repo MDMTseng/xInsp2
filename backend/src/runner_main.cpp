@@ -386,10 +386,12 @@ int main(int argc, char** argv) {
     // --certify-plugin mode) before arming it. A DLL that crashes certification
     // is skipped, surfaced via pm.certify_warnings(), and never loaded here.
     pm.set_certify_exe(get_exe_path());
-    int n = pm.scan_plugins(plugins_dir);
+    // QuiesceToken: the headless runner has no dispatch pool at all — nothing
+    // to quiesce (see xi_quiesce_token.hpp).
+    int n = pm.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), plugins_dir);
     std::fprintf(stderr, "[runner] scanned %d plugins from %s\n", n, plugins_dir.c_str());
     for (auto& d : args.extra_plugins) {
-        int extra = pm.scan_plugins(d);
+        int extra = pm.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), d);
         std::fprintf(stderr, "[runner] scanned %d extra plugins from %s\n", extra, d.c_str());
     }
 
@@ -399,7 +401,7 @@ int main(int argc, char** argv) {
     auto host_api = xi::ImagePool::make_host_api();
 
     // Restore instances (plugins + configs) from project.json.
-    if (!pm.open_project(args.project_dir)) {
+    if (!pm.open_project(xi::QuiesceToken::assert_no_dispatch(), args.project_dir)) {
         std::fprintf(stderr, "[runner] open_project failed for %s (missing project.json?)\n",
                      args.project_dir.c_str());
         return 2;

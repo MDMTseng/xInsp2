@@ -32,6 +32,7 @@
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_project.hpp>
 #include <xi/xi_plugin_manager.hpp>
+#include <xi/xi_quiesce_token.hpp>
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_inflight_runs.hpp>
 #include <xi/xi_trigger_bus.hpp>
@@ -366,9 +367,17 @@ struct DispatchPoolGuard {
     DispatchPoolGuard& operator=(const DispatchPoolGuard&) = delete;
     ~DispatchPoolGuard() { resume(); }
 
+    // Proof-of-quiesce capability (xi_quiesce_token.hpp): pass `guard.token()`
+    // to every destructive PluginManager method. Only this guard (friend) and
+    // the explicit QuiesceToken::assert_no_dispatch() escape hatch can mint
+    // one — a lifecycle op that forgets the quiesce guard no longer compiles.
+    const xi::QuiesceToken& token() const { return token_; }
+
     void resume() {
         if (!armed_) return;
         armed_ = false;
+        // The launch pause is ALWAYS released here — at scope end, never early
+        // (skip_resume() deliberately cannot release it; see O2 below).
         if (paused_launches_) { g_eng.inflight.unpause(); paused_launches_ = false; }
         if (restore_sink_ && srv) { install_trigger_sink_(srv); restore_sink_ = false; }
         if (was_continuous && quiesced) {
@@ -380,10 +389,25 @@ struct DispatchPoolGuard {
             std::fprintf(stderr, "[xinsp2] continuous mode resumed\n");
         }
     }
-    void dismiss() {
-        armed_ = false;
-        if (paused_launches_) { g_eng.inflight.unpause(); paused_launches_ = false; }
+    // skip_resume() (formerly dismiss()): the op ends or replaces the stream
+    // (open/close_project) or must leave dispatch stopped (partial
+    // commit_group) — so on destruction do NOT respawn continuous mode and do
+    // NOT re-install the bus sink. Unlike the old dismiss(), it does NOT
+    // release the launch pause: that is ALWAYS done in the destructor
+    // (resume()), never early. Releasing the pause before scope end let a
+    // straggler source-emit one-shot (already past the sink read) launch into
+    // a just-unmapped DLL mid-teardown — the O2 use-after-unload class. With
+    // this split that bug is unwritable: the pause outlives every statement
+    // in the guarded scope by construction.
+    void skip_resume() {
+        was_continuous = false;   // don't respawn continuous mode at scope end
+        restore_sink_  = false;   // don't re-install the bus sink either
     }
+
+private:
+    // Minted via friendship (private ctor). Lives exactly as long as the
+    // quiesce window this guard represents.
+    xi::QuiesceToken token_;
 };
 
 DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name, xi::ws::Server* srv);

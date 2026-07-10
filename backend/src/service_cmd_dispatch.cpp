@@ -541,15 +541,16 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             // group and the line silently ran a mix of new+old config. That is the
             // dishonest auto-resume: on a partial commit we must NOT resume.
             //
-            // dismiss() makes the guard leave dispatch STOPPED (it does not re-install
-            // the trigger sink or respawn continuous mode; it only re-enables one-shot
-            // launches) — so continuous production stays halted and an operator must
+            // skip_resume() makes the guard leave dispatch STOPPED at scope end (it does
+            // not re-install the trigger sink or respawn continuous mode; one-shot
+            // launches are re-enabled when the guard's destructor releases the launch
+            // pause) — so continuous production stays halted and an operator must
             // intervene. We also latch a sticky config-fault status under "@commit" so a
             // status poll / the FE sees the degraded state after this rsp returns.
             // NOTE: this fixes the dishonest resume + result status only; the all-or-none
             // commit SEMANTICS (targets still commit sequentially, no rollback of the
             // ones that took) are the deferred atomic-recipe rework and are unchanged.
-            guard.dismiss();
+            guard.skip_resume();
             set_status_internal("@commit",
                 "config fault: partial commit — dispatch stopped, operator intervention required");
             xp::Rsp r; r.id = id; r.ok = false;

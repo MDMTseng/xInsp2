@@ -63,7 +63,7 @@ inline bool PluginManager::create_project(const std::string& folder, const std::
     return true;
 }
 
-inline void PluginManager::close_project() {
+inline void PluginManager::close_project(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/) {
     std::lock_guard<std::mutex> lk(mu_);
     for (auto& [k, v] : project_.instances) {
         InstanceRegistry::instance().remove(k);
@@ -135,7 +135,7 @@ inline void PluginManager::close_project() {
 // Commit: mirror the working copy back onto the canonical project (adds +
 // overwrites + deletes removed files), so the on-disk project reflects every
 // edit made this session. No-op error if no working copy is active.
-inline bool PluginManager::commit_working_copy() {
+inline bool PluginManager::commit_working_copy(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/) {
     std::lock_guard<std::mutex> lk(mu_);
     if (canonical_path_.empty()) return false;
     // Journal the commit so an interruption (crash/power loss mid-mirror) is
@@ -170,7 +170,7 @@ inline bool PluginManager::commit_working_copy() {
 
 // Discard: blow away the working copy and re-seed it from the canonical
 // project, then reopen. Returns false if no working copy is active.
-inline bool PluginManager::reopen_fresh_working_copy() {
+inline bool PluginManager::reopen_fresh_working_copy(const QuiesceToken& quiesced /*proof the caller has quiesced dispatch*/) {
     std::string canon;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -178,7 +178,8 @@ inline bool PluginManager::reopen_fresh_working_copy() {
         canon = canonical_path_;
     }
     // close_project()/open_project() each take mu_ — don't hold it here.
-    close_project();
+    // (Both are destructive; the caller's quiesce proof threads through.)
+    close_project(quiesced);
     std::error_code ec;
     // CRASH-RECOVERY GUARD (bug #14). Discard's contract is "throw away my
     // UNCOMMITTED working-copy edits". A *pending commit* (kCommitMarker
@@ -203,10 +204,11 @@ inline bool PluginManager::reopen_fresh_working_copy() {
         std::fprintf(stderr, "[xinsp2] working copy: discard KEPT scratch — pending "
                      "commit heal failed; reopen will retry roll-forward\n");
     }
-    return open_project(canon, /*working_copy=*/true);   // re-seeds from canonical
+    return open_project(quiesced, canon, /*working_copy=*/true);   // re-seeds from canonical
 }
 
-inline bool PluginManager::open_project(const std::string& folder_arg, bool working_copy) {
+inline bool PluginManager::open_project(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                        const std::string& folder_arg, bool working_copy) {
     std::lock_guard<std::mutex> lk(mu_);
 
     // Roll forward an interrupted working-copy commit before touching

@@ -609,7 +609,7 @@ void cmd_commit_working_copy_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
             // scratch we're about to commit is itself stale, so don't claim success.
             send_rsp_err(srv, id, "failed to persist instance '" + save_fail +
                          "' before commit (disk full / read-only?)");
-        } else if (g_eng.plugin_mgr.commit_working_copy()) {
+        } else if (g_eng.plugin_mgr.commit_working_copy(_wc_commit_guard.token())) {
             send_rsp_ok(srv, id, "{\"committed\":true,\"canonical\":" +
                         ([]{ std::string s; xp::json_escape_into(s, g_eng.plugin_mgr.canonical_path()); return s; }()) + "}");
         } else {
@@ -625,7 +625,7 @@ void cmd_discard_working_copy_(xi::ws::Server& srv, int64_t id, const xp::Parsed
             return;
         }
         auto _wc_discard_guard = quiesce_dispatch_for_lifecycle_op_("discard_working_copy", &srv);  // resumes at block end
-        if (g_eng.plugin_mgr.reopen_fresh_working_copy()) {
+        if (g_eng.plugin_mgr.reopen_fresh_working_copy(_wc_discard_guard.token())) {
             send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "discard failed");
@@ -820,11 +820,13 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         // durable. Default false = legacy in-place behaviour.
         bool working_copy = parsed->args_json.find("\"working_copy\":true") != std::string::npos
                           || parsed->args_json.find("\"working_copy\": true") != std::string::npos;
-        // O2 (round-10 red-team): hold the launch-pause across open_project()'s teardown of the
-        // OLD project (it FreeLibrary's the old plugin DLLs) — do NOT dismiss() here, or a
-        // straggler source-emit one-shot could launch (paused_==0) into an unmapped old DLL
-        // (use-after-unload). Dismiss AFTER open_project() returns; the new project drives its
-        // own autostart, so we still skip the guard's continuous-resume.
+        // O2 (round-10 red-team): the launch-pause must be HELD across open_project()'s
+        // teardown of the OLD project (it FreeLibrary's the old plugin DLLs) — releasing
+        // it early let a straggler source-emit one-shot launch (paused_==0) into an
+        // unmapped old DLL (use-after-unload). skip_resume() below only skips the
+        // continuous-resume (the new project drives its own autostart); the pause is
+        // released by the guard's destructor at scope end — an early release is no
+        // longer expressible.
         auto open_guard = quiesce_dispatch_for_lifecycle_op_("open_project", &srv);
         // Drop stale bus state from any previously-open project (the old sink +
         // the per-source emit-time map, whose source names belong to the project
@@ -848,8 +850,8 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             g_eng.persistent_kv_bytes.clear();  // U2: kv channel — same no-leak boundary
             g_eng.persistent_kv_schema = 0;
         }
-        const bool opened = g_eng.plugin_mgr.open_project(*folder, working_copy);
-        open_guard.dismiss();   // old project torn down + DLLs unloaded — release the launch pause (skip resume: new project autostarts)
+        const bool opened = g_eng.plugin_mgr.open_project(open_guard.token(), *folder, working_copy);
+        open_guard.skip_resume();   // skip the continuous-resume at scope end (new project autostarts); the launch pause is released by the guard's DESTRUCTOR, never early (O2)
         if (opened) {
             // F5: advisory single-writer stamp. If another LIVE backend already
             // owns this canonical, warn — two writers to one project clobber each
@@ -937,14 +939,14 @@ void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
             if (s == xi::SysState::Running || s == xi::SysState::Degraded)
                 xi::health().set_state(xi::SysState::Draining);
         }
-        // O2 (round-10 red-team): keep the detached-launch pause HELD across the teardown
-        // below — do NOT dismiss() here. dismiss() unpauses g_eng.inflight, and
-        // close_project() FreeLibrary's the plugin DLLs; a source-emit thread that already
-        // snapshotted the bus sink (before the quiesce's clear_sink) could otherwise launch a
-        // detached one-shot — inflight.launch would see paused_==0 — that runs concurrently
-        // with the unload and calls into an unmapped DLL (use-after-unload). Dismiss AFTER
-        // close_project(): that still skips the continuous-resume (no project to stream), it
-        // just releases the pause once the DLLs are gone.
+        // O2 (round-10 red-team): the detached-launch pause stays HELD across the teardown
+        // below. close_project() FreeLibrary's the plugin DLLs; a source-emit thread that
+        // already snapshotted the bus sink (before the quiesce's clear_sink) could otherwise
+        // launch a detached one-shot — inflight.launch would see paused_==0 — that runs
+        // concurrently with the unload and calls into an unmapped DLL (use-after-unload).
+        // skip_resume() after close_project() only skips the continuous-resume (no project
+        // to stream); the pause itself is released by the guard's destructor at scope end —
+        // the old dismiss()'s early unpause is no longer expressible.
         auto close_guard = quiesce_dispatch_for_lifecycle_op_("close_project", &srv);
         // Drop the bus's captured sink (it points at `srv`) BEFORE the plugin
         // DLLs are unloaded — otherwise the stale sink can fire into a torn-down
@@ -953,8 +955,8 @@ void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
         // across every open→emit→close cycle).
         xi::TriggerBus::instance().clear_sink();
         xi::TriggerBus::instance().reset();
-        g_eng.plugin_mgr.close_project();
-        close_guard.dismiss();   // teardown done, DLLs unloaded — release the launch pause (skip resume: no project)
+        g_eng.plugin_mgr.close_project(close_guard.token());
+        close_guard.skip_resume();   // skip the continuous-resume at scope end (no project to stream); the launch pause is released by the guard's DESTRUCTOR, never early (O2)
         clear_inst_state();   // instances are gone — drop host-tracked state
         // Health contract: no project → `boot`. The instances (and their runtime-
         // fault overlay) are gone; the script survives a close (its DLL is not

@@ -219,7 +219,8 @@ int main() {
         // from disk (no child spawned) — discovery never arms the bad plugin.
         {
             xi::PluginManager pm;   // certify_exe_ empty
-            int n = pm.scan_plugins(root.string());
+            // QuiesceToken: bare PluginManager, single-threaded test — no dispatch pool.
+            int n = pm.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), root.string());
             CHECK(pm.find_plugin("quar") == nullptr);   // gated out
             CHECK(pm.find_plugin("good") != nullptr);    // sibling unaffected
             CHECK(n == 1);
@@ -231,7 +232,7 @@ int main() {
 
             // (b) G2.3 operator un-quarantine: clears the verdict, re-scan re-arms.
             CHECK(pm.unquarantine_plugin("quar"));
-            int n2 = pm.scan_plugins(root.string());
+            int n2 = pm.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), root.string());
             CHECK(pm.find_plugin("quar") != nullptr);    // now armed
             CHECK(n2 == 2);
         }
@@ -242,13 +243,13 @@ int main() {
         {
             write_verdict(root / "quar", "quar.dll", "quarantined");
             xi::PluginManager pm;
-            CHECK(pm.scan_plugins(root.string()) == 1);   // gated again
+            CHECK(pm.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), root.string()) == 1);   // gated again
             CHECK(pm.find_plugin("quar") == nullptr);
             // Mutate the DLL on disk -> new content hash.
             { std::ofstream f((root / "quar" / "quar.dll").string(),
                               std::ios::binary | std::ios::app); f << "REBUILT"; }
             xi::PluginManager pm2;
-            int n = pm2.scan_plugins(root.string());
+            int n = pm2.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), root.string());
             CHECK(pm2.find_plugin("quar") != nullptr);    // stale verdict ignored
             CHECK(n == 2);
         }
