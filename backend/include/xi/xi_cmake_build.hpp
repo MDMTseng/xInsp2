@@ -13,14 +13,23 @@
 // Extracted from xi_plugin_manager.hpp — no PluginManager state, so a leaf the
 // manager calls into.
 //
-// TODO(linux): run_cmd_capture has the _WIN32 _popen path; the popen() branch is
-// stubbed pending the Linux port (see linux-port.md).
+// TODO(linux): run_cmd_capture has the _WIN32 CreateProcess path; the popen()
+// branch is stubbed pending the Linux port (see linux-port.md) — when written,
+// it must carry the same timeout bound (kCmakeBuildTimeoutMs + kill).
 //
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <vector>
+
+#ifdef _WIN32
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <windows.h>
+#endif
 
 namespace xi {
 namespace cmake_build {
@@ -50,21 +59,107 @@ inline uint64_t newest_source_mtime(const std::string& dir) {
     return newest;
 }
 
+#ifdef _WIN32
+// Ceiling on one cmake configure/build invocation. rebuild runs on the sole
+// poll thread while holding the quiesce + manager lock, so a wedged toolchain
+// (hung MSBuild node, AV-locked link output, stuck nvcc) must NOT freeze the
+// control plane indefinitely — same rationale as the script compiler's
+// kCompileTimeoutMs, but larger: a cmake plugin build is a full configure +
+// multi-TU (possibly CUDA) build, not a single cl.exe run.
+static constexpr DWORD kCmakeBuildTimeoutMs = 600000;   // 10 min
+#endif
+
 // Run a command, capturing combined stdout+stderr into *log. Returns the
-// process exit code (or -1 if it couldn't be spawned).
+// process exit code, -1 if it couldn't be spawned, or -2 if it exceeded
+// kCmakeBuildTimeoutMs (the whole child tree is killed and the timeout is
+// noted in *log, so the caller reports a failed build instead of hanging).
 inline int run_cmd_capture(const std::string& cmd, std::string& log) {
 #ifdef _WIN32
-    // _popen routes through cmd.exe; the extra outer quotes keep a quoted
-    // exe path + quoted args parsing correctly.
-    std::string full = "\"" + cmd + " 2>&1\"";
-    FILE* pipe = _popen(full.c_str(), "r");
-    if (!pipe) { log += "[failed to spawn: " + cmd + "]\n"; return -1; }
-    char buf[4096];
-    while (fgets(buf, sizeof(buf), pipe)) log += buf;
-    int rc = _pclose(pipe);
+    // Same cmd.exe routing _popen used; the outer quotes keep a quoted exe
+    // path + quoted args parsing correctly. stdout and stderr are combined by
+    // handing both the same pipe write end (no `2>&1` needed).
+    std::string full = "cmd.exe /C \"" + cmd + "\"";
+
+    SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) {
+        log += "[failed to spawn: " + cmd + "]\n"; return -1;
+    }
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);   // child gets wr only
+
+    // Kill-on-close job object so a timeout reaps the WHOLE tree — cmd ->
+    // cmake -> MSBuild -> cl/nvcc — not just the immediate cmd.exe (the gap
+    // run_with_env in xi_script_compiler.hpp still has). Created suspended so
+    // the child is inside the job before it can spawn anything.
+    HANDLE job = CreateJobObjectA(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+    }
+
+    std::vector<char> mut(full.begin(), full.end()); mut.push_back('\0');
+    STARTUPINFOA si{}; si.cb = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = wr;
+    si.hStdError  = wr;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessA(nullptr, mut.data(), nullptr, nullptr, TRUE,
+                        CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
+        if (job) CloseHandle(job);
+        CloseHandle(rd); CloseHandle(wr);
+        log += "[failed to spawn: " + cmd + "]\n"; return -1;
+    }
+    if (job) AssignProcessToJobObject(job, pi.hProcess);   // best-effort; else pi-only kill below
+    ResumeThread(pi.hThread);
+    CloseHandle(wr);   // parent's copy — children keep theirs until they exit
+
+    // Drain the pipe WHILE waiting (a full 4K pipe buffer would block the
+    // child forever — the drain is part of the liveness fix, not just
+    // capture), and enforce the wall-clock bound. PeekNamedPipe keeps every
+    // read non-blocking: a lingering grandchild (mspdbsrv, an MSBuild reuse
+    // node) holding the write end must not turn the final read into a hang.
+    auto drain = [&]() {
+        DWORD avail = 0;
+        while (PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
+            char buf[4096]; DWORD got = 0;
+            DWORD want = avail < (DWORD)sizeof(buf) ? avail : (DWORD)sizeof(buf);
+            if (!ReadFile(rd, buf, want, &got, nullptr) || got == 0) break;
+            log.append(buf, got);
+        }
+    };
+    ULONGLONG start = GetTickCount64();
+    bool timed_out = false;
+    for (;;) {
+        drain();
+        if (WaitForSingleObject(pi.hProcess, 50) != WAIT_TIMEOUT) break;   // exited
+        if (GetTickCount64() - start >= kCmakeBuildTimeoutMs) { timed_out = true; break; }
+    }
+
+    int rc;
+    if (timed_out) {
+        // A hung toolchain is as dangerous to the control plane as a crashed
+        // one: kill the tree and surface a failed build.
+        if (job) TerminateJobObject(job, 1);
+        else     TerminateProcess(pi.hProcess, 1);   // no job: immediate child only
+        WaitForSingleObject(pi.hProcess, 2000);
+        drain();
+        log += "[timed out after " + std::to_string(kCmakeBuildTimeoutMs / 1000) +
+               "s — killed: " + cmd + "]\n";
+        rc = -2;
+    } else {
+        drain();   // tail written between the last in-loop drain and exit
+        DWORD code = 0; GetExitCodeProcess(pi.hProcess, &code);
+        rc = (int)code;
+    }
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    if (job) CloseHandle(job);   // kill-on-close also reaps any straggler nodes
+    CloseHandle(rd);
     return rc;
 #else
-    // TODO(linux): popen(cmd + " 2>&1") — same shape, no outer-quote wrap.
+    // TODO(linux): popen(cmd + " 2>&1") — same shape, no outer-quote wrap;
+    // must be bounded like the _WIN32 path (kCmakeBuildTimeoutMs + kill).
     (void)cmd; log += "[cmake build unsupported on this platform]\n"; return -1;
 #endif
 }
@@ -75,8 +170,9 @@ inline int build_cmake_plugin(const std::string& cmake_exe, const std::string& s
                               const std::string& config, const std::string& xinsp_root,
                               const std::string& opencv_dir, std::string& log) {
     auto build_dir = (std::filesystem::path(src_dir) / "build").string();
-    // The command goes through cmd.exe (_popen). `cmake_exe` and `config` come
-    // from the WS client, so reject shell metacharacters (and a `"` that could
+    // The command goes through cmd.exe (run_cmd_capture's `cmd.exe /C`).
+    // `cmake_exe` and `config` come from the
+    // WS client, so reject shell metacharacters (and a `"` that could
     // break out of quoting) before they reach the shell — command-injection
     // guard, mirrors the cl.exe driver's is_safe_path. Paths are quoted below;
     // Windows paths can't contain `"` and `&`/`^` are inert inside quotes.
