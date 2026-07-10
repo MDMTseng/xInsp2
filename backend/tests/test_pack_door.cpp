@@ -466,6 +466,93 @@ static void test_bin_pool_exhaustion_no_null_span() {
     for (xi_image_handle h : hog) xi::ImagePool::instance().release(h);
 }
 
+// ---------------------------------------------------------------------------
+// (8) Cross-plane owner-sweep regression: the producer's IMAGE-plane sweep
+//     (ImagePool::release_all_for, what the adapter dtor runs on instance
+//     teardown) must not free a pool buffer minted INTO a pack that a consumer
+//     still co-owns via a PACK-level retain (the shipped cache/buffer_replay
+//     pattern — fi->retain on the whole pack, no per-image adopt).
+//
+//     Pre-fix: pack_pool minted with owner = current_owner() (the producer P)
+//     at pool rc 1, and PackRegistry::retain bumps only the pack-registry rc —
+//     never the pool rc. So release_all_for(P) hit the rc 1->0 branch and freed
+//     the buffer while the registry's R1 guard correctly kept the pack alive
+//     for the co-owner: the pack survived but get_image returned an empty span
+//     (generation-checked, memory-safe) — silent data loss. Post-fix the pack's
+//     buffers are minted owner-NEUTRAL (0): the image sweep skips them (swept
+//     == 0) and the pack alone governs their release. This test FAILS pre-fix
+//     (swept == 1, iv.pixels == null/length 0) and PASSES post-fix.
+// ---------------------------------------------------------------------------
+static void test_cross_plane_owner_sweep_keeps_coowned_pack_buffers() {
+    SECTION("cross-plane: producer image-sweep spares a co-owned pack's minted buffers");
+    xi::install_pack_abi();
+    const xi_pack_v1* fi = xi::pack_v1_iface();
+    size_t base_frames = xi::PackRegistry::instance().live_frames();
+    int    base_live   = pool_live();
+
+    xi::ImagePoolOwnerId P = xi::ImagePool::alloc_owner_id();   // producer instance
+    xi::ImagePoolOwnerId C = xi::ImagePool::alloc_owner_id();   // pack-retaining consumer
+
+    // Producer: mint an image AND a pooled-class bin INTO the pack under its
+    // OwnerGuard, exactly as the adapter wraps a source's process().
+    std::vector<uint8_t> gray(16);
+    for (int i = 0; i < 16; ++i) gray[(size_t)i] = uint8_t(i * 11 + 5);
+    const int32_t BN = 4096;                       // >= kPackLargeThreshold -> pooled
+    std::vector<uint8_t> big((size_t)BN);
+    for (int32_t i = 0; i < BN; ++i) big[(size_t)i] = uint8_t(i * 13 + 1);
+    xi_pack_handle f = XI_PACK_NULL;
+    {
+        xi::ImagePool::OwnerGuard g(P);
+        xi_pack_builder b = fi->builder_new();
+        fi->builder_add_i64(b, "seq", 5);
+        fi->builder_add_image(b, "frame", 4, 4, 1, gray.data());
+        fi->builder_add_bin(b, "blob", big.data(), BN);
+        f = fi->builder_seal(b);
+    }
+    CHECK(f != XI_PACK_NULL);
+    CHECK(pool_live() == base_live + 2);           // image + pooled bin minted
+
+    // Consumer co-owns the PACK across frames (cache.cpp's fi->retain — a
+    // pack-LEVEL retain; it does NOT addref the pack's pool buffers).
+    { xi::ImagePool::OwnerGuard g(C); fi->retain(f); }
+
+    // Producer releases its own pack ref properly (well-behaved source), then
+    // is torn down: the adapter dtor's IMAGE-plane leak sweep runs.
+    { xi::ImagePool::OwnerGuard g(P); fi->release(f); }
+    int swept = xi::ImagePool::instance().release_all_for(P);
+    CHECK(swept == 0);                             // pre-fix: 2 (pack buffers freed as "P's leaks")
+    CHECK(xi::ImagePool::sweep_packs_for(P) == 0); // pack plane: nothing charged to P
+    CHECK(xi::PackRegistry::instance().live_frames() == base_frames + 1);  // C keeps the pack
+
+    // THE DATA-LOSS ASSERTION: the co-owned pack's buffers are still readable.
+    xi_pack_image iv{};
+    CHECK(fi->get_image(f, "frame", &iv) == 1);
+    CHECK(iv.width == 4 && iv.height == 4 && iv.channels == 1);
+    CHECK(iv.length == 16 && iv.pixels != nullptr);     // pre-fix: length 0 / null
+    if (iv.pixels && iv.length == 16) {
+        const uint8_t* p = static_cast<const uint8_t*>(iv.pixels);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) ok = ok && (p[i] == uint8_t(i * 11 + 5));
+        CHECK(ok);                                      // pixels intact, not just non-null
+    }
+    const void* bp = nullptr; int32_t bl = 0;
+    CHECK(fi->get_bin(f, "blob", &bp, &bl) == 1);       // pre-fix: 0 (F1 guard refuses dead span)
+    CHECK(bp != nullptr && bl == BN);
+    if (bp && bl == BN) {
+        const uint8_t* p = static_cast<const uint8_t*>(bp);
+        bool ok = true;
+        for (int32_t i = 0; i < BN; ++i) ok = ok && (p[i] == uint8_t(i * 13 + 1));
+        CHECK(ok);
+    }
+
+    // The co-owner drops its last ref: pack destroyed, buffers freed exactly
+    // once (no leak, no double-free), everything balances to baseline.
+    { xi::ImagePool::OwnerGuard g(C); fi->release(f); }
+    CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
+    CHECK(pool_live() == base_live);
+    CHECK(fi->get_image(f, "frame", &iv) == 0);         // the handle is dead now
+}
+
 int main() {
     std::printf("[test] xi.pack@1 carved data-plane door + dispatch dual-carry\n");
     test_door_probe();
@@ -475,6 +562,7 @@ int main() {
     test_owner_sweep_regression();
     test_has_source_pack_identity();
     test_bin_pool_exhaustion_no_null_span();
+    test_cross_plane_owner_sweep_keeps_coowned_pack_buffers();
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
         return 0;

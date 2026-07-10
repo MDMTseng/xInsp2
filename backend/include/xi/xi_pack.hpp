@@ -324,6 +324,24 @@ private:
 // and resolved to a raw const span. This is the ONLY mint path in the pack
 // layer, satisfying doc 07's "handles are mintable only by the domain's own
 // allocator". See docs/new_gen/09-bufferpool-audit.md for the reuse verdict.
+//
+// OWNER-NEUTRAL MINT (cross-plane owner-sweep data-loss fix). A buffer minted
+// INTO a pack is governed by the pack alone: the builder/pack `handles_`
+// ledger releases it exactly once on destruction, and a LEAKED pack is
+// reclaimed by the PACK registry's own owner sweep (sweep_packs_for -> pack
+// destroy -> handle release). Tagging it with the producing INSTANCE's
+// ImagePool owner (current_owner()) was therefore redundant AND harmful:
+// PackRegistry::retain bumps only the pack-registry rc, never the pool rc, so
+// the buffer stayed at pool rc 1 — and the instance's image-plane sweep
+// (ImagePool::release_all_for on producer teardown) freed it out from under a
+// co-owner still holding the PACK (cache/buffer_replay retain pack-level).
+// The pack survived (the registry's R1 guard is correct) but get_image then
+// returned an empty span — silent data loss. Minting owner-0 makes the image
+// sweep skip pack buffers (owner != instance) so the pack solely governs
+// them. Standalone mints (host->image_create / xi::Image) keep the instance
+// owner and are still leak-swept; the ADOPT path (adopt_image: pool addref ->
+// rc 2 -> spared+orphaned by the sweep) was already correct. Diagnostic-only
+// side effect: stats_by_owner attributes pack buffers to owner 0.
 // ===================================================================
 namespace pack_pool {
 
@@ -331,12 +349,14 @@ namespace pack_pool {
 // (n==0, over the pool's 1 GiB per-buffer cap, or pool exhausted).
 inline xi_image_handle alloc_bytes(const void* src, size_t n) {
     if (n == 0 || n > size_t(INT32_MAX)) return XI_IMAGE_NULL;
+    ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
     xi_image_handle h = ImagePool::instance().create(int32_t(n), 1, 1);
     if (h && src) std::memcpy(ImagePool::instance().data(h), src, n);
     return h;
 }
 // Mint an image buffer (w*h*c bytes) and copy pixels in. 0 on failure.
 inline xi_image_handle alloc_image(int32_t w, int32_t h, int32_t c, const void* px) {
+    ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
     xi_image_handle handle = ImagePool::instance().create(w, h, c);
     if (handle && px) {
         std::memcpy(ImagePool::instance().data(handle),
