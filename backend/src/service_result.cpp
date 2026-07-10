@@ -120,18 +120,29 @@ const char* run_ctx_frame_path_cb() {
 // the spawning dispatch frame. Instead it OWNS a heap snapshot: run_id + frame_path
 // copied by value; result_slot NULLED (a worker that may outlive its inspect must
 // not route a verdict into a frame that could already be gone — result_cb no-ops a
-// null-slot context, and push_off_dispatch_thread_ rejects it). snapshot runs on
+// null-slot context, and push_off_dispatch_thread_ rejects it on result_slot ==
+// nullptr, structurally — independent of any tid comparison). snapshot runs on
 // the SPAWNING thread (g_run_ctx is the live inspect there); null when off a run
-// (the worker then simply has no context). install runs on the WORKER and stamps
-// owner_tid to the worker's own thread; free releases it when the worker exits.
+// (the worker then simply has no context). install runs on the WORKER; free
+// releases the snapshot when the worker exits.
+//
+// A4-symmetry (Wave-2 #5, root cause): install used to RE-STAMP the snapshot's
+// owner_tid to the worker's OWN tid. That made the F4 off-thread detection
+// (warn_trigger_off_thread_ in service_sinks.cpp, fires on had_trigger &&
+// owner_tid != self) structurally unable to fire on a spawn_worker thread — an
+// ambient current_trigger() read there silently got the inactive view, while
+// the IDENTICAL mistake on an xi::async / xi::parallel_for worker aborts in
+// Debug. Nothing needed the stamp: the write-path push rejection keys on
+// result_slot == nullptr FIRST (above), never on the tid. The snapshot now
+// KEEPS the PARENT dispatch thread's owner_tid so the F4 detection fires
+// consistently across all three spawn primitives.
 void* run_ctx_snapshot_cb() {
     if (!g_run_ctx) return nullptr;
     auto* s = new RunContext(*g_run_ctx);
     s->result_slot = nullptr;   // detached: no live run slot to route into
-    return s;
+    return s;                   // owner_tid stays the PARENT's (A4 symmetry, above)
 }
 void run_ctx_install_worker_cb(void* s) {
-    if (s) static_cast<RunContext*>(s)->owner_tid = std::this_thread::get_id();
     g_run_ctx = static_cast<const RunContext*>(s);
 }
 void run_ctx_free_cb(void* s) { delete static_cast<RunContext*>(s); }

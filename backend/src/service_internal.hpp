@@ -242,15 +242,17 @@ void run_context_fail_loud_(const char* what);
 // run_id / frame_path read the installed context's fields for xi::run_id() /
 // xi::current_frame_path() (with the fail-loud presence check). snapshot / install
 // / free are the spawn_worker BY-VALUE path: snapshot allocates a worker-owned heap
-// copy of the current context (result_slot nulled) on the SPAWNING thread; install
-// stamps owner_tid = the worker's own thread and installs it; free releases it when
-// the worker exits.
+// copy of the current context (result_slot nulled; owner_tid KEPT as the parent
+// dispatch thread's — Wave-2 #5 A4 symmetry, so the F4 off-thread trigger-read
+// detection fires on a spawn_worker exactly like on async/parallel_for) on the
+// SPAWNING thread; install installs it on the worker; free releases it when the
+// worker exits.
 const void* run_ctx_get_cb();
 void        run_ctx_set_cb(const void* p);
 long long   run_ctx_run_id_cb();
 const char* run_ctx_frame_path_cb();
 void*       run_ctx_snapshot_cb();               // spawning thread → worker-owned heap snapshot (null if off-run)
-void        run_ctx_install_worker_cb(void* s);  // worker thread → owner_tid = self, install `s`
+void        run_ctx_install_worker_cb(void* s);  // worker thread → install `s` (parent owner_tid kept)
 void        run_ctx_free_cb(void* s);            // worker thread → free the snapshot
 
 // ---- shared constants ------------------------------------------------------
@@ -306,6 +308,12 @@ double  now_seconds();
 int64_t now_ms_();
 void send_rsp_ok(xi::ws::Server& srv, int64_t id, std::string data_json = "");
 void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err);
+// Error rsp WITH a data payload (diagnostics / partial results). Owns the
+// recent-errors push exactly like the plain overload — root cause (Wave-2 #2):
+// handlers that needed data_json hand-built a raw `xp::Rsp{ok:false}` and half
+// of them forgot push_recent_error, so compile/export/recompile failures were
+// invisible to cmd:recent_errors. No handler builds a raw error Rsp anymore.
+void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err, std::string data_json);
 void push_recent_error(std::string source, std::string message,
                        int64_t cmd_id = 0, int64_t run_id = 0);
 void emit_error_log(xi::ws::Server& srv, const std::string& msg, int64_t run_id = 0);
@@ -377,6 +385,123 @@ bool apply_process_priority_(const std::string& cls);
 void note_instance_crash_(const char* name, const char* why);
 void stamp_culprit_(const char* instance, const std::string& plugin);
 
+// ---- item-14 caught-fault policy (defined in service_sinks.cpp) -------------
+// Shared by every plugin-entering boundary via guarded_plugin_call below.
+void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* adapter);
+void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter);
+
+// ---- guarded_plugin_call: the ONE plugin-entry fault boundary ----------------
+// Root cause (Wave-2 #1): the item-14 six-step ritual — quarantined? gate →
+// pending-reinit apply → re-check → stamp_culprit_ → try{enter plugin} →
+// catch(seh){note_instance_crash_ + apply_on_fault_policy_ +
+// recover_seh_stack_or_die} / catch(std){note + policy} — was HAND-COPIED at
+// every plugin-entering site and drifted. Worst drift: cmd_prepare_instance_ /
+// cmd_commit_group_ caught seh_exception only via `catch (const std::exception&)`
+// (seh_exception derives from it), so recover_seh_stack_or_die never ran — after
+// a plugin STACK_OVERFLOW the WS thread's stack guard page stayed CONSUMED and
+// the next deep call on that thread corrupted memory instead of faulting; those
+// sites also skipped the quarantine gate and all crash bookkeeping, so a
+// prepare()/commit()-only crash-loop never tripped health/reinit/refuse. This
+// helper owns the whole ritual; real per-site differences are explicit
+// parameters, not divergent copies.
+//
+// `gate_quarantined`: whether a quarantined instance is REFUSED without entering
+// plugin code. TRUE for the data/exchange plane (process/pack door/exchange —
+// exactly what item-14 quarantine exists to stop). FALSE for the config-plane
+// re-enable surface: set_def / commit are the DOCUMENTED operator un-quarantine
+// path (their success path runs set_inst_state(name, Active), which lifts the
+// gate — see set_inst_state in service_dispatch.cpp); gating them would make an
+// on_fault=refuse quarantine unrecoverable through its own documented remedy.
+// get_def is also ungated: reading the faulted config is how an operator repairs
+// it. prepare() IS gated (its success does not set Active, so it can't lift a
+// quarantine — nothing is lost by refusing it).
+//
+// The on-fault POLICY (apply_on_fault_policy_) runs unconditionally on a caught
+// crash/throw when the instance is a C-ABI adapter: every previously-complete
+// site (use_push_pack_inline_ / use_exchange_cb / use_pack_process_cb /
+// cmd_exchange_instance_) applied it in both catch arms, so there is no
+// per-site fork to preserve. A null `adapter` (non-C-ABI instance) skips the
+// gates and policy but keeps the culprit stamp + catch + stack recovery.
+struct PluginCallResult {
+    enum class Kind { Ok, Quarantined, Crashed, Threw };
+    Kind        kind = Kind::Ok;
+    unsigned    seh_code = 0;   // Kind::Crashed only
+    std::string what;           // e.what() text (Crashed / Threw; empty for catch(...))
+    bool ok() const { return kind == Kind::Ok; }
+};
+
+template <class Fn>
+PluginCallResult guarded_plugin_call(const char* name,
+                                     xi::CAbiInstanceAdapter* adapter,
+                                     const std::string& plugin,
+                                     const char* what,           // entered surface, e.g. "exchange()" / "pack door"
+                                     bool gate_quarantined,
+                                     Fn&& fn) {
+    using K = PluginCallResult::Kind;
+    PluginCallResult r;
+    if (adapter) {
+        if (gate_quarantined && adapter->quarantined()) { r.kind = K::Quarantined; return r; }
+        if (adapter->reinit_pending()) {
+            apply_pending_reinit_(name, adapter);
+            if (gate_quarantined && adapter->quarantined()) { r.kind = K::Quarantined; return r; }
+        }
+    }
+    stamp_culprit_(name, plugin);
+    try {
+        fn();
+        return r;
+    } catch (const seh_exception& e) {
+        std::fprintf(stderr, "[xinsp2] %s '%s' crashed: 0x%08X (%s)\n",
+                     what, name, e.code, e.what());
+        char why[96]; std::snprintf(why, sizeof(why), "%s crashed: 0x%08X", what, e.code);
+        note_instance_crash_(name, why);
+        if (adapter) apply_on_fault_policy_(name, adapter);
+        // Swallowed on a surviving thread — restore the stack guard page after an
+        // overflow (or hard-exit for respawn) BEFORE returning toward deep code.
+        xi::recover_seh_stack_or_die(e.code, what);
+        r.kind = K::Crashed; r.seh_code = e.code; r.what = e.what();
+        return r;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[xinsp2] %s '%s' threw: %s\n", what, name, e.what());
+        char why[96]; std::snprintf(why, sizeof(why), "%s threw an exception", what);
+        note_instance_crash_(name, why);
+        if (adapter) apply_on_fault_policy_(name, adapter);
+        r.kind = K::Threw; r.what = e.what();
+        return r;
+    } catch (...) {
+        std::fprintf(stderr, "[xinsp2] %s '%s' threw a non-std exception\n", what, name);
+        char why[96]; std::snprintf(why, sizeof(why), "%s threw an exception", what);
+        note_instance_crash_(name, why);
+        if (adapter) apply_on_fault_policy_(name, adapter);
+        r.kind = K::Threw;
+        return r;
+    }
+}
+
+// ---- script thunk grow-retry (Wave-2 #4) -------------------------------------
+// Root cause: the script DLL buffer protocol (`n = fn(buf, len); n < 0 ⇒ grow to
+// -n and retry`) was hand-rolled ~9x across the cmd handlers, and the copies
+// FORKED on what -1 means. The contract (xi_script_support.hpp / xi_kv.hpp):
+//   * xi_script_exchange_instance / xi_script_get_instance_def return -1 for
+//     "instance not found" (terminal) and -needed for a too-small buffer. A
+//     GENUINE -needed of -1 cannot reach us: needed==1 only overflows when
+//     buflen < 2, and every caller starts with a KiB-scale buffer (and the
+//     retry buffer is always >= 1024+). So for those thunks -1 is TERMINAL —
+//     pass minus_one_is_terminal = true (retrying it was a harmless but wrong
+//     extra call in most old copies; cmd_get_instance_def_ had the correct fork).
+//   * xi_script_list_params / list_instances / kv_get have NO -1 error return —
+//     every negative is -needed — pass minus_one_is_terminal = false.
+// The resize widens through int64 first: -(int64_t)n, because -INT_MIN is UB.
+template <class Buf, class Fn>
+inline int script_grow_retry(Buf& buf, bool minus_one_is_terminal, Fn&& fn) {
+    int n = fn(buf.data(), (int)buf.size());
+    if (n < 0 && !(minus_one_is_terminal && n == -1)) {
+        buf.resize((size_t)(-(int64_t)n) + 1024);
+        n = fn(buf.data(), (int)buf.size());
+    }
+    return n;
+}
+
 // ---- inspection entry ------------------------------------------------------
 void run_one_inspection(xi::ws::Server& srv,
                         int frame_hint = 1,
@@ -391,6 +516,13 @@ void stop_group_pool_();
 void stop_dispatch_pool_();
 void install_trigger_sink_(xi::ws::Server* srv);
 void controlled_shutdown_teardown_();
+// Project-boundary reset (Wave-2 #3, defined in service_sinks.cpp): drop the
+// bus sink + per-source emit-time map AND clear the script replay shadows
+// (param_cache / instance_def_cache / persistent kv). One primitive for the
+// documented cross-project leak class — previously duplicated verbatim in
+// open_project / close_project (and absent from create_project, which also
+// replaces the project).
+void reset_project_boundary_state_();
 #ifdef _WIN32
 BOOL WINAPI console_ctrl_handler_(DWORD type);
 #endif

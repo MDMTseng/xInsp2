@@ -205,6 +205,21 @@ void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err) {
     push_recent_error("rsp", std::move(err), id);
 }
 
+// Error rsp carrying a data payload (compile diagnostics, partial-commit
+// results, recipe warnings). Wave-2 #2: this overload OWNS the recent-errors
+// push — before it existed, handlers hand-built xp::Rsp{ok:false, data_json}
+// and 3 of 6 sites (compile failed / export failed / recompile failed) forgot
+// push_recent_error, so those failures never surfaced in cmd:recent_errors.
+void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err, std::string data_json) {
+    xp::Rsp r;
+    r.id = id;
+    r.ok = false;
+    r.error = err;
+    r.data_json = std::move(data_json);
+    srv.send_text(r.to_json());
+    push_recent_error("rsp", std::move(err), id);
+}
+
 // Send a log {level:error, msg:...} AND record it in the recent-error
 // ring so cmd:recent_errors can surface it. Most error logs go
 // through this; a few legacy sites still build the LogMsg inline —
