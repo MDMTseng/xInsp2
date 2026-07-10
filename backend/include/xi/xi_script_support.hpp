@@ -378,28 +378,11 @@ XI_SCRIPT_EXPORT void xi_script_set_run_id(long long run_id) {
     g_run_id_ = run_id;
 }
 
-// Watchdog cooperative-cancel arm/clear — host calls this when an inspect
-// overruns its deadline (set != 0) and again to clear (set == 0). The cancel is
-// EPOCH-SCOPED: arming targets only the inspects already in flight (those whose
-// start-ticket, drawn in xi_script_inspect_begin below, is below the counter's
-// high-water at this call). A fresh inspect dispatched DURING the grace draws a
-// higher ticket and does NOT observe this trip — so one slow frame no longer
-// poisons the second of unrelated frames that follow it. Long-running ops poll
-// `xi::cancellation_requested()` and exit early when their inspect is targeted.
-XI_SCRIPT_EXPORT void xi_script_set_global_cancel(int set) {
-    if (set) xi::arm_cancel();
-    else     xi::clear_cancel();
-}
-
-// Inspect-start hook — host calls this on the dispatch thread immediately
-// before invoking xi_inspect_entry, so the inspect (and any xi::async sub-task
-// it spawns) draws a fresh cancel ticket. Without it (older host that never
-// calls this) the ticket stays 0 and cancellation_requested() falls back to the
-// legacy "cancel reaches everything while armed" behaviour. Optional symbol:
-// hosts GetProcAddress it and null-check (see xi_script_loader.hpp).
-XI_SCRIPT_EXPORT void xi_script_inspect_begin(void) {
-    xi::begin_inspect();
-}
+// [retired] xi_script_set_global_cancel / xi_script_inspect_begin — the
+// watchdog's cooperative EPOCH-cancel thunks were removed with the whole
+// soft-cancel layer. A wedged inspect is now handled by the watchdog's HARD
+// trip (_Exit + FE respawn, see service_main.cpp), not a soft cancel the script
+// polls. cancellation_requested() now reads only the per-task xi::async token.
 
 // --- U2 (docs/new_gen/16): xi::kv() persistent-state thunks -----------------
 //

@@ -127,58 +127,29 @@ static void test_async_cancel_idempotent() {
     CHECK(f.cancelled());
 }
 
-static void test_watchdog_cancel_epoch_scope() {
-    SECTION("watchdog cancel — epoch-scoped: fresh inspect after a trip is NOT cancelled");
-    // Models the dispatch thread reusing one OS thread frame-after-frame.
-    // Inspect A starts (draws a ticket), then the watchdog trips while A is in
-    // flight, then a FRESH inspect B starts on the same thread. A must observe
-    // the cancel; B (started AFTER the trip) must NOT — that fresh-frame-poison
-    // was core-bug-hunt #12.
-    xi::clear_cancel();
-    CHECK(!xi::cancellation_requested());          // nothing armed
-
-    uint64_t a = xi::begin_inspect();              // inspect A starts
-    (void)a;
-    xi::arm_cancel();                              // watchdog trips with A in flight
-    CHECK(xi::cancellation_requested());           // A is targeted → observes cancel
-
-    uint64_t b = xi::begin_inspect();              // fresh inspect B starts (same thread)
-    (void)b;
-    CHECK(b > a);                                  // strictly-increasing ticket
-    CHECK(!xi::cancellation_requested());          // THE FIX: B is not poisoned
-
-    // Escalation preserved: if B *itself* later overruns, a SECOND trip targets
-    // it (cutoff now above B's ticket) and B does observe the cancel.
-    xi::arm_cancel();
-    CHECK(xi::cancellation_requested());
-
-    // Clearing the cancel releases everyone.
-    xi::clear_cancel();
-    CHECK(!xi::cancellation_requested());
-}
-
-static void test_watchdog_cancel_epoch_async_propagates() {
-    SECTION("watchdog cancel — epoch scope propagates into xi::async sub-tasks");
-    // A sub-task spawned by an in-flight (targeted) inspect must see the cancel;
-    // a sub-task spawned by a fresh post-trip inspect must not. Proves the
-    // ticket rides into the worker thread (whose own thread_local would be 0).
-    xi::clear_cancel();
-
-    (void)xi::begin_inspect();                     // inspect A
-    xi::arm_cancel();                              // trip while A in flight
-    bool sub_a_cancelled = xi::async([] {
-        return xi::cancellation_requested();
+// A token-based cooperative cancel propagates into xi::async sub-tasks: a
+// sub-task spawned by a cancelled Future observes the flag on its own worker
+// thread (the token rides into the worker via xi::async's Scope). This is the
+// surviving cancel primitive after the watchdog epoch-cancel was retired.
+static void test_async_cancel_propagates_into_subtask() {
+    SECTION("cancel — a task's cancel token is visible to cancellation_requested() on the worker");
+    std::atomic<bool> started{false};
+    std::atomic<int>  iters{0};
+    auto f = xi::async([&] {
+        started.store(true);
+        for (int i = 0; i < 500; ++i) {
+            if (xi::cancellation_requested()) return -1;   // reads THIS task's token
+            iters.fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return 999;
     });
-    CHECK(sub_a_cancelled);                        // A's sub-task is targeted
-
-    (void)xi::begin_inspect();                     // fresh inspect B (post-trip)
-    bool sub_b_cancelled = xi::async([] {
-        return xi::cancellation_requested();
-    });
-    CHECK(!sub_b_cancelled);                        // B's sub-task is not poisoned
-
-    xi::clear_cancel();
-    CHECK(!xi::cancellation_requested());
+    while (!started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    f.cancel();
+    int rc = f;
+    CHECK(rc == -1);                               // observed the token on the worker
+    CHECK(iters.load() < 100);
 }
 
 static void test_async_wrap() {
@@ -669,8 +640,7 @@ int main() {
     test_async_wrap();
     test_async_cancel_cooperative();
     test_async_cancel_idempotent();
-    test_watchdog_cancel_epoch_scope();
-    test_watchdog_cancel_epoch_async_propagates();
+    test_async_cancel_propagates_into_subtask();
 
     test_await_all_mixed_void();
 

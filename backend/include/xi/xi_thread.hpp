@@ -19,8 +19,7 @@
 
 #include "xi_seh.hpp"
 #include "xi_crash_dump.hpp"   // xi::crash::reserve_fault_stack — 128 KB dump headroom
-#include "xi_async.hpp"        // xi::kNonInspectTicket, current_inspect_ticket_ref,
-                               // detail::owner_get / OwnerScope
+#include "xi_async.hpp"        // xi::detail::owner_get / OwnerScope
 
 #include <cstdio>
 #include <exception>
@@ -50,16 +49,6 @@ std::thread spawn_worker(std::string name, F&& f, Args&&... args) {
             // a STACK_OVERFLOW on this worker; no-op on non-Windows.
             xi::crash::reserve_fault_stack();
             xi::install_seh_translator();
-            // Mark this thread as a plugin-owned worker, NOT an inspect
-            // worker. Root cause fix: a fresh thread's thread-local inspect
-            // ticket defaults to 0, and cancellation_requested() treats
-            // ticket 0 as the legacy "in-flight inspect" fallback — so a
-            // spawn_worker loop polling xi::cancellation_requested() was
-            // spuriously cancelled whenever ANY unrelated frame's watchdog
-            // armed a cancel. kNonInspectTicket is explicitly excluded from
-            // the inspect-epoch cancel check. (Dedicated thread, dies with
-            // the closure — no restore needed.)
-            xi::current_inspect_ticket_ref() = xi::kNonInspectTicket;
             // Attribute worker-created pool images to the spawning owner for
             // the duration of the body.
             xi::detail::OwnerScope owner_scope(parent_owner);

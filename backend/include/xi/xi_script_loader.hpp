@@ -58,7 +58,6 @@ struct LoadedScript {
     using SetTriggerCallbacksFn = void (*)(void* info_fn, void* image_fn,
                                            void* sources_fn);
     using SetRunContextFn         = void (*)(const char* frame_path);
-    using SetGlobalCancelFn       = void (*)(int set);
 
     InspectFn          inspect          = nullptr;
     InspectTvFn        inspect_tv       = nullptr;   // A4 explicit-trigger entry (preferred)
@@ -102,13 +101,6 @@ struct LoadedScript {
     // Optional symbol — older scripts lack it and read 0.
     using SetRunIdFn = void (*)(long long run_id);
     SetRunIdFn         set_run_id       = nullptr;
-    SetGlobalCancelFn  set_global_cancel = nullptr;
-    // Inspect-start hook: draws this inspect's cancel ticket so the watchdog's
-    // cooperative cancel is scoped to inspects in flight at trip time, not
-    // fresh ones dispatched during the grace. Optional symbol (older scripts
-    // lack it → legacy global-cancel behaviour).
-    using InspectBeginFn = void (*)(void);
-    InspectBeginFn     inspect_begin    = nullptr;
 
     // U2 (docs/new_gen/16) — the kv channel (post-Record state). Canonical-mp
     // BYTES with explicit lengths (never NUL-terminated). All optional
@@ -172,8 +164,6 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_use_pack_callback = reinterpret_cast<LoadedScript::SetUsePackCallbackFn>(GetProcAddress(h, "xi_script_set_use_pack_callback"));
     out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
     out.set_run_id      = reinterpret_cast<LoadedScript::SetRunIdFn>(GetProcAddress(h, "xi_script_set_run_id"));
-    out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
-    out.inspect_begin     = reinterpret_cast<LoadedScript::InspectBeginFn>(GetProcAddress(h, "xi_script_inspect_begin"));
     out.get_kv               = reinterpret_cast<LoadedScript::GetKvFn>(GetProcAddress(h, "xi_script_kv_get"));
     out.set_kv               = reinterpret_cast<LoadedScript::SetKvFn>(GetProcAddress(h, "xi_script_kv_set"));
     out.kv_schema_version    = reinterpret_cast<LoadedScript::KvSchemaVersionFn>(GetProcAddress(h, "xi_script_kv_schema_version"));

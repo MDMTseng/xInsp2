@@ -108,8 +108,8 @@ struct TriggerCtxScope {
 };
 
 // RAII: install `id` as this thread's image-pool owner for the scope, restore the
-// previous owner on exit. Symmetric with the cancel-token / inspect-ticket Scope
-// — used by xi::async and xi::parallel_for to attribute worker-created images.
+// previous owner on exit. Symmetric with the cancel-token Scope — used by
+// xi::async and xi::parallel_for to attribute worker-created images.
 struct OwnerScope {
     uint32_t prev;
     explicit OwnerScope(uint32_t id) : prev(owner_get()) { owner_set(id); }
@@ -148,109 +148,19 @@ inline CancelToken*& current_cancel_token_ref() {
     return p;
 }
 
-// Watchdog cooperative-cancel, scoped by inspect EPOCH.
+// `cancellation_requested()` — cooperative-cancel poll for long-running plugin
+// / script code. Reads ONLY the per-task xi::async cancel token installed on
+// this thread (by xi::async before the user callable runs; propagated into
+// xi::parallel_for workers). Returns true once that token is flipped — via
+// Future::cancel() or a dropped-unconsumed Future. Cheap: one relaxed pointer
+// load plus, only when a token is present, one relaxed bool load — no locks.
 //
-// The host's watchdog cancels the inspect(s) that were ALREADY in flight when
-// it tripped — NOT a fresh inspect that the dispatch pool starts during the
-// 1000ms grace. The old design held a single global bool for the whole grace,
-// so every heavy frame dispatched in that ~1s window observed the stale request
-// and aborted (≈30 spurious cancellations per slow frame at 30fps). We scope
-// the cancel with a monotonic ticket instead:
-//
-//   - cancel_ticket_counter(): strictly-increasing source of inspect tickets.
-//   - begin_inspect(): each inspect draws a fresh ticket at start (host calls
-//     the `xi_script_inspect_begin` thunk on the dispatch thread before
-//     s.inspect()), installed thread-local so the inspect — and any xi::async
-//     sub-task it spawns — share one cancel scope.
-//   - arm_cancel(): the watchdog snapshots the counter's high-water as the
-//     cutoff and marks cancel active. Every inspect whose start-ticket is
-//     BELOW the cutoff (i.e. was in flight at trip time) sees the cancel; an
-//     inspect that draws its ticket after the snapshot (>= cutoff) does NOT.
-//   - clear_cancel(): the watchdog clears `active` once the targeted inspects
-//     have returned. (A genuinely-stuck inspect still overruns next watchdog
-//     tick → a fresh arm_cancel with a higher cutoff re-targets it, and the
-//     hard-trip escalation still exits the process — see service_main.cpp.)
-//
-// These live in the calling TU (script DLL or backend): the backend drives the
-// script DLL's copies via the exported thunks in xi_script_support.hpp.
-//
-// `cancellation_requested()` returns true when the per-inspect cancel applies
-// OR the per-task xi::async token is set. It is on the hot inspect poll path:
-// the cost is one relaxed bool load (early-out when no cancel is armed) plus,
-// only while a cancel IS armed, two relaxed uint64 loads — no locks.
-inline std::atomic<uint64_t>& cancel_ticket_counter() {
-    static std::atomic<uint64_t> c{1};   // 0 reserved: "no ticket / legacy"
-    return c;
-}
-
-// Reserved ticket marking a thread as a PLUGIN-OWNED worker, never an inspect
-// worker — `cancellation_requested()` never reports an inspect cancel for it.
-// Installed by xi::spawn_worker (xi_thread.hpp) at worker entry.
-//
-// Root cause this exists for: spawn_worker threads used to run with the
-// default thread-local ticket 0, and ticket 0 is the "legacy inspect with no
-// begin-hook" fallback that the cancel check treats as always-in-flight. So a
-// plugin's long-running worker (camera grab loop, ...) polling
-// xi::cancellation_requested() — as the SDK advises — was spuriously cancelled
-// for the whole ~1s grace window whenever an UNRELATED frame's watchdog
-// tripped. Plugin workers are not inspect work; they must be immune to the
-// inspect-epoch cancel entirely (their lifecycle is the plugin's own).
-// Distinct from 0, so the legacy-inspect fallback is unaffected; also never
-// drawn by cancel_ticket_counter() (which counts up from 1), and never below
-// any cancel_cutoff — but the check excludes it explicitly rather than relying
-// on that arithmetic.
-inline constexpr uint64_t kNonInspectTicket = UINT64_MAX;
-
-inline std::atomic<uint64_t>& cancel_cutoff() {
-    static std::atomic<uint64_t> c{0};
-    return c;
-}
-inline std::atomic<bool>& cancel_active() {
-    static std::atomic<bool> a{false};
-    return a;
-}
-
-// This thread's current inspect ticket (0 = not inside a ticketed inspect).
-// xi::async copies it into the worker so sub-tasks share the parent's scope.
-inline uint64_t& current_inspect_ticket_ref() {
-    static thread_local uint64_t t = 0;
-    return t;
-}
-
-// Draw a fresh, strictly-increasing ticket for an inspect about to run and
-// install it on this thread. Returns the ticket. Called once per inspect start.
-inline uint64_t begin_inspect() {
-    uint64_t t = cancel_ticket_counter().fetch_add(1, std::memory_order_relaxed);
-    current_inspect_ticket_ref() = t;
-    return t;
-}
-
-// Watchdog trip: target every inspect in flight RIGHT NOW (start-ticket below
-// the current high-water) — but never one that starts afterwards. Idempotent.
-inline void arm_cancel() {
-    cancel_cutoff().store(cancel_ticket_counter().load(std::memory_order_relaxed),
-                          std::memory_order_relaxed);
-    cancel_active().store(true, std::memory_order_relaxed);
-}
-inline void clear_cancel() {
-    cancel_active().store(false, std::memory_order_relaxed);
-}
-
+// [retired] The watchdog's cooperative EPOCH-cancel (a monotonic inspect-ticket
+// counter + arm/clear cutoff that soft-cancelled in-flight inspects) was removed
+// along with the whole soft-cancel layer. A wedged inspect now runs until the
+// watchdog's HARD trip (_Exit + FE respawn, see service_main.cpp) — there is no
+// soft-cancel state left to poll here.
 inline bool cancellation_requested() {
-    if (cancel_active().load(std::memory_order_relaxed)) {
-        uint64_t my = current_inspect_ticket_ref();
-        // my == kNonInspectTicket ⇒ a plugin-owned worker (xi::spawn_worker),
-        // not an inspect worker: NEVER subject to the inspect-epoch cancel.
-        // (Its per-task CancelToken below still applies if one is installed.)
-        //
-        // my == 0 ⇒ no ticket was drawn (legacy script lacking the
-        // inspect-begin hook, or code running outside any inspect). Treat it as
-        // "in flight" so the watchdog's cooperative cancel still reaches such
-        // code — preserves the pre-epoch global-cancel behaviour for them.
-        if (my != kNonInspectTicket &&
-            (my == 0 || my < cancel_cutoff().load(std::memory_order_relaxed)))
-            return true;
-    }
     auto* t = current_cancel_token_ref();
     return t && t->cancelled.load(std::memory_order_relaxed);
 }
@@ -366,12 +276,6 @@ auto async(F&& f, Args&&... args)
 
     auto token = std::make_shared<CancelToken>();
 
-    // Capture the spawning inspect's ticket so the worker shares its cancel
-    // scope (the worker runs on a fresh thread whose thread_local ticket would
-    // otherwise be 0 = "legacy/in-flight" and wrongly observe an unrelated
-    // trip's cancel).
-    uint64_t parent_ticket = current_inspect_ticket_ref();
-
     // C2: capture the image-pool owner active at spawn (the script during inspect,
     // or an instance if spawned inside process()) so async-created pool images are
     // attributed to it instead of anonymous (owner=0). Re-installed via OwnerScope
@@ -387,7 +291,6 @@ auto async(F&& f, Args&&... args)
         [fn  = std::forward<F>(f),
          tup = std::make_tuple(std::forward<Args>(args)...),
          tok = token,
-         parent_ticket,
          parent_owner,
          parent_trigger_ctx]() mutable -> R {
             // Reserve fault-stack headroom FIRST (mirrors the dispatch lane +
@@ -397,23 +300,17 @@ auto async(F&& f, Args&&... args)
             // through std::promise to the .get() / await site.
             xi::crash::reserve_fault_stack();
             xi::install_seh_translator();
-            // Make this token + the parent inspect's ticket visible to
+            // Make this task's cancel token visible to
             // `xi::cancellation_requested()` for the duration of the user
             // callable. RAII restore on any exit path.
             struct Scope {
                 CancelToken* prev;
-                uint64_t     prev_ticket;
-                Scope(CancelToken* t, uint64_t ticket)
-                    : prev(current_cancel_token_ref()),
-                      prev_ticket(current_inspect_ticket_ref()) {
-                    current_cancel_token_ref()   = t;
-                    current_inspect_ticket_ref() = ticket;
+                explicit Scope(CancelToken* t)
+                    : prev(current_cancel_token_ref()) {
+                    current_cancel_token_ref() = t;
                 }
-                ~Scope() {
-                    current_cancel_token_ref()   = prev;
-                    current_inspect_ticket_ref() = prev_ticket;
-                }
-            } scope(tok.get(), parent_ticket);
+                ~Scope() { current_cancel_token_ref() = prev; }
+            } scope(tok.get());
             // C2: re-install the parent's image-pool owner for the duration of the
             // user callable so any pool image it creates is attributed correctly.
             detail::OwnerScope owner_scope(parent_owner);

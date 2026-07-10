@@ -90,7 +90,6 @@ static int* volatile g_null_ptr = nullptr;
 
 static void test_parallel_for_seh_fault_surfaces() {
     SECTION("B1: parallel_for surfaces an SEH hardware fault on the calling thread");
-    xi::clear_cancel();   // make sure no stale cancel from another test poisons the loop
 
     std::atomic<int> ran{0};
     bool caught_seh = false;
@@ -123,7 +122,6 @@ static void test_parallel_for_seh_fault_surfaces() {
 
 static void test_parallel_for_cpp_exception_surfaces() {
     SECTION("B2: parallel_for surfaces a plain std::exception (the catch(...) gap fix)");
-    xi::clear_cancel();
 
     bool caught = false;
     bool wrong = false;
@@ -142,7 +140,6 @@ static void test_parallel_for_cpp_exception_surfaces() {
 
 static void test_parallel_for_all_iterations_run() {
     SECTION("B3: a normal parallel_for body runs every iteration exactly once");
-    xi::clear_cancel();
 
     constexpr int N = 4096;
     std::atomic<int> count{0};
@@ -231,7 +228,6 @@ static void test_parallel_for_propagates_owner() {
     std::vector<xi_image_handle> hs(N, 0);
     {
         xi::ImagePool::OwnerGuard g(P);
-        xi::clear_cancel();
         xi::parallel_for(N, [&](int i) {
             hs[i] = host.image_create(4, 4, 1);   // on an omp worker thread
         });
@@ -266,7 +262,6 @@ static void test_parallel_for_propagates_owner() {
 static void test_off_thread_detection_is_relational() {
     SECTION("F4: off-thread current_trigger() detection is per-thread-relative, not a process-global tid");
     wire_trigger_ctx_thunks();
-    xi::clear_cancel();
 
     // --- Lane A: an inspect thread INSIDE a trigger-bearing frame (CurrentTriggerScope
     //     sets marker=1 on the dispatch thread). ---
