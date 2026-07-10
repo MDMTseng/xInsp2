@@ -36,43 +36,53 @@
 #include <cstring>
 #include <string>
 
-extern thread_local char  g_run_frame_path_[];   // xi_script_support.hpp
-extern thread_local long long g_run_id_;         // xi_script_support.hpp (U3)
+// A4 explicit per-run context read thunks (host-side run_ctx_run_id_cb /
+// run_ctx_frame_path_cb), installed via xi_script_set_run_ctx_callbacks. They
+// resolve the per-run context the host installed on this thread — the SAME
+// context xi::async / xi::parallel_for / xi::spawn_worker propagate onto their
+// workers — so these accessors read the RIGHT run on ANY thread (no ambient TLS).
+// Null on an older host that doesn't wire them ⇒ the accessors return the 0/""
+// sentinel (portable degradation). See xi_script_support.hpp for the storage.
+extern void* g_run_ctx_run_id_fn_;      // long long(*)()
+extern void* g_run_ctx_frame_path_fn_;  // const char*(*)()
 extern void* g_use_host_api_;       // xi_script_support.hpp (xi_host_api*)
 
 namespace xi {
 
-// NOTE: the off-thread misuse guard that used to warn when xi::run_id() /
-// xi::current_frame_path() were read from a xi::async / xi::parallel_for worker
-// was RELATIONAL on the watchdog inspect-ticket (thread_local, propagated into
-// workers) — the only signal that distinguished "child worker of a live inspect"
-// from "any other thread". That ticket was retired with the cooperative-cancel
-// layer, leaving no equivalent marker to key the detection on, so the guard was
-// removed. Off-thread reads once again silently return the 0/"" sentinel (the
-// pre-guard behaviour): read the per-run context ON the inspect thread and
-// capture it BY VALUE into a parallel body (see the Parallelism section of
-// docs/guides/write-a-script.md).
+// The optional cmd:run frame_path for THIS run. Rides the A4 explicit per-run
+// context: valid on the inspect thread AND on any xi::async / xi::parallel_for /
+// xi::spawn_worker worker (the context is propagated by value onto them). OFF a
+// live run — or on a raw std::thread / hand-rolled #pragma omp the framework did
+// not spawn — the host thunk FAILS LOUD (abort in Debug, warn-once + "" sentinel
+// in Release): a per-run accessor with no run context is a programming error, no
+// longer a silent empty string. Empty string is a legitimate value on a run that
+// carried no frame_path arg. On an older host that doesn't wire the thunk, returns
+// "" (portable degradation).
 inline std::string current_frame_path() {
-    return std::string(g_run_frame_path_);
+    using Fn = const char* (*)();
+    auto fn = reinterpret_cast<Fn>(g_run_ctx_frame_path_fn_);
+    if (!fn) return {};
+    const char* p = fn();
+    return std::string(p ? p : "");
 }
 
-// U3 (docs/new_gen/17): the arrival/run id of the inspection this thread is
-// computing — assigned by the host at dequeue (frame-arrival order; monotonic
-// on the wire under parallelism.result_order:"arrival"), set before the
-// inspect runs, cleared after. 0 outside an inspect, and 0 on an older host
-// (the xi_script_set_run_id export is optional). This is the host truth the
-// Record-era ordered sinks got stamped as `$seq` at flush; on the pack plane
-// the PRODUCER stamps it before seal (sealed packs are immutable):
+// The arrival/run id of the inspection this thread is computing — assigned by the
+// host at dequeue (frame-arrival order; monotonic on the wire under
+// parallelism.result_order:"arrival"). Rides the A4 explicit per-run context, so
+// it is valid on the inspect thread AND on any xi::async / xi::parallel_for /
+// xi::spawn_worker worker (the spawn gap is closed — a read from a parallel body
+// now returns the RIGHT id, not 0). This is the host truth a pack PRODUCER stamps
+// into its `$seq` entry before seal (sealed packs are immutable):
 //
 //   b.add_i64("$seq", (int64_t)xi::run_id());
 //
-// Thread discipline mirrors current_frame_path(): read it ON the inspect
-// thread and capture by value into xi::async / xi::parallel_for bodies.
-// Reading it from a worker body instead silently returns 0 (the $seq=0
-// silent-corruption footgun — the off-thread guard that once diagnosed it was
-// removed with the inspect-ticket it keyed on; see current_frame_path() above).
+// OFF a live run (or on a thread the framework did not spawn) the host thunk FAILS
+// LOUD (abort in Debug, warn-once + 0 in Release) — the $seq=0 silent-corruption
+// footgun is gone. On an older host that doesn't wire the thunk, returns 0.
 inline long long run_id() {
-    return g_run_id_;
+    using Fn = long long (*)();
+    auto fn = reinterpret_cast<Fn>(g_run_ctx_run_id_fn_);
+    return fn ? fn() : 0;
 }
 
 // [v12 THE CUT — xi::imread was DELETED with the read_image_file host slot.

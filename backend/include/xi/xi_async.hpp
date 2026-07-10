@@ -53,17 +53,29 @@
 inline void* g_owner_get_fn_ = nullptr;
 inline void* g_owner_set_fn_ = nullptr;
 
-// F4: trigger-context marker get/set thunks, injected by the host via
-// xi_script_set_trigger_ctx_callbacks. xi::async / xi::parallel_for carry the
-// inspect thread's "inside a trigger-bearing inspect" flag onto the worker threads
-// they spawn by reading/writing these, so the host's off-thread current_trigger()
-// misuse detection is RELATIONAL (per-thread lineage) instead of a process-global
-// heuristic. Null on an older host / non-script TU ⇒ the wrappers below are silent
-// no-ops (get() returns 0, set() does nothing) and detection degrades to off,
-// exactly as if the marker never propagated. Same `inline` rationale as the owner
-// thunks above (ODR-used unconditionally from generic async/parallel_for code).
-inline void* g_trigger_ctx_get_fn_ = nullptr;
-inline void* g_trigger_ctx_set_fn_ = nullptr;
+// A4 explicit per-run context get/set thunks, injected by the host via
+// xi_script_set_run_ctx_callbacks. xi::async / xi::parallel_for / xi::spawn_worker
+// carry the inspect thread's per-run context (run_id + frame_path + verdict slot +
+// dispatch-thread identity, an opaque host RunContext*) onto the worker threads
+// they spawn by reading/writing these — so xi::run_id() / xi::current_frame_path()
+// / xi::result() are correct on a worker (closing the spawn gap), and the host's
+// off-thread read/push detection rides that same context (owner_tid / had_trigger)
+// instead of a separate marker. Null on an older host / non-script TU ⇒ the
+// wrappers below are silent no-ops (get() returns null, set() does nothing) and
+// the context simply doesn't propagate, exactly as before. Same `inline`
+// rationale as the owner thunks above (ODR-used unconditionally from generic
+// async/parallel_for code).
+inline void* g_run_ctx_get_fn_ = nullptr;
+inline void* g_run_ctx_set_fn_ = nullptr;
+// xi::spawn_worker BY-VALUE path: a fire-and-forget worker may OUTLIVE the inspect,
+// so it must not hold a pointer into the spawning frame (that would dangle). These
+// let it install a worker-OWNED heap snapshot instead — snapshot allocates a copy of
+// the current context on the spawning thread (result_slot nulled host-side), install
+// stamps the worker's own thread id and installs it, free releases it on worker exit.
+// Null on an older host / non-script TU ⇒ spawn_worker simply propagates no context.
+inline void* g_run_ctx_snapshot_fn_       = nullptr;
+inline void* g_run_ctx_install_worker_fn_ = nullptr;
+inline void* g_run_ctx_free_fn_           = nullptr;
 
 namespace xi {
 
@@ -82,29 +94,63 @@ inline void owner_set(uint32_t id) {
     if (fn) fn(id);
 }
 
-// F4: read/write THIS thread's trigger-context marker (0 if no host wired it).
-using TriggerCtxGetFn = uint32_t (*)();
-using TriggerCtxSetFn = void     (*)(uint32_t);
-inline uint32_t trigger_ctx_get() {
-    auto fn = reinterpret_cast<TriggerCtxGetFn>(::g_trigger_ctx_get_fn_);
-    return fn ? fn() : 0u;
+// A4: read/write THIS thread's per-run context pointer (null if no host wired it).
+// The pointer is opaque to the SDK (an internal host RunContext*); we only marshal
+// it across the ABI seam so a worker inherits the run and the host's accessors
+// (run_id / frame_path / result / off-thread detection) resolve it host-side.
+using RunCtxGetFn = const void* (*)();
+using RunCtxSetFn = void        (*)(const void*);
+inline const void* run_ctx_get() {
+    auto fn = reinterpret_cast<RunCtxGetFn>(::g_run_ctx_get_fn_);
+    return fn ? fn() : nullptr;
 }
-inline void trigger_ctx_set(uint32_t v) {
-    auto fn = reinterpret_cast<TriggerCtxSetFn>(::g_trigger_ctx_set_fn_);
-    if (fn) fn(v);
+inline void run_ctx_set(const void* p) {
+    auto fn = reinterpret_cast<RunCtxSetFn>(::g_run_ctx_set_fn_);
+    if (fn) fn(p);
 }
 
-// RAII: install `v` as this thread's trigger-context marker for the scope, restore
-// the previous value on exit. Symmetric with OwnerScope — used by xi::async and
-// xi::parallel_for so a worker inherits the spawning inspect's "inside a trigger"
-// flag, and the host's off-thread detection fires for a child that reads the
-// ambient trigger instead of a captured snapshot.
-struct TriggerCtxScope {
-    uint32_t prev;
-    explicit TriggerCtxScope(uint32_t v) : prev(trigger_ctx_get()) { trigger_ctx_set(v); }
-    ~TriggerCtxScope() { trigger_ctx_set(prev); }
-    TriggerCtxScope(const TriggerCtxScope&) = delete;
-    TriggerCtxScope& operator=(const TriggerCtxScope&) = delete;
+// RAII: install `p` as this thread's per-run context for the scope, restore the
+// previous pointer on exit. Symmetric with OwnerScope — used by xi::async /
+// xi::parallel_for / xi::spawn_worker so a worker inherits the spawning inspect's
+// run, making xi::run_id() / xi::current_frame_path() / xi::result() correct on
+// the worker and the host's off-thread read/push detection accurate.
+struct RunCtxScope {
+    const void* prev;
+    explicit RunCtxScope(const void* p) : prev(run_ctx_get()) { run_ctx_set(p); }
+    ~RunCtxScope() { run_ctx_set(prev); }
+    RunCtxScope(const RunCtxScope&) = delete;
+    RunCtxScope& operator=(const RunCtxScope&) = delete;
+};
+
+// spawn_worker BY-VALUE snapshot thunks (see the g_run_ctx_snapshot_fn_ note).
+using RunCtxSnapshotFn      = void* (*)();
+using RunCtxInstallWorkerFn = void  (*)(void*);
+using RunCtxFreeFn          = void  (*)(void*);
+inline void* run_ctx_snapshot() {
+    auto fn = reinterpret_cast<RunCtxSnapshotFn>(::g_run_ctx_snapshot_fn_);
+    return fn ? fn() : nullptr;
+}
+inline void run_ctx_install_worker(void* s) {
+    auto fn = reinterpret_cast<RunCtxInstallWorkerFn>(::g_run_ctx_install_worker_fn_);
+    if (fn) fn(s);
+}
+inline void run_ctx_free(void* s) {
+    auto fn = reinterpret_cast<RunCtxFreeFn>(::g_run_ctx_free_fn_);
+    if (fn) fn(s);
+}
+
+// RAII for xi::spawn_worker: install a worker-OWNED snapshot (taken on the SPAWNING
+// thread, passed in by value) and free it on exit. NO pointer into the spawning
+// frame — structurally UAF-free even if the worker outlives the inspect. `snap` may
+// be null (spawned off a run / older host): install(null) clears the context and
+// free(null) is a no-op.
+struct WorkerRunCtxScope {
+    void*       snap;
+    const void* prev;
+    explicit WorkerRunCtxScope(void* s) : snap(s), prev(run_ctx_get()) { run_ctx_install_worker(s); }
+    ~WorkerRunCtxScope() { run_ctx_set(prev); run_ctx_free(snap); }
+    WorkerRunCtxScope(const WorkerRunCtxScope&) = delete;
+    WorkerRunCtxScope& operator=(const WorkerRunCtxScope&) = delete;
 };
 
 // RAII: install `id` as this thread's image-pool owner for the scope, restore the
@@ -282,17 +328,18 @@ auto async(F&& f, Args&&... args)
     // in the closure below. Zero cost when unwired (owner_get() returns 0).
     uint32_t parent_owner = detail::owner_get();
 
-    // F4: capture the spawning thread's trigger-context marker so the worker
-    // inherits "I am a child of a trigger-bearing inspect". Re-installed via
-    // TriggerCtxScope in the closure. Zero cost when unwired (returns 0).
-    uint32_t parent_trigger_ctx = detail::trigger_ctx_get();
+    // A4: capture the spawning thread's per-run context so the worker inherits the
+    // run — xi::run_id() / xi::current_frame_path() / xi::result() resolve to the
+    // correct run on the worker, and the host's off-thread detection is accurate.
+    // Re-installed via RunCtxScope in the closure. Zero cost when unwired (null).
+    const void* parent_run_ctx = detail::run_ctx_get();
 
     auto closure =
         [fn  = std::forward<F>(f),
          tup = std::make_tuple(std::forward<Args>(args)...),
          tok = token,
          parent_owner,
-         parent_trigger_ctx]() mutable -> R {
+         parent_run_ctx]() mutable -> R {
             // Reserve fault-stack headroom FIRST (mirrors the dispatch lane +
             // one-shot worker paths) so the crash filter can still write a
             // minidump after a STACK_OVERFLOW on this worker; then install the
@@ -314,10 +361,11 @@ auto async(F&& f, Args&&... args)
             // C2: re-install the parent's image-pool owner for the duration of the
             // user callable so any pool image it creates is attributed correctly.
             detail::OwnerScope owner_scope(parent_owner);
-            // F4: re-install the parent's trigger-context marker so a current_trigger()
-            // read from THIS worker is caught as an off-thread misuse (the ambient
-            // trigger is not on this thread — the script must snapshot first).
-            detail::TriggerCtxScope trigger_ctx_scope(parent_trigger_ctx);
+            // A4: re-install the parent's per-run context so xi::run_id() /
+            // xi::current_frame_path() / xi::result() called from THIS worker
+            // resolve to the run (the spawn-gap closure), and an off-thread
+            // ambient current_trigger() read is still caught host-side.
+            detail::RunCtxScope run_ctx_scope(parent_run_ctx);
             try {
                 return std::apply(std::move(fn), std::move(tup));
             } catch (const xi::seh_exception& e) {

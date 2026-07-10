@@ -59,46 +59,113 @@ void status_cb(const char* text) {
 // g_run_result DEFINED here (thread_local; parallel lanes don't clobber each other).
 thread_local RunResult g_run_result;
 
+// ---- A4 explicit per-run context (retires the ambient run_id/frame_path TLS +
+//      the g_trigger_ctx_ relational marker) --------------------------------------
+// The installed context pointer for THIS thread. Set on the dispatch thread by
+// RunContextScope, and re-installed on xi::async / xi::parallel_for /
+// xi::spawn_worker workers via run_ctx_set_cb (the get/set thunks below). null ⇒
+// no live run on this thread — the single presence check every accessor uses.
+thread_local const RunContext* g_run_ctx = nullptr;
+
+RunContextScope::RunContextScope(long long run_id, std::string frame_path, bool had_trigger)
+    : prev(g_run_ctx) {
+    ctx.run_id      = run_id;
+    ctx.frame_path  = std::move(frame_path);
+    ctx.result_slot = &g_run_result;                 // this dispatch thread's verdict slot
+    ctx.owner_tid   = std::this_thread::get_id();     // the thread that owns/flushes g_staged
+    ctx.had_trigger = had_trigger;
+    g_run_ctx = &ctx;
+}
+RunContextScope::~RunContextScope() { g_run_ctx = prev; }
+
+// The ONE presence-check fail-loud (an off-run read/write): abort in Debug,
+// warn-once + safe sentinel in Release. Replaces the retired relational guards
+// (F4/J4-mirror/silent-result) — a worker of a live run now has the context
+// propagated, so this only fires when there is genuinely NO run on this thread.
+void run_context_fail_loud_(const char* what) {
+    char msg[256];
+    std::snprintf(msg, sizeof(msg),
+        "%s called with NO live run context on this thread — a per-run accessor "
+        "(xi::run_id / xi::current_frame_path / xi::result) was used outside an "
+        "inspect, or on a thread the framework did not spawn (raw std::thread / "
+        "#pragma omp). Use xi::async / xi::parallel_for / xi::spawn_worker so the "
+        "run context is propagated.", what);
+#ifndef NDEBUG
+    std::fprintf(stderr, "FATAL: [xinsp2] %s\n", msg);
+    std::fflush(stderr);
+    std::abort();
+#else
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr, "ERROR: [xinsp2] %s\n", msg);
+#endif
+}
+
+// run_ctx thunks wired into the script DLL. get/set marshal the opaque
+// RunContext* for the spawn primitives (like the owner thunks); run_id /
+// frame_path read the installed context for xi::run_id() / current_frame_path().
+const void* run_ctx_get_cb() { return g_run_ctx; }
+void        run_ctx_set_cb(const void* p) { g_run_ctx = static_cast<const RunContext*>(p); }
+long long   run_ctx_run_id_cb() {
+    if (!g_run_ctx) { run_context_fail_loud_("xi::run_id()"); return 0; }
+    return g_run_ctx->run_id;
+}
+const char* run_ctx_frame_path_cb() {
+    if (!g_run_ctx) { run_context_fail_loud_("xi::current_frame_path()"); return ""; }
+    return g_run_ctx->frame_path.c_str();
+}
+
+// spawn_worker BY-VALUE path (structural UAF fix). A spawn_worker thread is
+// fire-and-forget and may outlive the inspect, so it must NOT hold a pointer into
+// the spawning dispatch frame. Instead it OWNS a heap snapshot: run_id + frame_path
+// copied by value; result_slot NULLED (a worker that may outlive its inspect must
+// not route a verdict into a frame that could already be gone — result_cb no-ops a
+// null-slot context, and push_off_dispatch_thread_ rejects it). snapshot runs on
+// the SPAWNING thread (g_run_ctx is the live inspect there); null when off a run
+// (the worker then simply has no context). install runs on the WORKER and stamps
+// owner_tid to the worker's own thread; free releases it when the worker exits.
+void* run_ctx_snapshot_cb() {
+    if (!g_run_ctx) return nullptr;
+    auto* s = new RunContext(*g_run_ctx);
+    s->result_slot = nullptr;   // detached: no live run slot to route into
+    return s;
+}
+void run_ctx_install_worker_cb(void* s) {
+    if (s) static_cast<RunContext*>(s)->owner_tid = std::this_thread::get_id();
+    g_run_ctx = static_cast<const RunContext*>(s);
+}
+void run_ctx_free_cb(void* s) { delete static_cast<RunContext*>(s); }
+
 // Installed into the script DLL (xi_script_set_result_callback) so xi::result()
 // records the one per-run verdict. The host is the trust boundary: a user code in
 // the reserved system band is NOT accepted as-is — it's recorded as NA (0) with a
 // visible warning + the offending code preserved in the message, so the mistake
 // surfaces instead of masquerading as a real verdict.
 void result_cb(int code, const char* msg) {
-    // F4/J4-MIRROR guard: xi::result()/xi::ng() must run on the inspect
-    // (dispatch) thread. g_run_result is thread_local (parallel lanes must not
-    // clobber each other), so a call from inside xi::parallel_for / xi::async
-    // lands on a child worker and writes THAT thread's copy — the dispatch
-    // thread's copy stays unset and the run silently flips to no_verdict (a
-    // flaky, silent NG loss). Detection mirrors the trigger/push guards in
-    // service_sinks.cpp: g_trigger_ctx_ (read via trigger_ctx_get_cb) marks
-    // "this thread is inside / a CHILD of a trigger-bearing inspect" and IS
-    // propagated into parallel_for/async workers, while g_current_trigger is
-    // thread_local and NOT inherited — so marker!=0 && trigger==null ⇒ this is
-    // a child worker, not the inspect thread. Same documented blind spot as
-    // F4/J4: a child of a source-less (marker-0) inspect (plain cmd:run /
-    // timer tick) is not flagged — the marker only rides the blessed
-    // primitives. Fail LOUD, once, and IGNORE the verdict (do NOT marshal it
-    // across threads): the fix for the script is to compute in the parallel
-    // body and call xi::result() ON the inspect thread after the join/await.
-    if (trigger_ctx_get_cb() != 0 && g_current_trigger == nullptr) {
+    // A4 explicit-context routing (retires the F4/J4-mirror silent-result guard):
+    // the verdict is written to the RUN's slot via the installed context, not to
+    // whatever thread_local g_run_result the calling thread happens to own. On the
+    // dispatch thread that IS &g_run_result; inside xi::parallel_for / xi::async
+    // the context was propagated by value onto the worker, so its result_slot
+    // still points at the dispatch thread's g_run_result — a verdict set from a
+    // worker now reaches the run (the silent-NG-loss footgun is gone) instead of
+    // being rejected. Off a live run (g_run_ctx == null) there is no slot to route
+    // to: fail loud via the single presence check and drop the write.
+    if (!g_run_ctx) { run_context_fail_loud_("xi::result()/xi::ng()"); return; }
+    // Detached snapshot (a spawn_worker that may outlive its inspect — result_slot
+    // is nulled by run_ctx_snapshot_cb): a real context, but no live run slot to
+    // route into. A legitimate structural state, NOT an off-run bug, so no-op
+    // quietly (warn once) instead of aborting — routing a verdict into a
+    // possibly-gone frame is meaningless.
+    if (!g_run_ctx->result_slot) {
         static std::atomic<bool> warned{false};
-        if (!warned.exchange(true, std::memory_order_relaxed)) {
-            static constexpr const char* kMsg =
-                "xi::result()/xi::ng() called OFF the inspect thread (inside "
-                "xi::parallel_for / xi::async) — the verdict is IGNORED and this "
-                "run will report no_verdict. Compute in the parallel body, then "
-                "call xi::result() ON the inspect thread after the join/await.";
-            std::fprintf(stderr, "ERROR: [xinsp2] %s\n", kMsg);
-            if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire)) {
-                xp::LogMsg lm;
-                lm.level = "error";
-                lm.msg = kMsg;
-                srv->send_text(lm.to_json());
-            }
-        }
-        return;   // the write would land in the WRONG thread's g_run_result
+        if (!warned.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr, "WARN: [xinsp2] xi::result()/xi::ng() from a detached "
+                "spawn_worker context — no live run to route the verdict to; ignored. "
+                "Set the verdict on the inspect thread instead.\n");
+        return;
     }
+    RunResult& rr = *g_run_ctx->result_slot;
     if (code <= kResultSystemBand) {
         if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire)) {
             xp::LogMsg lm;
@@ -108,15 +175,15 @@ void result_cb(int code, const char* msg) {
                      "NA (0) — fix the script's result code.";
             srv->send_text(lm.to_json());
         }
-        g_run_result.code = 0;   // NA, not a fake ng1
-        g_run_result.msg = "[invalid result code " + std::to_string(code) + ", reserved band] ";
-        g_run_result.msg += (msg ? msg : "");
-        g_run_result.set = true;
+        rr.code = 0;   // NA, not a fake ng1
+        rr.msg = "[invalid result code " + std::to_string(code) + ", reserved band] ";
+        rr.msg += (msg ? msg : "");
+        rr.set = true;
         return;
     }
-    g_run_result.code = code;
-    g_run_result.msg.assign(msg ? msg : "");
-    g_run_result.set = true;
+    rr.code = code;
+    rr.msg.assign(msg ? msg : "");
+    rr.set = true;
 }
 
 // Stable schema tag for the run_result wire event (bump on a breaking change to

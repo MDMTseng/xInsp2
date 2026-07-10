@@ -195,6 +195,64 @@ extern thread_local const xi::TriggerEvent* g_current_trigger;
 struct RunResult { int code = 0; std::string msg; bool set = false; };
 extern thread_local RunResult g_run_result;
 
+// ---- A4 explicit per-run context -------------------------------------------
+// The ONE explicit carrier that retired the ambient run_id / frame_path TLS and
+// the g_trigger_ctx_ relational marker. Installed on the dispatch thread by
+// RunContextScope for the whole inspect, and carried onto workers so
+// xi::run_id() / xi::current_frame_path() / xi::result() are correct on ANY
+// worker thread (closing the spawn gap) and FAIL LOUD off a run (g_run_ctx ==
+// nullptr — the single presence check). TWO propagation shapes, by worker
+// lifetime:
+//   * xi::async / xi::parallel_for ALWAYS join before returning, so the installing
+//     dispatch frame outlives the workers — they inherit the POINTER by value
+//     (run_ctx get/set thunks), zero-copy.
+//   * xi::spawn_worker is fire-and-forget and may OUTLIVE the inspect, so a pointer
+//     into the dispatch frame would dangle. It instead installs a heap SNAPSHOT the
+//     worker OWNS (run_ctx snapshot/free thunks): run_id + frame_path copied by
+//     value, result_slot = nullptr (a detached worker must not route a verdict into
+//     a frame that may be gone — result_cb no-ops it; and push() is rejected off
+//     it). Structurally UAF-free — no "must not read after the inspect" convention.
+struct RunContext {
+    long long        run_id      = 0;
+    std::string      frame_path;
+    RunResult*       result_slot = nullptr;   // the RUN's verdict slot; nullptr ⇒ detached snapshot (no routing)
+    std::thread::id  owner_tid;               // the dispatch thread that owns g_staged
+    bool             had_trigger = false;     // a triggered frame (g_current_trigger != null)
+};
+extern thread_local const RunContext* g_run_ctx;   // null ⇒ no live run on this thread
+
+// RAII: install `ctx` as this dispatch thread's run context for the inspect, and
+// restore the previous pointer on exit. Fills result_slot = &g_run_result and
+// owner_tid = this thread. Not nested (one inspect per dispatch thread at a time).
+struct RunContextScope {
+    RunContext        ctx;
+    const RunContext* prev;
+    RunContextScope(long long run_id, std::string frame_path, bool had_trigger);
+    ~RunContextScope();
+    RunContextScope(const RunContextScope&) = delete;
+    RunContextScope& operator=(const RunContextScope&) = delete;
+};
+
+// Fail-loud on an off-run read/write (the ONE presence check): abort in Debug,
+// warn-once + safe sentinel in Release. `what` names the offending accessor.
+void run_context_fail_loud_(const char* what);
+
+// run_ctx thunks wired into the script DLL (xi_script_set_run_ctx_callbacks).
+// get/set marshal the opaque RunContext* for the async/parallel_for pointer path;
+// run_id / frame_path read the installed context's fields for xi::run_id() /
+// xi::current_frame_path() (with the fail-loud presence check). snapshot / install
+// / free are the spawn_worker BY-VALUE path: snapshot allocates a worker-owned heap
+// copy of the current context (result_slot nulled) on the SPAWNING thread; install
+// stamps owner_tid = the worker's own thread and installs it; free releases it when
+// the worker exits.
+const void* run_ctx_get_cb();
+void        run_ctx_set_cb(const void* p);
+long long   run_ctx_run_id_cb();
+const char* run_ctx_frame_path_cb();
+void*       run_ctx_snapshot_cb();               // spawning thread → worker-owned heap snapshot (null if off-run)
+void        run_ctx_install_worker_cb(void* s);  // worker thread → owner_tid = self, install `s`
+void        run_ctx_free_cb(void* s);            // worker thread → free the snapshot
+
 // ---- shared constants ------------------------------------------------------
 // Framework system-fail enum: a reserved band (<= -990000) the user API refuses
 // to set. See docs/roadmap/run-result.md.
@@ -303,13 +361,6 @@ int  use_push_pack_cb(const char* name, xi_pack_handle pack);
 xi_image_handle use_grab_cb(const char* name, int timeout_ms);
 uint32_t owner_get_cb();
 void     owner_set_cb(uint32_t id);
-// F4: trigger-context marker get/set thunks. Mirror the owner thunks — bridge a
-// per-thread "this thread is inside / a child of a trigger-bearing inspect" flag
-// across the ABI seam so xi::async / xi::parallel_for can carry it onto the
-// worker threads they spawn. warn_trigger_off_thread_ keys the off-thread misuse
-// detection on THIS thread's flag (relational), never on a process-global tid.
-uint32_t trigger_ctx_get_cb();
-void     trigger_ctx_set_cb(uint32_t v);
 void     trigger_info_cb(CurrentTriggerInfoC* out);
 
 // ---- toolchain / project helpers -------------------------------------------

@@ -238,41 +238,18 @@ static void* g_result_fn_           = nullptr;
 // Null on an older host ⇒ push() returns false.
 static void* g_use_push_pack_fn_    = nullptr;
 
-// Per-run context. Set by the host before each xi_inspect_entry call,
-// cleared after. Currently just the optional `frame_path` arg from
-// cmd:run; future per-run fields (run_id, request id, etc.) join here.
-//
-// Scripts read these via accessors in xi_io.hpp — never touch the raw
-// globals. Host writes them via xi_script_set_run_context.
-//
-// `g_run_frame_path_` is sized to 1024 — paths longer than that are
-// truncated. Plenty for any reasonable file system.
-//
-// thread_local so multiple dispatcher threads (project.json
-// `parallelism.dispatch_threads > 1`) each see their own per-run
-// path. Each thread's `xi_script_set_run_context` writes its own
-// slot; `xi::current_frame_path()` reads it back from the same
-// thread.
-//
-// NOT PROPAGATED to xi::async / xi::parallel_for workers (unlike the owner /
-// trigger-ctx / cancel-ticket scopes) — a worker-thread read sees "" / 0. That
-// off-thread misuse is now detected fail-loud by the guard in xi_io.hpp
-// (detail::run_context_missing_off_thread_), which keys off g_run_id_ == 0
-// while the propagated inspect ticket is nonzero. INVARIANT the guard relies
-// on: 0 is g_run_id_'s reserved "no live run on this thread" sentinel — the
-// host's run ids start at 1 and xi_script_set_run_id(0) is the explicit
-// post-inspect clear. The real fix (marshal the per-run context into workers
-// like the other scopes) is deferred.
-static thread_local char g_run_frame_path_[1024] = {0};
-
-// U3 (docs/new_gen/17): the arrival/run id of the inspection THIS THREAD is
-// computing — the host truth the Record path used to stamp into staged sink
-// records as `$seq`. Surfaced to the script (xi::run_id(), xi_io.hpp) so a
-// producer can stamp it into a pack ENTRY before seal (sealed packs are
-// immutable — the host never stamps them). 0 outside an inspect. Same
-// thread_local per-run-context discipline as g_run_frame_path_ above,
-// including the not-propagated caveat + 0-sentinel invariant documented there.
-static thread_local long long g_run_id_ = 0;
+// A4 explicit per-run context read thunks. The per-run identity (run_id +
+// frame_path) no longer lives in an ambient thread_local the host pushes into the
+// script; instead it rides ONE host-side RunContext that the host installs on the
+// dispatch thread and PROPAGATES BY VALUE onto xi::async / xi::parallel_for /
+// xi::spawn_worker workers (via the run_ctx get/set thunks in xi_async.hpp). These
+// two pointers let xi::run_id() / xi::current_frame_path() (xi_io.hpp) READ that
+// context host-side — correct on any worker thread, and fail-loud off a run. Null
+// until the host wires them (xi_script_set_run_ctx_callbacks); an older host
+// leaves them null and the accessors return the 0/"" sentinel. Storage for the
+// get/set PROPAGATION thunks lives in xi_async.hpp (g_run_ctx_get_fn_/set_fn_).
+static void* g_run_ctx_run_id_fn_     = nullptr;   // long long(*)()
+static void* g_run_ctx_frame_path_fn_ = nullptr;   // const char*(*)()
 
 XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
     void* process_fn, void* exchange_fn, void* grab_fn,
@@ -329,14 +306,28 @@ XI_SCRIPT_EXPORT void xi_script_set_owner_callbacks(void* get_fn, void* set_fn) 
     g_owner_set_fn_ = set_fn;
 }
 
-// F4: install the trigger-context marker get/set thunks. Separate optional symbol
-// (same back-compat reasoning as the owner callbacks) so an older host that
-// doesn't know about relational off-thread detection simply leaves both null and
-// xi::async / xi::parallel_for propagation is a silent no-op. get_fn: uint32_t(void),
-// set_fn: void(uint32_t). Storage (g_trigger_ctx_*_fn_) lives in xi_async.hpp.
-XI_SCRIPT_EXPORT void xi_script_set_trigger_ctx_callbacks(void* get_fn, void* set_fn) {
-    g_trigger_ctx_get_fn_ = get_fn;
-    g_trigger_ctx_set_fn_ = set_fn;
+// A4: install the explicit per-run context thunks. Separate optional symbol (same
+// back-compat reasoning as the owner callbacks) so an older host that doesn't know
+// about the explicit context simply leaves them all null: propagation is a no-op
+// and xi::run_id()/current_frame_path() return the 0/"" sentinel. get_fn/set_fn
+// marshal the opaque host RunContext* for the xi::async / xi::parallel_for pointer
+// path (stored in xi_async.hpp); run_id_fn/frame_path_fn are the READ thunks
+// xi::run_id() / xi::current_frame_path() call; snapshot_fn/install_worker_fn/free_fn
+// are the xi::spawn_worker BY-VALUE (worker-owned snapshot) path. Signatures:
+// get_fn: const void*(void); set_fn: void(const void*); run_id_fn: long long(void);
+// frame_path_fn: const char*(void); snapshot_fn: void*(void);
+// install_worker_fn: void(void*); free_fn: void(void*).
+XI_SCRIPT_EXPORT void xi_script_set_run_ctx_callbacks(void* get_fn, void* set_fn,
+                                                      void* run_id_fn, void* frame_path_fn,
+                                                      void* snapshot_fn, void* install_worker_fn,
+                                                      void* free_fn) {
+    g_run_ctx_get_fn_             = get_fn;
+    g_run_ctx_set_fn_             = set_fn;
+    g_run_ctx_run_id_fn_         = run_id_fn;
+    g_run_ctx_frame_path_fn_     = frame_path_fn;
+    g_run_ctx_snapshot_fn_       = snapshot_fn;
+    g_run_ctx_install_worker_fn_ = install_worker_fn;
+    g_run_ctx_free_fn_           = free_fn;
 }
 
 // Optional: install a result callback for xi::result(code,msg). Scripts that
@@ -356,27 +347,14 @@ XI_SCRIPT_EXPORT void xi_script_set_use_push_pack_callback(void* push_fn) {
     g_use_push_pack_fn_ = push_fn;
 }
 
-// Per-run context setter (called by host before each xi_inspect_entry,
-// optional cleanup after). `frame_path` may be null/empty when the
-// caller didn't provide one — scripts get back an empty string from
-// xi::current_frame_path() in that case.
-XI_SCRIPT_EXPORT void xi_script_set_run_context(const char* frame_path) {
-    if (!frame_path) frame_path = "";
-    size_t n = 0;
-    while (frame_path[n] && n + 1 < sizeof(g_run_frame_path_)) {
-        g_run_frame_path_[n] = frame_path[n];
-        ++n;
-    }
-    g_run_frame_path_[n] = 0;
-}
-
-// U3 (docs/new_gen/17): per-run arrival/run id setter. Called by the host
-// before each xi_inspect_entry (beside xi_script_set_run_context) and cleared
-// (0) after. Separate OPTIONAL symbol per the leader/meta/push-callback
-// back-compat pattern: an older host never calls it and xi::run_id() reads 0.
-XI_SCRIPT_EXPORT void xi_script_set_run_id(long long run_id) {
-    g_run_id_ = run_id;
-}
+// [A4] xi_script_set_run_context / xi_script_set_run_id — RETIRED. Per-run
+// run_id + frame_path no longer ride an ambient thread_local the host pushed into
+// the script per inspect (and never propagated into workers — the spawn gap). They
+// now ride ONE host-side RunContext installed on the dispatch thread and
+// propagated by value onto xi::async / xi::parallel_for / xi::spawn_worker workers;
+// xi::run_id() / xi::current_frame_path() READ it via the run_ctx read thunks
+// (xi_script_set_run_ctx_callbacks above), correct on any thread and fail-loud off
+// a run.
 
 // [retired] xi_script_set_global_cancel / xi_script_inspect_begin — the
 // watchdog's cooperative EPOCH-cancel thunks were removed with the whole

@@ -44,7 +44,7 @@ static void emit_run_event_(xi::ws::Server& srv, int64_t run_id, const char* nam
 // trigger, the script handle). Deliberately NOT here: the EmitTurn and StagedEmitGuard,
 // whose RAII lifetimes straddle the seam and MUST stay in the driver.
 struct RunOutcome {
-    xi::script::LoadedScript s;      // script snapshot (also used for the set_run_context clear)
+    xi::script::LoadedScript s;      // script snapshot
     bool        inspect_ok = false;  // set exactly once by compute
     std::string run_error_what;      // run_error payload (empty on success)
     int64_t     dt_us = 0;           // inspect latency, measured once after inspect
@@ -87,27 +87,28 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         return false;
     }
 
-    // Plumb the optional per-run context (frame_path) into the script
-    // DLL's globals before inspect runs. Cleared on the way out (in the
-    // emission half, success path) so a subsequent run with no frame_path
-    // arg sees an empty string, not the previous value.
-    if (s.set_run_context) s.set_run_context(frame_path.c_str());
-    // U3 (docs/new_gen/17): publish this run's arrival/run id to the script
-    // (xi::run_id()) — the host truth a pack producer stamps into its `$seq`
-    // ENTRY before seal (the host never stamps a sealed pack). Cleared with
-    // the frame_path on the way out.
-    if (s.set_run_id) s.set_run_id((long long)run_id);
-
     // Per-run Result: reset to NA before the script runs, and snapshot the
     // source/group provenance from this thread's trigger (thread_local, valid
     // for the duration of the inspect). The script sets the result via
-    // xi::result() → result_cb → g_run_result; emission reads it below in the gate.
+    // xi::result() → result_cb → the run context's result_slot (this thread's
+    // g_run_result); emission reads it below in the gate.
     g_run_result = RunResult{};
     if (g_current_trigger) {
         out.rr_source = g_current_trigger->leader_source;
         out.rr_group  = g_current_trigger->group;
         out.rr_trigger_hex = trigger_id_hex(g_current_trigger->id);   // additive: this run's trigger id
     }
+
+    // A4 explicit per-run context: install run_id + frame_path (+ the verdict slot
+    // and dispatch-thread identity) for the WHOLE inspect, replacing the ambient
+    // run_id/frame_path TLS the host used to push into the script. It is PROPAGATED
+    // BY VALUE onto xi::async / xi::parallel_for / xi::spawn_worker workers, so
+    // xi::run_id() / xi::current_frame_path() / xi::result() are correct on any
+    // thread (closing the spawn gap) and fail loud off a run. had_trigger records
+    // whether this frame carried a trigger (g_current_trigger set by the dispatch's
+    // CurrentTriggerScope), driving the off-thread read/push detection. The scope
+    // spans the inspect call below and unwinds when this function returns.
+    RunContextScope run_ctx((long long)run_id, frame_path, g_current_trigger != nullptr);
 
     emit_run_event_(srv, run_id, "run_started");
 
@@ -165,6 +166,11 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         if (s.inspect_tv) {
             xi_trigger_view view{};
             std::string leader;
+            // A4 explicit per-run context on the view — so a captured Trigger copy
+            // reads t.run_id() / t.frame_path() self-contained (the free functions
+            // xi::run_id()/current_frame_path() ride the installed RunContext).
+            view.run_id     = (int64_t)run_id;
+            view.frame_path = frame_path.c_str();
             if (g_current_trigger) {
                 view.is_active      = 1;
                 view.id             = g_current_trigger->id;
@@ -300,12 +306,10 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
                             "\"ms\":" + std::to_string((long long)dt_ms) +
                             ",\"inspect_compute_us\":" + std::to_string((long long)out.dt_us));
         }
-        // Clear so the next run, if it doesn't carry a frame_path arg, sees an empty
-        // path instead of the stale previous one. Runs on EVERY success path
-        // (including a suppressed stop-wake) so the next run starts clean.
-        if (out.s.set_run_context) out.s.set_run_context("");
-        // U3: clear the per-run id too — xi::run_id() outside an inspect is 0.
-        if (out.s.set_run_id) out.s.set_run_id(0);
+        // No per-run TLS to clear here anymore: the A4 RunContext is scoped to
+        // run_inspection_compute_ (RunContextScope) and was already torn down when
+        // that function returned — so the next run starts clean by construction,
+        // and off-inspect reads fail loud instead of seeing a stale value.
     } else {
         // Inspect failed (crash/throw) — still emit one Result so the stream
         // has no gap. BREAKING: the numeric code is now XI_SYS_CRASHED (was 0/NA),

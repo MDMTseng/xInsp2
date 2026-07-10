@@ -131,8 +131,8 @@ using xi::seh_exception;
 
 // Forward-declare: runs one inspection cycle (drives sinks + emits the run result).
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
-// frame_path (optional) is plumbed to the script via
-// `xi_script_set_run_context`; readable inside the script as
+// frame_path (optional) is carried on the A4 explicit per-run context
+// (RunContextScope); readable inside the script as
 // `xi::current_frame_path()`. Empty string means none.
 // run_one_inspection declared (with default args) in service_internal.hpp.
 

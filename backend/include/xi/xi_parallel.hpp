@@ -75,11 +75,11 @@ void parallel_for(int n, F&& body) {
     // region — re-installed per worker inside (0 when the owner thunk is unwired).
     const uint32_t parent_owner = detail::owner_get();
 
-    // F4: capture the trigger-context marker ONCE on the inspect thread — re-installed
-    // per worker so a current_trigger() read from a parallel body is caught as an
-    // off-thread misuse (the ambient trigger lives on the inspect thread only; the
-    // body must capture xi::trigger_snapshot() by value). 0 when the thunk is unwired.
-    const uint32_t parent_trigger_ctx = detail::trigger_ctx_get();
+    // A4: capture the per-run context ONCE on the inspect thread — re-installed per
+    // worker so xi::run_id() / xi::current_frame_path() / xi::result() called from a
+    // parallel body resolve to the run (the spawn-gap closure), and an off-thread
+    // ambient current_trigger() read is still caught host-side. null when unwired.
+    const void* const parent_run_ctx = detail::run_ctx_get();
 
     // Capture the per-task cancel token ONCE on THIS (inspect/calling) thread,
     // before the region, and re-install it per worker so a token-based
@@ -94,7 +94,7 @@ void parallel_for(int n, F&& body) {
         xi::crash::reserve_fault_stack();               // 128 KB dump headroom (mirrors lane path)
         xi::install_seh_translator();                   // per-OMP-thread (B1)
         detail::OwnerScope owner_scope(parent_owner);   // per-worker owner (C3)
-        detail::TriggerCtxScope trigger_ctx_scope(parent_trigger_ctx);   // per-worker trigger ctx (F4)
+        detail::RunCtxScope run_ctx_scope(parent_run_ctx);   // per-worker run context (A4)
         // Re-install the parent's cancel token on this worker so a token-based
         // cooperative cancel reaches cancellation_requested() here too.
         struct CancelTokenScope {

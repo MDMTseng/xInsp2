@@ -81,6 +81,15 @@ struct xi_trigger_view {
     // OWN ref (get_interface("xi.pack",1)->retain) so t.pack() stays valid after.
     xi_pack_handle               pack;          // XI_PACK_NULL ⇒ no pack on this event
     const xi_host_api*            host;           // pool + doc access; null ⇒ inactive
+    // A4 explicit per-run context (retiring the ambient run_id/frame_path TLS):
+    // the run's arrival id and the optional cmd:run frame_path, filled by the host
+    // beside the rest of the view. Carried onto Trigger::Data so t.run_id() /
+    // t.frame_path() are SELF-CONTAINED — valid on any thread, no ambient thunk.
+    // run_id 0 / frame_path null ⇒ absent (the free-function xi::run_id() /
+    // xi::current_frame_path() read the always-installed host RunContext instead,
+    // which also covers the plain cmd:run / timer-tick runs that carry no Trigger).
+    int64_t                      run_id;         // 0 ⇒ none
+    const char*                  frame_path;     // borrowed for the call; SDK copies
 };
 
 // Defined in xi_script_support.hpp (force-included by the compiler)
@@ -399,6 +408,11 @@ public:
         // valid until it (and this Data) drop. XI_PACK_NULL ⇒ no pack carried.
         xi_pack_handle    pack       = XI_PACK_NULL;
         const xi_pack_v1* pack_iface = nullptr;
+        // A4 explicit per-run context, copied by value from the view — so a
+        // Trigger copy captured into a worker reads the run's id/frame_path with
+        // zero ambient state.
+        long long         run_id     = 0;
+        std::string       frame_path;
         ~Data() {
             if (pack != XI_PACK_NULL && pack_iface && pack_iface->release)
                 pack_iface->release(pack);
@@ -419,6 +433,8 @@ public:
         d->info.timestamp_us     = v->timestamp_us;
         d->info.dequeued_at_us   = v->dequeued_at_us;
         d->info.is_active        = 1;
+        d->run_id                = (long long)v->run_id;
+        if (v->frame_path) d->frame_path = v->frame_path;
         if (v->leader_source) d->leader = v->leader_source;
         for (int i = 0; i < v->image_count; ++i) {
             xi_image_handle h = v->images ? v->images[i].handle : XI_IMAGE_NULL;
@@ -471,6 +487,15 @@ public:
     // before this field was introduced, or synthetic timer ticks with
     // no trigger). Always check is_active() first.
     int64_t       dequeued_at_us() const { if (data_) return data_->info.dequeued_at_us; ensure(); return info_.dequeued_at_us; }
+
+    // A4 explicit per-run context, self-contained on the Trigger (no ambient
+    // thunk): the run's arrival id + the optional cmd:run frame_path. Non-zero /
+    // non-empty only on a view-constructed (explicit-entry) Trigger; a
+    // default/ambient Trigger returns 0 / "" (use the free functions
+    // xi::run_id() / xi::current_frame_path() on those paths). Safe to read from
+    // a captured copy on any thread.
+    long long   run_id() const     { return data_ ? data_->run_id : 0; }
+    std::string frame_path() const { return data_ ? data_->frame_path : std::string{}; }
 
     std::string id_string() const {
         if (data_) {

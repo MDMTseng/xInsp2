@@ -34,6 +34,8 @@
 
 #include <xi/xi.hpp>             // xi::async, xi::parallel_for, xi::seh_exception
 #include <xi/xi_use.hpp>         // xi::trigger_snapshot / TriggerSnapshot
+#include <xi/xi_result.hpp>      // xi::result / xi::ng (A4 run-context routing test)
+#include <xi/xi_thread.hpp>      // xi::spawn_worker (A4 context propagation test)
 #include <xi/xi_image_pool.hpp>  // ImagePool + make_host_api + OwnerGuard
 // THE CUT (v12): xi_doc_registry.hpp + the Record meta plane are gone. The A2/A4
 // trigger tests now cover the IMAGE round-trip only (the meta-doc half was the
@@ -72,6 +74,12 @@ void* g_trigger_image_fn_ = nullptr;
 void* g_trigger_sources_fn_ = nullptr;
 void* g_trigger_leader_fn_  = nullptr;
 void* g_trigger_meta_fn_    = nullptr;
+// A4 explicit per-run context thunks (this TU plays the host — see xi_io.hpp /
+// xi_result.hpp externs). g_run_ctx_get_fn_/set_fn_ are inline globals in
+// xi_async.hpp (we only assign them, in wire_run_ctx_thunks below).
+void* g_run_ctx_run_id_fn_     = nullptr;   // xi_io.hpp (long long(*)())
+void* g_run_ctx_frame_path_fn_ = nullptr;   // xi_io.hpp (const char*(*)())
+void* g_result_fn_             = nullptr;   // xi_result.hpp (void(*)(int,const char*))
 
 // A single host_api over the live singleton ImagePool — exactly what the backend
 // hands a script/plugin (image_* + doc_* all route to the real pool/registry).
@@ -170,22 +178,62 @@ static void wire_owner_thunks() {
     g_owner_set_fn_ = (void*)&test_owner_set;
 }
 
-// F4: trigger-context marker thunks — identical to service_sinks.cpp's
-// trigger_ctx_get_cb/set_cb: read/write THIS thread's marker slot. The host's
-// warn_trigger_off_thread_ keys off exactly this per-thread value (fires iff
-// != 0), so testing propagation of the value == testing the abort/no-abort
-// decision it drives.
-static thread_local int test_trigger_ctx_ = 0;
-static uint32_t test_trigger_ctx_get() { return (uint32_t)test_trigger_ctx_; }
-static void     test_trigger_ctx_set(uint32_t v) { test_trigger_ctx_ = (int)v; }
-static void wire_trigger_ctx_thunks() {
-    g_trigger_ctx_get_fn_ = (void*)&test_trigger_ctx_get;
-    g_trigger_ctx_set_fn_ = (void*)&test_trigger_ctx_set;
+// A4 explicit per-run context — this TU mirrors the backend's host-side RunContext
+// + run_ctx thunks (service_result.cpp): a per-thread installed context pointer,
+// get/set to marshal it across the spawn primitives, and run_id/frame_path/result
+// reads that resolve it. Testing propagation of THIS context == testing that
+// xi::run_id()/current_frame_path()/xi::result() are correct on a worker thread.
+struct TestRunResult { int code = 0; std::string msg; bool set = false; };
+struct TestRunCtx {
+    long long       run_id = 0;
+    std::string     frame_path;
+    TestRunResult*  result_slot = nullptr;   // the RUN's verdict slot (parent thread)
+};
+static thread_local const TestRunCtx* t_run_ctx = nullptr;   // installed context (null ⇒ off-run)
+
+// get/set: the propagation thunks the spawn primitives use (opaque pointer).
+static const void* test_run_ctx_get() { return t_run_ctx; }
+static void        test_run_ctx_set(const void* p) { t_run_ctx = static_cast<const TestRunCtx*>(p); }
+// run_id/frame_path: the read thunks xi::run_id()/current_frame_path() call.
+static long long   test_run_ctx_run_id() { return t_run_ctx ? t_run_ctx->run_id : 0; }
+static const char* test_run_ctx_frame_path() { return t_run_ctx ? t_run_ctx->frame_path.c_str() : ""; }
+// result routing: xi::result() → this thunk → the RUN's slot via the context, so a
+// verdict set on a worker lands in the parent run's slot (not a per-thread copy).
+static void test_result(int code, const char* msg) {
+    if (!t_run_ctx || !t_run_ctx->result_slot) return;
+    t_run_ctx->result_slot->code = code;
+    t_run_ctx->result_slot->msg  = msg ? msg : "";
+    t_run_ctx->result_slot->set  = true;
 }
-// The exact predicate warn_trigger_off_thread_ evaluates on the CALLING thread:
-// true ⇒ the host would fail loud (abort in debug / log-once in release); false ⇒
-// the read is a legitimate "no trigger" and stays quiet.
-static bool warn_would_fire_here() { return test_trigger_ctx_get() != 0; }
+// spawn_worker BY-VALUE snapshot thunks (mirror run_ctx_snapshot_cb /
+// run_ctx_install_worker_cb / run_ctx_free_cb): a worker-OWNED heap copy with the
+// verdict slot dropped, so a spawn_worker that outlives its inspect reads the
+// snapshot (no dangling pointer into the freed parent context) and routes no verdict.
+static void* test_run_ctx_snapshot() {
+    if (!t_run_ctx) return nullptr;
+    auto* s = new TestRunCtx(*t_run_ctx);
+    s->result_slot = nullptr;               // detached: no live run slot to route into
+    return s;
+}
+static void test_run_ctx_install_worker(void* s) { t_run_ctx = static_cast<const TestRunCtx*>(s); }
+static void test_run_ctx_free(void* s) { delete static_cast<TestRunCtx*>(s); }
+
+static void wire_run_ctx_thunks() {
+    g_run_ctx_get_fn_             = (void*)&test_run_ctx_get;
+    g_run_ctx_set_fn_             = (void*)&test_run_ctx_set;
+    g_run_ctx_run_id_fn_         = (void*)&test_run_ctx_run_id;
+    g_run_ctx_frame_path_fn_     = (void*)&test_run_ctx_frame_path;
+    g_run_ctx_snapshot_fn_       = (void*)&test_run_ctx_snapshot;
+    g_run_ctx_install_worker_fn_ = (void*)&test_run_ctx_install_worker;
+    g_run_ctx_free_fn_           = (void*)&test_run_ctx_free;
+    g_result_fn_                 = (void*)&test_result;
+}
+// RAII install on the "dispatch" thread (mirrors the backend's RunContextScope).
+struct TestRunCtxScope {
+    const TestRunCtx* prev;
+    explicit TestRunCtxScope(const TestRunCtx* c) : prev(t_run_ctx) { t_run_ctx = c; }
+    ~TestRunCtxScope() { t_run_ctx = prev; }
+};
 
 static void test_async_propagates_owner() {
     SECTION("C2: xi::async-created pool image is attributed to the PARENT owner");
@@ -243,80 +291,152 @@ static void test_parallel_for_propagates_owner() {
 }
 
 // ===========================================================================
-// F4 — off-thread current_trigger() detection is RELATIONAL, not process-global
+// A4 — explicit per-run context propagates into worker threads (the spawn-gap
+//      closure): run_id() / current_frame_path() / result() are correct on any
+//      xi::async / xi::parallel_for / xi::spawn_worker worker.
 // ===========================================================================
 //
-// The old A1 heuristic stored the last CurrentTriggerScope's thread id in a single
-// process-global atomic; warn_trigger_off_thread_ fired whenever it was != 0, WITHOUT
-// comparing to the calling thread. Under max_parallel>1 + a live timer, lane A runs
-// a TRIGGERED frame (stores tidA) while lane B runs a benign TIMER-TICK inspect and
-// its script calls current_trigger() — B saw tidA != 0 and aborted a correct script
-// (and B's scope storing 0 masked a genuine misuse on A). The fix makes the signal a
-// per-thread marker propagated only into the framework's own worker threads. This
-// test asserts the relational property the fix rests on — the same value
-// warn_trigger_off_thread_ keys on:
-//   * a triggered inspect's xi::async / xi::parallel_for CHILD reads marker 1
-//     (genuine off-thread read ⇒ WOULD fire — detection preserved), and
-//   * a timer-tick lane's own worker reads 0 (⇒ would NOT fire), CONCURRENTLY with a
-//     triggered lane whose marker is 1 (the exact false-positive the old code hit).
-static void test_off_thread_detection_is_relational() {
-    SECTION("F4: off-thread current_trigger() detection is per-thread-relative, not a process-global tid");
-    wire_trigger_ctx_thunks();
+// The pre-A4 bug: run_id / frame_path lived in an ambient thread_local set on the
+// dispatch thread and NEVER propagated to workers — so a xi::run_id() /
+// xi::current_frame_path() read from a parallel body silently returned 0/"", and a
+// xi::result() from a worker wrote a per-thread copy the run never read (silent NG
+// loss). A4 rides ONE explicit context installed on the dispatch thread and
+// captured-by-value into the spawn primitives. This test installs the context (as
+// run_inspection_compute_'s RunContextScope does) and asserts every worker reads
+// the RIGHT run values and routes its verdict to the run's slot.
+static void test_run_ctx_propagates_into_workers() {
+    SECTION("A4: run_id()/current_frame_path()/result() correct inside parallel_for + async (spawn-gap closure)");
+    wire_run_ctx_thunks();
 
-    // --- Lane A: an inspect thread INSIDE a trigger-bearing frame (CurrentTriggerScope
-    //     sets marker=1 on the dispatch thread). ---
-    test_trigger_ctx_ = 1;
+    // Off any run: no context installed → accessors read the sentinel (in Debug the
+    // real backend thunk would abort; the TEST thunk returns 0/"" so we can assert
+    // the wiring without aborting the test process).
+    t_run_ctx = nullptr;
+    CHECK(xi::run_id() == 0);
+    CHECK(xi::current_frame_path().empty());
 
-    // A child spawned by xi::async from the triggered inspect inherits marker=1, so a
-    // current_trigger() read on it is caught (genuine misuse — should snapshot).
-    std::atomic<int> child_marker{-1};
+    // --- Install the run's context on THIS (dispatch) thread. ---
+    TestRunResult verdict;
+    TestRunCtx ctx;
+    ctx.run_id      = 4242;
+    ctx.frame_path  = "C:/frames/f0007.png";
+    ctx.result_slot = &verdict;
+    TestRunCtxScope scope(&ctx);
+
+    // On the dispatch thread the accessors read the run.
+    CHECK(xi::run_id() == 4242);
+    CHECK(xi::current_frame_path() == "C:/frames/f0007.png");
+
+    // --- xi::async worker: run_id / frame_path / result all resolve to the run. ---
+    std::atomic<long long> async_run_id{-1};
+    bool async_path_ok = false;
     {
-        auto f = xi::async([&child_marker]() {
-            child_marker.store((int)test_trigger_ctx_get());
+        auto f = xi::async([&]() -> int {
+            async_run_id.store(xi::run_id());
+            // capture frame_path off-thread + route a verdict from the worker
+            std::string fp = xi::current_frame_path();
+            async_path_ok = (fp == "C:/frames/f0007.png");
+            xi::ng(2, "defect from async worker");   // → test_result → run's slot
             return 0;
         });
         (void)(int)f;   // await
     }
-    CHECK(child_marker.load() == 1);           // detection preserved for the real child
+    CHECK(async_run_id.load() == 4242);        // pre-A4: 0 (ambient TLS not propagated)
+    CHECK(async_path_ok);                      // pre-A4: ""
+    CHECK(verdict.set);                        // pre-A4: worker wrote a lost per-thread copy
+    CHECK(verdict.code == -2);                 // xi::ng(2) routed to the RUN's slot
+    CHECK(verdict.msg == "defect from async worker");
 
-    // parallel_for body likewise inherits marker=1.
-    std::atomic<int> par_saw_marker{0};
-    std::atomic<int> par_iters{0};
-    xi::parallel_for(64, [&](int) {
-        par_iters.fetch_add(1);
-        if (test_trigger_ctx_get() != 0) par_saw_marker.fetch_add(1);
+    // --- xi::parallel_for body: every worker reads the right run_id + frame_path. ---
+    verdict = TestRunResult{};
+    constexpr int N = 64;
+    std::atomic<int> id_ok{0}, path_ok{0}, iters{0};
+    xi::parallel_for(N, [&](int) {
+        iters.fetch_add(1);
+        if (xi::run_id() == 4242) id_ok.fetch_add(1);
+        if (xi::current_frame_path() == "C:/frames/f0007.png") path_ok.fetch_add(1);
     });
-    CHECK(par_iters.load() == 64);
-    CHECK(par_saw_marker.load() == 64);        // every worker inherited the trigger ctx
+    CHECK(iters.load() == N);
+    CHECK(id_ok.load() == N);                  // every worker saw the run id (gap closed)
+    CHECK(path_ok.load() == N);                // …and the frame_path
 
-    // --- Lane B: a DIFFERENT lane's timer-tick worker, running CONCURRENTLY while lane
-    //     A's marker is still 1. It was NOT spawned by lane A's async/parallel_for — it
-    //     is a plain thread with its own thread_local marker (0). Pre-fix it would read
-    //     the process-global tidA != 0 and abort a correct script. ---
-    std::atomic<bool> lane_b_would_fire{true};
-    std::thread lane_b([&]() {
-        // No CurrentTriggerScope ran for THIS inspect (timer tick / plain cmd:run):
-        // its marker is the fresh thread_local default, 0.
-        lane_b_would_fire.store(warn_would_fire_here());
-    });
-    lane_b.join();
-    CHECK(lane_b_would_fire.load() == false);  // THE FIX: benign lane-B worker is NOT aborted
+    // A verdict set after the join, on the dispatch thread, also routes correctly.
+    xi::ok(1, "clean");
+    CHECK(verdict.set && verdict.code == 1 && verdict.msg == "clean");
 
-    // --- The async worker restored the marker on exit — a pooled worker thread reused
-    //     for a later, non-triggered task must not leak marker=1. ---
-    std::atomic<int> reused_marker{-1};
-    test_trigger_ctx_ = 0;                     // lane A's inspect ended (dtor clears)
+    // --- xi::spawn_worker also inherits the context (was OwnerScope-only before). ---
+    std::atomic<long long> worker_run_id{-1};
     {
-        auto f = xi::async([&reused_marker]() {
-            reused_marker.store((int)test_trigger_ctx_get());
-            return 0;
+        std::thread th = xi::spawn_worker("ctx-probe", [&]() {
+            worker_run_id.store(xi::run_id());
         });
+        th.join();
+    }
+    CHECK(worker_run_id.load() == 4242);
+
+    // --- Scope exit restores "off-run": a later async task (pooled thread reused)
+    //     must not leak the previous run's context. ---
+    // (scope dtor runs at end of function; assert the pooled-thread reuse here while
+    //  the context is still installed vs after — do the after-check post-scope below.)
+}
+
+// THE spawn_worker UAF regression: a spawn_worker thread that OUTLIVES its inspect
+// must read its own by-value SNAPSHOT (no dangling pointer into the freed dispatch
+// frame), and a verdict from it must safely no-op. We spawn a worker that BLOCKS on
+// a gate, let the RunContextScope (and the stack `ctx`) destruct, THEN release the
+// gate so the worker's whole body runs after the parent context is gone. If
+// spawn_worker still captured a raw pointer into `ctx`, reading run_id() here would
+// be a use-after-free (garbage / crash under ASAN) — this is the test the earlier
+// "don't read after the inspect" caveat lacked.
+static void test_spawn_worker_outlives_inspect() {
+    SECTION("A4: a spawn_worker OUTLIVING its inspect reads its snapshot safely (no UAF); result() no-ops");
+    wire_run_ctx_thunks();
+
+    auto gate = std::make_shared<std::atomic<bool>>(false);
+    std::atomic<long long> wid{-1};
+    std::atomic<int>       path_ok{-1};
+    std::atomic<bool>      body_done{false};
+    TestRunResult          verdict;   // the run's slot — must stay UNSET (the worker's snapshot has none)
+    std::thread th;
+    {
+        TestRunCtx ctx;
+        ctx.run_id      = 7;
+        ctx.frame_path  = "C:/frames/late.png";
+        ctx.result_slot = &verdict;
+        TestRunCtxScope scope(&ctx);
+        // Snapshot is taken HERE (spawning thread, context live). The worker blocks
+        // until we release the gate AFTER this scope + `ctx` have destructed.
+        th = xi::spawn_worker("late-worker",
+            [gate, &wid, &path_ok, &body_done]() {
+                while (!gate->load(std::memory_order_acquire)) std::this_thread::yield();
+                wid.store(xi::run_id());                                  // snapshot → 7 (ctx is gone)
+                path_ok.store(xi::current_frame_path() == "C:/frames/late.png" ? 1 : 0);
+                xi::ok(1, "verdict from a detached worker");              // result_slot null → no-op
+                body_done.store(true);
+            });
+    }   // <-- RunContextScope + ctx destruct HERE, worker still alive & blocked on the gate
+
+    gate->store(true, std::memory_order_release);   // release: the whole body runs post-teardown
+    th.join();
+
+    CHECK(body_done.load());
+    CHECK(wid.load() == 7);                 // read the worker-OWNED snapshot, not the freed ctx (no UAF)
+    CHECK(path_ok.load() == 1);
+    CHECK(!verdict.set);                    // result() from the detached worker safely no-op'd
+}
+
+// After the run's scope has ended, a fresh async task sees no context (the worker
+// thread the pool reuses must not retain the previous run's pointer).
+static void test_run_ctx_cleared_after_run() {
+    SECTION("A4: a worker of a later task does not leak the previous run's context");
+    wire_run_ctx_thunks();
+    t_run_ctx = nullptr;                        // no run installed
+    std::atomic<long long> leaked{-1};
+    {
+        auto f = xi::async([&]() -> int { leaked.store(xi::run_id()); return 0; });
         (void)(int)f;
     }
-    CHECK(reused_marker.load() == 0);          // non-triggered inspect's child ⇒ quiet
-
-    // Reset for neighbouring tests.
-    test_trigger_ctx_ = 0;
+    CHECK(leaked.load() == 0);                  // no stale context propagated
 }
 
 // ===========================================================================
@@ -468,12 +588,16 @@ static void test_explicit_trigger_view_cross_thread() {
     view.image_count    = 1;
     view.leader_source  = "cam";
     view.host           = &host;
+    view.run_id         = 909;                 // A4 explicit per-run context on the view
+    view.frame_path     = "C:/frames/x.png";
 
     xi::Trigger t(&view);
     CHECK(t.is_active());
     CHECK(t.id().hi == 0x11ull && t.id().lo == 0x22ull);
     CHECK(t.timestamp_us() == 777);
     CHECK(t.dequeued_at_us() == 42);
+    CHECK(t.run_id() == 909);                  // self-contained per-run context
+    CHECK(t.frame_path() == "C:/frames/x.png");
     CHECK(t.primary_source() == "cam");
     CHECK(t.has_source("cam"));
     CHECK(t.sources().size() == 1);
@@ -486,6 +610,8 @@ static void test_explicit_trigger_view_cross_thread() {
     //     thread_local, no thunk — everything came in through the explicit view. ---
     xi::Trigger tcopy = t;   // cheap shared_ptr copy
     std::thread worker([&]() {
+        CHECK(tcopy.run_id() == 909);                    // per-run context rides the copy
+        CHECK(tcopy.frame_path() == "C:/frames/x.png");
         xi::Image img = tcopy.image("cam");
         CHECK(!img.empty());
         CHECK(img.width == 8 && img.height == 8 && img.channels == 1);
@@ -532,9 +658,12 @@ int main() {
     test_async_propagates_owner();
     test_parallel_for_propagates_owner();
 
-    // F4 — off-thread current_trigger() detection is per-thread-relative (no
-    // process-global tid that false-aborts a benign timer-tick worker under N>1).
-    test_off_thread_detection_is_relational();
+    // A4 — explicit per-run context propagates into worker threads: run_id() /
+    // current_frame_path() / result() are correct inside parallel_for + async
+    // (the spawn-gap closure), and don't leak across runs.
+    test_run_ctx_propagates_into_workers();
+    test_spawn_worker_outlives_inspect();
+    test_run_ctx_cleared_after_run();
 
     // A — trigger snapshot cross-thread (A2). A1 fail-loud is integration-level.
     test_trigger_snapshot_cross_thread();
