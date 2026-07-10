@@ -86,8 +86,9 @@ public:
         // this order at runtime; this is the static-destruction / never-closed-project
         // BACKSTOP (controlled_shutdown_teardown_ now calls close_project for the
         // normal path, but an exit that skips it must still not invert the order).
-        // The adapter's ImagePool sweep is itself guarded by g_image_pool_alive for
-        // the case the pool singleton was already torn down before us.
+        // The adapter's ImagePool sweep is safe even this late: the pool
+        // singleton is intentionally leaked (ImagePool::instance), so it can
+        // never have been torn down before us.
         project_.instances.clear();
         inst_state_.clear();
         // V3: machine-autoloaded providers are NOT in project_.instances (they

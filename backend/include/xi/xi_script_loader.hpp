@@ -192,11 +192,11 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     ImagePoolOwnerId oid = out.owner_id;
     out.module_lifetime = std::shared_ptr<void>(h, [oid](void* m) {
         // A shared_ptr deleter must never throw, and may run late (during static
-        // destruction, if the last copy is dropped then). Guard both: skip the
-        // pool sweep once the ImagePool singleton is gone (touching the destroyed
-        // Meyers singleton is UB), and swallow any exception.
+        // destruction, if the last copy is dropped then) — swallow any exception.
+        // The pool sweep itself is safe unconditionally: the ImagePool singleton
+        // is intentionally leaked (ImagePool::instance), never destroyed.
         try {
-            if (oid != 0 && g_image_pool_alive.load(std::memory_order_acquire)) {
+            if (oid != 0) {
                 int swept = ImagePool::instance().release_all_for(oid);
                 if (swept > 0) {
                     std::fprintf(stderr,
