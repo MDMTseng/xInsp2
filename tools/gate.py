@@ -17,8 +17,10 @@ it runs the whole enforced surface in order and fails loud on the first stage
 that fails.
 
 STAGES (in order; stop on first failure unless --keep-going)
-    docs      check_doc_coverage.py + check_retired_terms.py + the static
-              contract legs: contract/validate.py (schema/fixture check) and
+    docs      check_doc_coverage.py + check_retired_terms.py +
+              check_doc_debt.py (DOC_DEBT.md ledger) + check_doc_links.py
+              (@doc backlinks) + the static contract legs:
+              contract/validate.py (schema/fixture check) and
               baseline_gate.py (additive-vs-breaking)            (no build)
     build     configure (fresh if the cache is stale) + build backend
               Release + build the shipped plugins Release
@@ -192,6 +194,8 @@ def stage_docs(_args) -> None:
     (2026-07-02)."""
     _run([sys.executable, REPO / "tools" / "check_doc_coverage.py"])
     _run([sys.executable, REPO / "tools" / "check_retired_terms.py"])
+    _run([sys.executable, REPO / "tools" / "check_doc_debt.py"])
+    _run([sys.executable, REPO / "tools" / "check_doc_links.py"])
     env = os.environ.copy()
     env["XINSP2_REQUIRE_SCHEMA_GATE"] = "1"
     _run([sys.executable, REPO / "contract" / "validate.py"], env=env)
