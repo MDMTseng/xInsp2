@@ -113,3 +113,7 @@ examples/*/gw.log
 
 # F5 advisory single-writer stamp (per-process, never committed)
 .xinsp_owner
+
+# qa_jpeg_preview phase2: driver copies the script into no_codec/ at run time
+# (path-containment guard forbids the old "../inspect.cpp" reference)
+examples/qa_jpeg_preview/no_codec/inspect.cpp
