@@ -68,11 +68,6 @@
 
 namespace xi {
 
-// Mirrors g_pack_registry_alive: readable after the Meyers singleton is gone at
-// process exit, so late teardown sweeps (a static-destruction adapter dtor)
-// skip the registry instead of touching a destroyed object.
-inline std::atomic<bool> g_cap_registry_alive{false};
-
 // ===================================================================
 // CapRegistry — capability name -> providing instance's handler.
 // ===================================================================
@@ -84,12 +79,15 @@ public:
         ImagePoolOwnerId  owner   = 0;      // the providing instance's identity
     };
 
+    // INTENTIONALLY LEAKED (mirrors ImagePool/PackRegistry::instance):
+    // process-lifetime state, never destroyed — so late teardown sweeps (a
+    // static-destruction adapter dtor) can touch the registry unconditionally,
+    // with no destroyed-singleton window and no registry-liveness guard flag.
+    // The OS reclaims the memory at exit.
     static CapRegistry& instance() {
-        static CapRegistry r;
-        g_cap_registry_alive.store(true, std::memory_order_release);
-        return r;
+        static CapRegistry* r = new CapRegistry();
+        return *r;
     }
-    ~CapRegistry() { g_cap_registry_alive.store(false, std::memory_order_release); }
 
     // Caller has already validated args + lifecycle context (f_cap_register).
     // Same-owner re-registration OVERWRITES (the reinit path: the fresh factory
@@ -376,6 +374,19 @@ inline int32_t f_cap_call_impl(const char* name, xi_pack_handle in, xi_pack_hand
     if (e.owner != adapter->owner_id() || !e.handler) return XI_CAP_ESHAPE;
     try {
         *out = e.handler(e.self, in);
+        // Ownership handoff (phantom-ledger fix; the f_emit_pack retain_untagged
+        // precedent, xi_pack_abi.hpp): the handler ran under OwnerGuard(e.owner),
+        // so its sealed OUTPUT pack's initial PackRegistry ref was owner-tagged
+        // to the PROVIDER — but that ref is handed to the CALLER, who owns it.
+        // Left provider-tagged, the provider's teardown sweep (adapter dtor →
+        // sweep_packs_for → release_all_for) would reclaim the phantom charge
+        // and free the consumer's live pack (wrong answer / data loss). Retag
+        // while the provider pin is still held: +1 untagged, -1 popping the
+        // provider-tagged ref — net refcount unchanged, tag moved off the
+        // provider. Slot bridge (no-op until install_pack_abi — same layering
+        // as sweep_packs_for).
+        if (*out != XI_PACK_NULL)
+            ImagePool::untag_pack_ref(*out, e.owner);
         return XI_CAP_OK;
     } catch (const seh_exception& ex) {
         std::fprintf(stderr, "[xinsp2] capability '%s' handler crashed: 0x%08X (%s)\n",
@@ -435,9 +446,9 @@ inline int32_t f_cap_unregister(const char* name, void* /*self*/) {
 // The owner-sweep trampoline published into ImagePool::cap_sweep_slot, so the
 // teardown paths that already sweep leaked image handles + pack refs (adapter
 // dtor) and the reinit rebuild drop this owner's registrations through the
-// same layering bridge. Guarded for static destruction.
+// same layering bridge. Safe even during static destruction: the registry
+// singleton is intentionally leaked.
 inline int f_cap_sweep_for(ImagePoolOwnerId owner) {
-    if (!g_cap_registry_alive.load(std::memory_order_acquire)) return 0;
     return CapRegistry::instance().unregister_all_for(owner);
 }
 

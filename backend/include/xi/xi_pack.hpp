@@ -395,17 +395,15 @@ inline xi_image_handle alloc_image(int32_t w, int32_t h, int32_t c, const void* 
     return handle;
 }
 inline void addref(xi_image_handle h) {
-    if (h && g_image_pool_alive.load(std::memory_order_acquire))
-        ImagePool::instance().addref(h);
+    if (h) ImagePool::instance().addref(h);
 }
 inline void release(xi_image_handle h) {
-    // Guarded so a pack destroyed during static teardown (after the pool
-    // singleton is gone) never touches a destroyed Meyers singleton.
-    if (h && g_image_pool_alive.load(std::memory_order_acquire))
-        ImagePool::instance().release(h);
+    // Safe even for a pack destroyed during static teardown: the pool
+    // singleton is intentionally leaked (ImagePool::instance), never destroyed.
+    if (h) ImagePool::instance().release(h);
 }
 inline std::span<const uint8_t> view(xi_image_handle h) {
-    if (!h || !g_image_pool_alive.load(std::memory_order_acquire)) return {};
+    if (!h) return {};
     auto& pool = ImagePool::instance();
     const uint8_t* p = pool.read_data(h);
     if (!p) return {};

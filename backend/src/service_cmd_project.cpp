@@ -276,7 +276,7 @@ void cmd_create_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // the culprit so a factory fault is attributed to this plugin.
         stamp_culprit_(iname->c_str(), *plugin);
         std::string create_err;
-        auto* ii = g_eng.plugin_mgr.create_instance(*iname, *plugin, &create_err);
+        auto* ii = g_eng.plugin_mgr.create_instance(_create_guard.token(), *iname, *plugin, &create_err);
         if (ii) {
             // create_instance records the Created state internally (atomic with the
             // instance add) — no separate set_inst_state needed.
@@ -302,7 +302,7 @@ void cmd_remove_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // remaining instances comes back on scope exit. Closes the ledger
         // mis-attribution UAF window and narrows the cap-plane transient.
         auto _rm_guard = quiesce_dispatch_for_lifecycle_op_("remove_instance", &srv);
-        if (g_eng.plugin_mgr.remove_instance(*iname, delete_folder)) {
+        if (g_eng.plugin_mgr.remove_instance(_rm_guard.token(), *iname, delete_folder)) {
             // remove_instance drops the lifecycle state internally (atomic with the
             // unregister) — no separate drop_inst_state needed. Health contract:
             // drop any runtime-fault overlay for the removed instance so it no
@@ -327,7 +327,7 @@ void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // Quiesce dispatch first, exactly like every sibling lifecycle op.
         auto _rn_guard = quiesce_dispatch_for_lifecycle_op_("rename_instance", &srv);
         using RR = xi::PluginManager::RenameResult;
-        RR rr = g_eng.plugin_mgr.rename_instance(*old_name, *new_name);
+        RR rr = g_eng.plugin_mgr.rename_instance(_rn_guard.token(), *old_name, *new_name);
         if (rr == RR::Rejected) {
             send_rsp_err(srv, id, "rename failed — name in use or instance missing");
         } else {

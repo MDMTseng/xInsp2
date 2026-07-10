@@ -81,7 +81,8 @@ int main() {
 
     {
         xi::PluginManager mgr;
-        CHECK(mgr.open_project(proj.string()));
+        // QuiesceToken: bare PluginManager, single-threaded test — no dispatch pool.
+        CHECK(mgr.open_project(xi::QuiesceToken::assert_no_dispatch(), proj.string()));
 
         // compile:true project plugin is loaded eagerly (handle non-null), keyed by
         // its MANIFEST name.
@@ -101,7 +102,7 @@ int main() {
 
         // Teardown: close_project must free + erase EVERY plugin this project
         // loaded, by the key that holds the handle.
-        mgr.close_project();
+        mgr.close_project(xi::QuiesceToken::assert_no_dispatch());
 
         CHECK(mgr.find_plugin("renamed_proj") == nullptr);   // #13: renamed handle freed+erased
         CHECK(mgr.find_plugin("renamed_ext")  == nullptr);   // #9 : external freed+erased

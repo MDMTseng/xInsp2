@@ -40,7 +40,8 @@ inline bool PluginManager::is_valid_instance_name(const std::string& n) {
 }
 
 // Create a new instance of a plugin inside the current project.
-inline InstanceInfo* PluginManager::create_instance(const std::string& instance_name,
+inline InstanceInfo* PluginManager::create_instance(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                               const std::string& instance_name,
                                const std::string& plugin_name,
                                std::string* err) {
     auto fail = [&](std::string msg) -> InstanceInfo* { if (err) *err = std::move(msg); return nullptr; };
@@ -155,7 +156,8 @@ inline bool PluginManager::save_instance(const std::string& instance_name) {
 
 // Remove an instance: destroys the runtime object + unregisters from
 // both registries. Optionally deletes the on-disk folder.
-inline bool PluginManager::remove_instance(const std::string& instance_name, bool delete_folder) {
+inline bool PluginManager::remove_instance(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                           const std::string& instance_name, bool delete_folder) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = project_.instances.find(instance_name);
     if (it == project_.instances.end()) return false;
@@ -193,7 +195,8 @@ inline bool PluginManager::remove_instance(const std::string& instance_name, boo
 // name. Rejected if the new name is invalid / in use / the instance is missing
 // (no side effects); Ok on full success; NotPersisted if the runtime renamed
 // but the config write failed.
-inline PluginManager::RenameResult PluginManager::rename_instance(const std::string& old_name, const std::string& new_name) {
+inline PluginManager::RenameResult PluginManager::rename_instance(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                                                  const std::string& old_name, const std::string& new_name) {
     std::lock_guard<std::mutex> lk(mu_);
     if (old_name == new_name) return RenameResult::Ok;
     if (!is_valid_instance_name(new_name)) return RenameResult::Rejected;   // no path escape via the name

@@ -50,14 +50,6 @@
 
 namespace xi {
 
-// True while the ImagePool singleton is alive. Namespace-scope (constant-
-// initialised, trivial dtor) so it is valid before the singleton is constructed
-// and remains readable after it is destroyed at process exit — letting late
-// teardown paths (e.g. a deferred LoadedScript module_lifetime deleter that runs
-// during static destruction) skip pool access once the pool is gone instead of
-// touching a destroyed Meyers singleton (UB).
-inline std::atomic<bool> g_image_pool_alive{false};
-
 // Per-creator identity. Lets the pool sweep all handles allocated on
 // behalf of a given plugin instance / script when that owner dies
 // (instance destroyed, worker process exited, script unloaded). An
@@ -88,13 +80,16 @@ public:
     // Max generation that fits in (64 - 8 - SLOT_BITS) = 40 bits.
     static constexpr uint64_t GEN_MAX    = (1ull << 40) - 1;
 
+    // INTENTIONALLY LEAKED: the pool is process-lifetime state, so it is never
+    // destroyed — heap-allocated once, reclaimed by the OS at exit. This makes
+    // every late-teardown path (a static-destruction adapter dtor's owner
+    // sweep, a deferred LoadedScript module_lifetime deleter) safe to call the
+    // pool unconditionally: there is no destroyed-Meyers-singleton window, and
+    // no pool-liveness guard flag to keep in sync.
     static ImagePool& instance() {
-        static ImagePool pool;
-        g_image_pool_alive.store(true, std::memory_order_release);
-        return pool;
+        static ImagePool* pool = new ImagePool();
+        return *pool;
     }
-
-    ~ImagePool() { g_image_pool_alive.store(false, std::memory_order_release); }
 
     // ---- core lookup -------------------------------------------------
 
@@ -608,6 +603,31 @@ public:
         if (auto fn = pack_sweep_slot().load(std::memory_order_acquire))
             return fn(owner);
         return 0;
+    }
+
+    // Pack ownership HANDOFF bridge (the phantom-ledger fix; f_emit_pack's
+    // retain_untagged doctrine, xi_pack_abi.hpp). A producer-side funnel (the
+    // capability funnel, run_pack_door) runs the plugin under OwnerGuard, so
+    // the sealed OUTPUT pack's initial PackRegistry ref is owner-tagged to the
+    // PRODUCER — but that ref is handed to the CALLER, who owns it. Left
+    // tagged, the ledger carries a phantom {producer,1} charge and the
+    // producer's teardown sweep (sweep_packs_for → release_all_for) would
+    // reclaim it and free the caller's live pack (UAF / data loss). This
+    // bridge moves that one ref's tag off the producer: +1 untagged then -1
+    // tagged — net refcount unchanged. Same layering bridge as
+    // pack_sweep_slot (this header cannot include xi_pack_abi.hpp); published
+    // by install_pack_abi, no-op until then.
+    using PackUntagFn = void (*)(xi_pack_handle f, ImagePoolOwnerId owner);
+    static std::atomic<PackUntagFn>& pack_untag_slot() {
+        static std::atomic<PackUntagFn> slot{nullptr};
+        return slot;
+    }
+    static void publish_pack_untagger(PackUntagFn fn) {
+        pack_untag_slot().store(fn, std::memory_order_release);
+    }
+    static void untag_pack_ref(xi_pack_handle f, ImagePoolOwnerId owner) {
+        if (auto fn = pack_untag_slot().load(std::memory_order_acquire))
+            fn(f, owner);
     }
 
     // Capability plane (docs/new_gen/14 pilot): the two host-owned vtables —

@@ -39,12 +39,6 @@
 
 namespace xi {
 
-// Mirrors g_image_pool_alive (xi_image_pool.hpp): readable after the registry
-// Meyers singleton is destroyed at process exit, so late teardown paths (the
-// owner sweep a static-destruction adapter dtor triggers) skip registry access
-// instead of touching a destroyed singleton (UB).
-inline std::atomic<bool> g_pack_registry_alive{false};
-
 // ===================================================================
 // PackRegistry — the opaque-handle table behind xi.pack@1.
 //
@@ -85,12 +79,15 @@ inline std::atomic<bool> g_pack_registry_alive{false};
 // ===================================================================
 class PackRegistry {
 public:
+    // INTENTIONALLY LEAKED (mirrors ImagePool::instance): process-lifetime
+    // state, never destroyed — so late teardown paths (a static-destruction
+    // adapter dtor's pack sweep, a late retain/release) can touch the registry
+    // unconditionally, with no destroyed-singleton window and no registry-
+    // liveness guard flag. The OS reclaims the memory at exit.
     static PackRegistry& instance() {
-        static PackRegistry r;
-        g_pack_registry_alive.store(true, std::memory_order_release);
-        return r;
+        static PackRegistry* r = new PackRegistry();
+        return *r;
     }
-    ~PackRegistry() { g_pack_registry_alive.store(false, std::memory_order_release); }
 
     // ---- builder side (produce) --------------------------------------------
     xi_pack_builder new_builder() {
@@ -412,19 +409,13 @@ inline int32_t f_get_mp(xi_pack_handle f, const char* key, const void** ptr, int
 }
 
 // ---- lifetime / emit -------------------------------------------------------
-// Guarded like f_sweep_packs_for: during static destruction the registry
-// singleton may already be gone, so a late retain/release must not touch it.
-// RELAXED (not acquire): this is the per-frame pack refcount hot path. The flag
-// is written exactly once (true->false in ~PackRegistry at static teardown) and
-// reads nothing it guards — a relaxed load is sufficient (during normal run it
-// is always true), so we don't tax every retain/release with an acquire barrier
-// for a teardown-only case. See docs: speed-first, no hot-path tax for the rare.
+// The registry singleton is intentionally leaked (see PackRegistry::instance),
+// so a late retain/release during static destruction is safe unconditionally —
+// no alive-flag guard on the per-frame refcount hot path.
 inline void f_retain(xi_pack_handle f) {
-    if (!g_pack_registry_alive.load(std::memory_order_relaxed)) return;
     PackRegistry::instance().retain(f);
 }
 inline void f_release(xi_pack_handle f) {
-    if (!g_pack_registry_alive.load(std::memory_order_relaxed)) return;
     PackRegistry::instance().release(f);
 }
 
@@ -447,16 +438,32 @@ inline void f_emit_pack(const char* emitter, xi_trigger_id id,
 // runs with no owner context, and an owner-tagged release here would mis-charge
 // the ambient plugin's ledger bucket and skew the later owner sweep.
 inline void f_release_for_bus(xi_pack_handle f) {
-    if (!g_pack_registry_alive.load(std::memory_order_relaxed)) return;
     PackRegistry::instance().release_as(f, 0);
+}
+
+// Ownership HANDOFF for a pack a plugin produced FOR ITS CALLER (capability-
+// funnel output, pack-door output) — published into ImagePool::pack_untag_slot.
+// seal() owner-tags the initial ref to the thread's current owner (the
+// producing plugin's OwnerGuard), but a funnel hands that very ref to the
+// CALLER, who owns it. Left producer-tagged, the ledger carries a PHANTOM
+// {producer,1} charge for a ref the consumer legitimately holds, and the
+// producer's teardown sweep (f_sweep_packs_for → release_all_for) would later
+// reclaim it and free the caller's live pack — a UAF / wrong-answer. Same
+// doctrine as f_emit_pack's retain_untagged above: a ref that outlives the
+// producing plugin must not sit in its ledger bucket. Retain FIRST so the
+// refcount never transits zero: +1 untagged, then -1 popping the producer-
+// tagged ref — net refcount unchanged, tag moved off the producer.
+inline void f_untag_pack_ref(xi_pack_handle f, ImagePoolOwnerId owner) {
+    if (f == XI_PACK_NULL) return;
+    PackRegistry::instance().retain_untagged(f);
+    PackRegistry::instance().release_as(f, owner);
 }
 
 // The owner-sweep trampoline published into ImagePool::pack_sweep_slot, so the
 // teardown paths that already sweep leaked image handles (adapter dtor, script
-// unload) reclaim leaked pack refs through the same layering bridge. Guarded:
-// during static destruction the registry singleton may already be gone.
+// unload) reclaim leaked pack refs through the same layering bridge. Safe even
+// during static destruction: the registry singleton is intentionally leaked.
 inline int f_sweep_packs_for(ImagePoolOwnerId owner) {
-    if (!g_pack_registry_alive.load(std::memory_order_acquire)) return 0;
     return PackRegistry::instance().release_all_for(owner);
 }
 
@@ -504,6 +511,7 @@ inline const xi_pack_v1* pack_v1_iface() {
 inline void install_pack_abi() {
     ImagePool::publish_pack_iface(pack_v1_iface());
     ImagePool::publish_pack_sweeper(&pack_abi_detail::f_sweep_packs_for);
+    ImagePool::publish_pack_untagger(&pack_abi_detail::f_untag_pack_ref);
     TriggerBus::instance().set_pack_releaser(&pack_abi_detail::f_release_for_bus);
 }
 

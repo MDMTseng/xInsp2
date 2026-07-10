@@ -651,7 +651,8 @@ inline int PluginManager::compile_plugin_folders_locked_(const std::vector<std::
 // Returns: ok flag, build log, list of instance names that were
 // re-instantiated. On compile failure the OLD DLL stays loaded so
 // running inspection isn't disrupted.
-inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(const std::string& plugin_name) {
+inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                                                              const std::string& plugin_name) {
     std::lock_guard<std::mutex> lk(mu_);
     RecompileResult r;
     auto orig_it = project_plugin_origin_.find(plugin_name);
@@ -900,9 +901,11 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
 // passes it to rebuild just the one(s) you're iterating on. Empty = all
 // cmake plugins.
 //
-// Caller MUST quiesce dispatch first. cmake_exe = "cmake" (or an absolute
+// Caller MUST quiesce dispatch first — compile-enforced by the QuiesceToken
+// parameter (see xi_quiesce_token.hpp). cmake_exe = "cmake" (or an absolute
 // path); config = "Release".
-inline PluginManager::PluginRebuildReport PluginManager::rebuild_cmake_plugins(const std::string& cmake_exe,
+inline PluginManager::PluginRebuildReport PluginManager::rebuild_cmake_plugins(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                          const std::string& cmake_exe,
                                           const std::string& config,
                                           const std::vector<std::string>& only) {
     std::lock_guard<std::mutex> lk(mu_);
@@ -1016,7 +1019,8 @@ inline PluginManager::PluginRebuildReport PluginManager::rebuild_cmake_plugins(c
 // logic lives in xi_plugin_export.hpp (export_project_plugin_impl) — a
 // self-contained build concern. This wrapper just takes the lock, resolves
 // the plugin's source dir + manifest info, and delegates.
-inline PluginManager::ExportResult PluginManager::export_project_plugin(const std::string& plugin_name,
+inline PluginManager::ExportResult PluginManager::export_project_plugin(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                    const std::string& plugin_name,
                                     const std::string& dest_root) {
     std::lock_guard<std::mutex> lk(mu_);
     ExportResult er;

@@ -534,7 +534,10 @@ int main(int argc, char** argv) {
         if (n) g_eng.plugin_mgr.set_certify_exe(std::string(exe, n));
     }
     if (!g_eng.plugins_dir.empty()) {
-        int n = g_eng.plugin_mgr.scan_plugins(g_eng.plugins_dir);
+        // QuiesceToken: boot-time scan — the serve loop / dispatch pool does not
+        // exist yet, so there is nothing to quiesce (see xi_quiesce_token.hpp).
+        int n = g_eng.plugin_mgr.scan_plugins(xi::QuiesceToken::assert_no_dispatch(),
+                                              g_eng.plugins_dir);
         std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, g_eng.plugins_dir.c_str());
     }
     // Additional plugin folders from --plugins-dir / XINSP2_EXTRA_PLUGIN_DIRS.
@@ -544,7 +547,8 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[xinsp2] extra plugin dir not found: %s\n", dir.c_str());
             continue;
         }
-        int n = g_eng.plugin_mgr.scan_plugins(dir);
+        // QuiesceToken: still boot — dispatch pool not started yet.
+        int n = g_eng.plugin_mgr.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), dir);
         std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, dir.c_str());
     }
 

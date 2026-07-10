@@ -26,7 +26,8 @@ namespace xi {
 // is registered. An already-loaded plugin (handle != nullptr) keeps its
 // handle and resolved factory — we refresh only manifest metadata so
 // rescan_plugins doesn't leak the prior HMODULE.
-inline int PluginManager::scan_plugins(const std::string& plugins_dir) {
+inline int PluginManager::scan_plugins(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                       const std::string& plugins_dir) {
     if (!std::filesystem::exists(plugins_dir)) return 0;
 
     // J6: the certify step per changed-hash plugin spawns a throwaway child that

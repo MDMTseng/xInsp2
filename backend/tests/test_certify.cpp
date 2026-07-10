@@ -110,7 +110,8 @@ int main(int argc, char** argv) {
     {
         xi::PluginManager pm;
         pm.set_certify_exe(exe);
-        int n = pm.scan_plugins(root.string());
+        // QuiesceToken: bare PluginManager, single-threaded test — no dispatch pool.
+        int n = pm.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), root.string());
         std::printf("  scan_plugins registered %d plugin(s)\n", n);
 
         CHECK(pm.find_plugin("good_cert") != nullptr);   // good armed
@@ -141,7 +142,7 @@ int main(int argc, char** argv) {
     // cached `crashed` verdict — no child spawned.
     {
         xi::PluginManager pm2;   // certify_exe_ empty
-        int n = pm2.scan_plugins(root.string());
+        int n = pm2.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), root.string());
         CHECK(pm2.find_plugin("good_cert") != nullptr);
         CHECK(pm2.find_plugin("bad_cert")  == nullptr);
         CHECK(n == 1);
