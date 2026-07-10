@@ -463,6 +463,17 @@ static bool push_off_dispatch_thread_() {
 // visible programming error instead of a silent leak.
 static void warn_push_off_thread_(const char* name) {
     std::string key = name ? name : "";
+#ifdef NDEBUG
+    // E1 (burr audit): check-then-build, matching the xi_use.hpp warn-once
+    // siblings — the message string is only assembled on the FIRST (warning)
+    // pass per sink name; the steady-state repeat path does the map probe only.
+    static std::mutex mu;
+    static std::unordered_map<std::string, bool> warned;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (!warned.emplace(key, true).second) return;   // warned this sink already
+    }
+#endif
     std::string msg =
         "xi::use(\"" + key + "\").push(pack) called off the inspect/dispatch thread — "
         "push() stages into the dispatch thread's ordered-sink queue, which is never "
@@ -474,12 +485,6 @@ static void warn_push_off_thread_(const char* name) {
     std::fflush(stderr);
     std::abort();
 #else
-    static std::mutex mu;
-    static std::unordered_map<std::string, bool> warned;
-    {
-        std::lock_guard<std::mutex> lk(mu);
-        if (!warned.emplace(key, true).second) return;   // warned this sink already
-    }
     std::fprintf(stderr, "ERROR: %s\n", msg.c_str());
 #endif
 }
@@ -572,6 +577,16 @@ void flush_staged_emits_(int64_t run_id) {   // decl in header
             use_push_pack_inline_(it.target.c_str(), it.rec.pack);
         release_trigger_event_(it.rec);   // drops our staged pack ref on every path
     }
+    // B4 (burr audit): hand the local's CAPACITY back to g_staged so the next
+    // frame's push() doesn't re-allocate from zero (the move-out above stripped
+    // it every frame). Every element was released in the loop, so clear() drops
+    // no live ref. Guarded on g_staged.empty(): staging during the flush can't
+    // happen today (use(...).push is script-only and a sink's pack door can't
+    // re-enter the script), but if that ever changes a re-staged item must not
+    // be swapped away. On a mid-flush throw we skip the swap — losing capacity
+    // is fine; the throw-safety the move-out bought is unchanged.
+    staged.clear();
+    if (g_staged.empty()) g_staged.swap(staged);
 }
 
 // CurrentTriggerInfoC struct moved to service_internal.hpp.

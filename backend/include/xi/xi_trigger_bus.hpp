@@ -181,11 +181,17 @@ public:
         // alive, even if there's no sink. Lets dispatch_stats expose "ms since
         // the last frame" globally + per source, so a monitor/FE can detect a
         // CAMERA THAT STALLED. Stamped on every emit, before the sink check.
+        // B3-burr: ONE mu_ acquisition for the stamp AND the sink copy (they
+        // were two back-to-back lock_guard scopes with only local TriggerEvent
+        // field assignments between them — nothing depended on being unlocked,
+        // and stamp-then-copy order is preserved under the same lock).
+        Sink to_fire;
         {
             int64_t mono = steady_now_us();
             last_emit_mono_us_.store(mono, std::memory_order_relaxed);
             std::lock_guard<std::mutex> lk(mu_);
             source_last_emit_mono_us_[source] = mono;
+            to_fire = sink_;
         }
 
         TriggerEvent ev;
@@ -193,9 +199,6 @@ public:
         ev.timestamp_us  = ts_us;
         ev.leader_source = source;
         ev.pack          = pack;    // consume the caller's ref
-
-        Sink to_fire;
-        { std::lock_guard<std::mutex> lk(mu_); to_fire = sink_; }
 
         if (to_fire) {
             to_fire(std::move(ev));

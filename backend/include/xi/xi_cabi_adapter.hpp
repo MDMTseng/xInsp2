@@ -362,7 +362,7 @@ public:
     void adopt_owner_id(ImagePoolOwnerId id) { owner_id_ = id; }
 
     const std::string& name() const override { return name_; }
-    std::string plugin_name() const override { return plugin_name_; }
+    const std::string& plugin_name() const override { return plugin_name_; }
 
     // OwnerGuard wraps every plugin entry-point call so any image
     // handles the plugin allocates via host_api->image_create get
@@ -404,7 +404,18 @@ public:
 #endif
         ImagePool::OwnerGuard g(owner_id_);
         CallScope cs(this);
-        std::vector<char> buf(64 * 1024);
+        // B6 (burr audit): per-thread scratch instead of a fresh 64 KiB vector
+        // per call — steady-state exchange() calls stop allocating (grow-only,
+        // never shrunk). RE-ENTRANCY VERDICT: safe. exchange() is entered only
+        // host-side (WS cmd_exchange_instance_, the script's use_exchange_cb,
+        // project save/load) — xi_host_api publishes NO door through which a
+        // plugin's exchange handler could re-enter another instance's
+        // exchange() on the same thread (the cap funnel invokes provider
+        // handlers directly, never via the adapter), so the scratch cannot be
+        // clobbered under our own stack frame. If such a door is ever added,
+        // this needs a TLS depth counter falling back to a local vector.
+        thread_local std::vector<char> buf;
+        if (buf.size() < 64 * 1024) buf.resize(64 * 1024);
         int n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size());
         // ABI: callee returns -(exact content size). Alloc n+1: content + the trailing NUL the export writes.
         if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }

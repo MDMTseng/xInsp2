@@ -117,3 +117,7 @@ examples/*/gw.log
 # qa_jpeg_preview phase2: driver copies the script into no_codec/ at run time
 # (path-containment guard forbids the old "../inspect.cpp" reference)
 examples/qa_jpeg_preview/no_codec/inspect.cpp
+
+# qa runtime artifacts (health snapshots + removed-instance residue)
+examples/**/*.log.health
+examples/qa_remove_under_load/instances/victim/

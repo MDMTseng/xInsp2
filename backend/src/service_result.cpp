@@ -83,6 +83,14 @@ RunContextScope::~RunContextScope() { g_run_ctx = prev; }
 // (F4/J4-mirror/silent-result) — a worker of a live run now has the context
 // propagated, so this only fires when there is genuinely NO run on this thread.
 void run_context_fail_loud_(const char* what) {
+#ifdef NDEBUG
+    // E2 (burr audit): warn-once exchange BEFORE the snprintf, so the format
+    // only runs on the first (warning) pass — the steady-state repeat path is
+    // one relaxed atomic exchange. The Debug abort path below is unchanged
+    // (it always formats, then aborts).
+    static std::atomic<bool> warned{false};
+    if (warned.exchange(true, std::memory_order_relaxed)) return;
+#endif
     char msg[256];
     std::snprintf(msg, sizeof(msg),
         "%s called with NO live run context on this thread — a per-run accessor "
@@ -95,9 +103,7 @@ void run_context_fail_loud_(const char* what) {
     std::fflush(stderr);
     std::abort();
 #else
-    static std::atomic<bool> warned{false};
-    if (!warned.exchange(true, std::memory_order_relaxed))
-        std::fprintf(stderr, "ERROR: [xinsp2] %s\n", msg);
+    std::fprintf(stderr, "ERROR: [xinsp2] %s\n", msg);
 #endif
 }
 
