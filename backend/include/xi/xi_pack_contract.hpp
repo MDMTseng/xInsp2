@@ -72,6 +72,26 @@ inline constexpr const char* kPart   = "$part";   // i64: 0-based dense chunk in
 inline constexpr const char* kEof    = "$eof";    // bool: true on the LAST chunk only
 inline constexpr char kProvSep = '/';
 
+// --- reserved-key predicates -------------------------------------------------
+// THE single definition of "reserved key": the pack contract reserves the '$'
+// prefix — every key above ($fault/$fault_key/$fault_detail/$src/$prov/$seq/
+// $channel/$stream/$part/$eof) lives in that namespace, and future contract
+// keys will too. A consumer asking "is this key the contract's or the
+// producer's?" asks HERE, not with a hand-rolled prefix check.
+inline constexpr bool is_reserved(std::string_view key) {
+    return !key.empty() && key.front() == '$';
+}
+
+// The header-LIFT subset of the reserved keys: exactly the two entries the
+// XEX1-v3 frame lifts into its top-level channel/seq fields (doc 07), so every
+// generic dump walk (expose's wire push, record_save's disk persist) skips
+// these — and ONLY these — as entries. The other reserved keys ($fault/$src/
+// $prov/...) are deliberately NOT skipped: a fault pack must stay visible on
+// wire and disk. ONE definition so the skip-set cannot drift between sinks.
+inline constexpr bool is_lifted(std::string_view key) {
+    return key == std::string_view(kChannel) || key == std::string_view(kSeq);
+}
+
 // --- vtable-level reads (host / plugin / script alike) -----------------------
 
 // Borrowed str entry via the door; nullopt on absent key / wrong type / null
