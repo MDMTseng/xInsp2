@@ -430,15 +430,14 @@ public:
         CallScope cs(this);
         DataPlaneMark dp;   // capability plane: no registration from inside a door
         xi_pack_handle out = frame_proc_->process(inst_, in);
-        // Ownership handoff — the same phantom-ledger fix as the capability
-        // funnel (f_emit_pack retain_untagged precedent, xi_pack_abi.hpp): the
-        // door sealed its output under OwnerGuard(owner_id_), owner-tagging the
-        // initial ref to THIS producing instance, but the ref is handed to the
-        // CALLER, who owns it. Left tagged, this instance's teardown sweep
-        // (dtor → sweep_packs_for) would reclaim the phantom charge and free
-        // the caller's live pack. Retag while the OwnerGuard/CallScope pin is
-        // still held: +1 untagged, -1 popping the instance-tagged ref — net
-        // refcount unchanged. Every door caller (use_pack_process_cb, the
+        // Ownership handoff — the same fix as the capability funnel
+        // (xi_pack_abi.hpp): the door sealed its output under
+        // OwnerGuard(owner_id_), stamping THIS producing instance as creator,
+        // but the seal ref is handed to the CALLER, who owns it. Left tagged,
+        // this instance's teardown sweep (dtor → sweep_packs_for) would reclaim
+        // the handed-off ref and free the caller's live pack. Clear the creator
+        // tag while the OwnerGuard/CallScope pin is still held — rc unchanged
+        // (PackRegistry::untag). Every door caller (use_pack_process_cb, the
         // runner, tests) routes through here, so this is the one central spot.
         if (out != XI_PACK_NULL)
             ImagePool::untag_pack_ref(out, owner_id_);
