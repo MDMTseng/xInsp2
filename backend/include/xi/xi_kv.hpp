@@ -106,7 +106,10 @@ public:
     // xi::mp::canonicalize (reject-all ext) before they are stored — canonical
     // input (an xi::mp::Writer value) passes byte-identical; malformed /
     // ext-bearing / non-string-keyed / duplicate-keyed bytes are REFUSED
-    // (returns false, store untouched). Note: a SCALAR subtree stored here
+    // (returns false, store untouched). A top-level bare Nil or a uint64
+    // beyond INT64_MAX is ALSO refused — parse() rejects those value kinds,
+    // so admitting one would sabotage the whole store's next round-trip.
+    // Note: a SCALAR subtree stored here
     // parses back (after a host round-trip) as its typed slot, not as an Mp
     // slot — the bytes are identical either way; only type_of() differs.
     bool set_mp(const std::string& key, const void* mp_bytes, size_t n) {
@@ -114,6 +117,21 @@ public:
         mp::Writer canon;
         if (mp::canonicalize((const uint8_t*)mp_bytes, n, canon) != mp::Status::Ok)
             return false;
+        // Round-trip guard (matches parse()'s value rejections): parse()
+        // refuses a top-level Nil and a uint64 beyond INT64_MAX, so storing
+        // one here would poison serialize() output and drop the WHOLE store
+        // at the next parse(). Refuse it now, fail-loud, store untouched.
+        // Post-canonicalize, Kind::UInt appears ONLY for values > INT64_MAX
+        // (uint_ encodes anything <= INT64_MAX as Int64), so kind alone is
+        // the exact condition. Invariant: anything set_mp accepts, parse()
+        // round-trips.
+        {
+            mp::Reader probe(canon.bytes().data(), canon.bytes().size());
+            mp::Element top;
+            if (probe.next(top) != mp::Status::Ok) return false;
+            if (top.kind == mp::Kind::Nil || top.kind == mp::Kind::UInt)
+                return false;
+        }
         Slot s; s.t = Type::Mp; s.bytes = canon.take();
         m_[key] = std::move(s); return true;
     }
@@ -241,8 +259,8 @@ public:
                     s.bytes.assign(canon.data() + off, canon.data() + r.offset());
                     break;
                 }
-                case mp::Kind::UInt:  return false;  // beyond int64: never ours
-                case mp::Kind::Nil:   return false;  // never emitted for a Kv
+                case mp::Kind::UInt:  return false;  // beyond int64: never ours (set_mp refuses these at store time)
+                case mp::Kind::Nil:   return false;  // never emitted for a Kv (set_mp refuses these at store time)
                 case mp::Kind::Ext:   return false;  // canonicalize rejected already
             }
             out[std::move(kstr)] = std::move(s);
