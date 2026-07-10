@@ -190,7 +190,8 @@ static void test_create_project_stamps_schema() {
     SECTION("save_project_locked stamps schema (via create_project)");
     fs::path root = scratch("create");
     xi::PluginManager pm;
-    CHECK(pm.create_project(root.string(), "MadeHere"));
+    // assert_no_dispatch: bare PluginManager under test, no dispatch pool exists.
+    CHECK(pm.create_project(xi::QuiesceToken::assert_no_dispatch(), root.string(), "MadeHere"));
     std::string pj = read_file(root / "project.json");
     CHECK(!pj.empty());
     yyjson_doc* d = yyjson_read(pj.data(), pj.size(), 0);

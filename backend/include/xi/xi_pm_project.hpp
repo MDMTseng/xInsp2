@@ -25,7 +25,8 @@
 
 namespace xi {
 
-inline bool PluginManager::create_project(const std::string& folder, const std::string& name) {
+inline bool PluginManager::create_project(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                          const std::string& folder, const std::string& name) {
     std::lock_guard<std::mutex> lk(mu_);
     std::filesystem::create_directories(folder);
     std::filesystem::create_directories(std::filesystem::path(folder) / "instances");
@@ -107,11 +108,10 @@ inline void PluginManager::close_project(const QuiesceToken& /*quiesced: proof t
             // freed code). Evict BEFORE FreeLibrary — evict_machine_provider_
             // locked_ sweeps this owner's cap names synchronously, so no
             // handler outlives the module. close_project is full teardown, so
-            // plain evict-before-free with NO reinstate is correct here; the
-            // reconciler below reinstates any provider whose global DLL is
-            // still mapped, exactly as before.
-            evict_machine_provider_locked_(key);
-            if (it->second.handle) FreeLibrary(it->second.handle);   // TODO(linux): dlclose
+            // unload with NO reinstate is correct here; the reconciler below
+            // reinstates any provider whose global DLL is still mapped,
+            // exactly as before.
+            unload_module_locked_(key);
             plugins_.erase(it);
         }
     }
@@ -285,7 +285,15 @@ inline bool PluginManager::open_project(const QuiesceToken& /*quiesced: proof th
     for (auto& key : project_loaded_plugins_) {
         auto it = plugins_.find(key);
         if (it != plugins_.end()) {
-            if (it->second.handle) FreeLibrary(it->second.handle);   // TODO(linux): dlclose
+            // RT5/N1 family, third evict site (project-over-project reopen):
+            // this loop used to FreeLibrary with NO machine-provider evict, so
+            // a live "@auto:" adapter backed by the previous project's module
+            // kept ACTIVE CapRegistry handlers pointing into the unmapped DLL
+            // — the first capability call after the reopen crashed. Unload
+            // through the one primitive (evict-then-free, synchronous cap
+            // sweep); the autoload reconcile after this open reinstates any
+            // provider whose global DLL is still mapped.
+            unload_module_locked_(key);
             plugins_.erase(it);
         }
     }
@@ -736,7 +744,7 @@ inline bool PluginManager::open_project(const QuiesceToken& /*quiesced: proof th
                         // path's check.
                         std::string err;
                         if (!plugin_abi_compatible(pi2.handle, *plugin, pi2.json_fallback, &err)) {
-                            FreeLibrary(pi2.handle);
+                            FreeLibrary(pi2.handle);   // raw is fine: just-loaded module failed its load gate — no provider registered against it
                             pi2.handle = nullptr;
                             last_open_warnings_.push_back(
                                 {inst_name, *plugin, "plugin ABI mismatch: " + err});
@@ -749,7 +757,7 @@ inline bool PluginManager::open_project(const QuiesceToken& /*quiesced: proof th
                         // surfacing as the ABI gate just above (skip the instance,
                         // record the reason in last_open_warnings_).
                         if (!plugin_caps_compatible(pi2, &default_host_api(), *plugin, &err)) {
-                            FreeLibrary(pi2.handle);
+                            FreeLibrary(pi2.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
                             pi2.handle = nullptr;
                             last_open_warnings_.push_back(
                                 {inst_name, *plugin, "plugin capability gate: " + err});
@@ -768,7 +776,7 @@ inline bool PluginManager::open_project(const QuiesceToken& /*quiesced: proof th
                         // and clear handle so the entry stays in a
                         // clean "not loaded" state.
                         if (!pi2.c_factory) {
-                            FreeLibrary(pi2.handle);
+                            FreeLibrary(pi2.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
                             pi2.handle = nullptr;
                             last_open_warnings_.push_back(
                                 {inst_name, *plugin,

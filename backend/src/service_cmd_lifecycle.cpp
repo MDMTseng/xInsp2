@@ -48,34 +48,21 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             return;
         }
 
-        // Stop continuous mode before reloading — the worker thread holds
-        // function pointers into the DLL we're about to unload. Remember whether
-        // the run was active so we can re-arm it after the reload — without this,
-        // scripts that get hot-reloaded mid-run would silently halt and the caller
-        // would have to know to re-issue cmd:start.
-        bool was_continuous = false;
-        int  prior_continuous_fps = 10;
-        if (g_eng.continuous.load()) {
-            was_continuous = true;
-            prior_continuous_fps = g_eng.continuous_fps.load();
-            stop_dispatch_pool_();
-            std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload (will resume)\n");
-        }
-
-        // Resume continuous exactly as it was before the reload. MUST be called on
-        // every exit path — a bare `return` on a compile error (a typo in the
-        // script, the common case) or a load failure would otherwise leave the
-        // stream stopped and force the client to re-issue cmd:start to recover.
-        auto resume_continuous_if_needed = [&]() {
-            if (!was_continuous) return;
-            bool trig_only = prior_continuous_fps <= 0;
-            int fps = trig_only ? 0 : prior_continuous_fps;
-            g_eng.continuous_fps = fps;
-            g_eng.continuous = true;
-            int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(fps, 1));
-            spawn_group_pool_(&srv, interval_ms);
-            std::fprintf(stderr, "[xinsp2] continuous mode resumed\n");
-        };
+        // Quiesce dispatch for the script-DLL swap via the structural guard —
+        // the same primitive every other lifecycle handler holds. Root cause
+        // (quiesce-ritual family, RT5/O2 kin): this handler used to hand-roll
+        // stop_dispatch_pool_() + a resume lambda called at each of 4 exits; a
+        // throw between stop and resume (or a 5th exit added later) left the
+        // production stream permanently stopped. The guard's DESTRUCTOR resumes
+        // continuous mode at the prior fps on EVERY exit, exceptions included.
+        // Deliberate deltas vs. the old ritual (both safe-side): the guard also
+        // (a) pauses detached one-shot launches + clears the bus sink for the
+        // whole compile window — a source-emit one-shot during the ~4 s compile
+        // is DROPPED instead of racing the swap (matching open/close/recompile)
+        // — and (b) drains in-flight runs up front (the swap block below still
+        // takes run_mu+script_mu itself, unchanged). The dtor unpauses,
+        // re-installs the sink it removed, and respawns continuous mode.
+        auto reload_guard = quiesce_dispatch_for_lifecycle_op_("compile_and_load", &srv);
 
         // AOT / no-toolchain bundle: a `.dll` path is loaded DIRECTLY (no cl.exe).
         // Resolve relative to the project folder. Otherwise compile the .cpp.
@@ -110,11 +97,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 set_status_internal("@compile", "degraded: prebuilt DLL refused (out-of-tree)");
                 xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError,
                                         std::filesystem::path(*src).filename().string());
-                // This return is past stop_dispatch_pool_() — like the compile/load
-                // failure paths it must re-arm continuous mode or the stream stays
-                // dead until the client re-issues cmd:start.
-                resume_continuous_if_needed();
-                return;
+                return;   // reload_guard's dtor re-arms continuous mode
             }
             res.ok = true;
             res.dll_path = canon_dll.string();
@@ -209,8 +192,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             set_status_internal("@compile", "degraded: compile failed");
             xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError,
                                     std::filesystem::path(*src).filename().string());
-            resume_continuous_if_needed();   // keep streaming the last-good script
-            return;
+            return;   // reload_guard's dtor keeps streaming the last-good script
         }
 
         {
@@ -231,8 +213,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 set_status_internal("@compile", "degraded: script load failed");  // P1-4
                 xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError,
                                         std::filesystem::path(*src).filename().string());
-                resume_continuous_if_needed();   // old g_eng.script untouched, keep it streaming
-                return;
+                return;   // reload_guard's dtor resumes — old g_eng.script untouched, keeps streaming
             }
             // U2 (docs/new_gen/16): capture the kv channel from the OLD DLL
             // before swapping it out — canonical-mp bytes, explicit lengths
@@ -526,18 +507,14 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             srv.send_text(lm.to_json());
         }
 
-        // Re-arm continuous mode if it was running before the reload,
-        // at the same fps the original cmd:start asked for. The 4 s
-        // cl.exe gap inside the reload is unavoidable; what we don't
-        // want is the run staying dead afterwards and forcing the
-        // caller to know they need to re-issue cmd:start.
         // Install the trigger sink so a source's emit_trigger runs an inspect
         // even when NOT continuous (single-shot) — issue/replay works without
-        // cmd:start. Continuous mode (below) just adds the free-running timer.
+        // cmd:start. Needed explicitly here (not just via the guard's dtor):
+        // on the FIRST-ever compile no sink existed before the quiesce, so the
+        // guard has nothing to restore. Continuous mode (re-armed by the
+        // guard's dtor at the prior fps, trigger-only preserved) just adds the
+        // free-running timer.
         install_trigger_sink_(&srv);
-        // Preserve trigger-only mode across the reload (prior_continuous_fps == 0
-        // means no timer — sources drive it). Same path as the error returns above.
-        resume_continuous_if_needed();
 
         // P1-4: the swap succeeded — clear any prior degraded marker. The
         // "@compile" entry's seq/ts_ms double as a running-def generation+recency
@@ -552,7 +529,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         std::string data = "{\"dll\":";
         xp::json_escape_into(data, res.dll_path);
         data += ",\"diagnostics\":" + build_diag_json();
-        if (was_continuous) data += ",\"resumed_continuous\":true";
+        if (reload_guard.was_continuous) data += ",\"resumed_continuous\":true";
         data += "}";
         send_rsp_ok(srv, id, data);
 }
@@ -800,7 +777,15 @@ void cmd_create_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         auto pname  = xp::get_string_field(parsed->args_json, "name");
         if (!folder || !pname) { send_rsp_err(srv, id, "missing folder or name"); return; }
-        if (g_eng.plugin_mgr.create_project(*folder, *pname)) {
+        // Quiesce like open/close_project: create_project clears the previous
+        // project's instances + registry entries (adapter dtors run) — before
+        // this guard, a dispatch worker mid-inspect into one of those adapters
+        // raced the teardown (the quiesce-hole kin of P0-AB-3). skip_resume:
+        // whatever stream was running belonged to the project being replaced.
+        auto create_guard = quiesce_dispatch_for_lifecycle_op_("create_project", &srv);
+        const bool created = g_eng.plugin_mgr.create_project(create_guard.token(), *folder, *pname);
+        create_guard.skip_resume();   // fresh empty project — nothing to stream; the launch pause is still released by the guard's destructor
+        if (created) {
             send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "failed to create project");
