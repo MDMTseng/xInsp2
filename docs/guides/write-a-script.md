@@ -589,11 +589,25 @@ xi::parallel_for(h, [&, f](int y) {
 ```
 
 It installs the SEH translator on each worker, polls
-`xi::cancellation_requested()` and skips remaining iterations on a watchdog
-cancel, catches every fault inside the region and rethrows the first one on the
-inspect thread, and re-installs the inspect-thread image-pool owner per worker so
-parallel-created images stay attributed. `xi::async` already does the same
-(SEH + owner propagation) for independent-branch fan-out. Needs `/openmp`
+`xi::cancellation_requested()` and skips remaining iterations when the
+enclosing task's cancel token is flipped (`Future::cancel()` / a dropped
+unconsumed `Future`), catches every fault inside the region and rethrows the
+first one on the inspect thread, and re-installs the inspect-thread image-pool
+owner per worker so parallel-created images stay attributed. `xi::async` already
+does the same (SEH + owner propagation) for independent-branch fan-out.
+
+> **Per-run identity is *not* one of these hazards.** `xi::run_id()`,
+> `xi::current_frame_path()` and `xi::result()` read the host's explicit
+> per-run **RunContext**, which `xi::async` / `xi::parallel_for` /
+> `xi::spawn_worker` all propagate — they are correct on any xi-spawned worker,
+> and a verdict set from an `xi::async` / `xi::parallel_for` worker **reaches
+> the run** (it is no longer silently dropped). A `xi::spawn_worker` worker gets
+> its own by-value snapshot: `run_id()` / `current_frame_path()` stay valid even
+> if the worker outlives the inspect, while its `xi::result()` is a deliberate
+> no-op (a detached worker can't verdict a finished run). The explicit trigger
+> also carries the identity self-contained: `t.run_id()` / `t.frame_path()`.
+> Off a run entirely, the free functions fail loud — Debug aborts; Release
+> warns once and returns the `0` / `""` sentinel. Needs `/openmp`
 (`"openmp_max_threads"` set); without it `xi::parallel_for` runs serially with
 identical semantics.
 
@@ -1056,17 +1070,16 @@ max concurrency it observed per instance).
   thread-safe: cv:: ops on pool-backed Images are mostly fine; member
   counters / caches are not — guard them with atomics or a mutex.
 - **Watchdog now covers every worker** (it tracks a deadline slot per
-  in-flight inspect, not a single slot). On a deadline breach it asks the
-  script to cancel cooperatively. The cancel is **epoch-scoped**: it targets
-  only the inspects already in flight when the watchdog tripped, so under
-  N > 1 it aborts every *currently-running* frame that round (the intended
-  "something's wedged, bail" signal) — but a **fresh frame the pool starts
-  during the 1000 ms grace is *not* cancelled** (it would only re-run and
-  abort for nothing). Healthy workers re-run next tick. If the targeted
-  inspect ignores cooperative cancel, the backend **exits** so the FE
-  supervisor respawns a clean one — it does **not** force-kill a worker
-  (that would leak the per-instance lock). Long ops should poll
-  `xi::cancellation_requested()` so a cooperative cancel takes.
+  in-flight inspect, not a single slot). It has **one phase**:
+  overrun → 1000 ms grace → hard exit. A frame that exceeds its budget but
+  returns during the grace produces a **normal trusted verdict** — merely-slow
+  frames are never aborted. If an inspect is still wedged after the grace, the
+  backend **exits** (`_Exit`) so the FE supervisor respawns a clean one — it
+  does **not** force-kill a worker (that would leak the per-instance lock).
+  There is no cooperative soft-cancel layer anymore: the watchdog never asks
+  the script to bail, and `xi::cancellation_requested()` reads **only** the
+  per-task `xi::async` cancel token (`Future::cancel()` / a dropped unconsumed
+  `Future`).
 - **`run_result` events** arrive interleaved across run_ids in the default
   `result_order: "completion"`. Set `result_order: "arrival"` (above) for an
   in-order wire stream, or sort client-side by `run_id`.

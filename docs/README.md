@@ -41,7 +41,7 @@ xInsp2 itself?** Jump to [Develop xInsp2](#develop-xinsp2-itself) below.
 | [`internals/dispatch.md`](./internals/dispatch.md) | How an emit becomes a run: trigger bus + `emit_record`/`emit_pack` + dispatch groups + staged sinks. |
 | [`internals/fe-be.md`](./internals/fe-be.md) | FE supervisor over the BE compute core, crash history. |
 | [`internals/comms-sidecar.md`](./internals/comms-sidecar.md) | Line safety as a comms plugin's own sidecar process (replaces FE PLC safe-state). |
-| [`internals/typed-io.md`](./internals/typed-io.md) | Nominal types over Record + NA propagation + provenance. |
+| [`internals/typed-io.md`](./internals/typed-io.md) | Typed, compile-checked keyed reads on the pack plane (`_keys.gen.h` constants + script-side `ScriptTypedPack`) + the contract codegen; the retired Record typed-I/O layer kept as labeled history. |
 
 ## Planned / not scheduled (`roadmap/`)
 | File | Subject |

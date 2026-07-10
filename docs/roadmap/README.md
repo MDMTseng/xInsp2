@@ -44,6 +44,21 @@ test surface: [`../../docs/testing.md`](../../docs/testing.md) (→ `testing.md`
   sidecar; see `../internals/fe-be.md`.
 - **ws commands `preview_instance` / `process_instance` / `compare_variants`** —
   redundant with `cmd:run`.
+- **In-process `TypedPack<Schema>` / `TypedPackBuilder` / `PackSchema`** (2026-07-11,
+  `cba51fe`) — the second in-process pack container, 0 production consumers.
+  `Pack`/`PackBuilder` is the one container; the *script-side* `ScriptTypedPack`
+  (key-based, `xi_use.hpp`) is unrelated and lives on. See
+  [`../internals/pack-plane.md`](../internals/pack-plane.md).
+- **Cooperative-cancel layer** (2026-07-11, `93de38b`) — the ticket-epoch
+  soft-cancel (`arm_cancel`/`begin_inspect`/cutoff, the `xi_script_set_global_cancel` /
+  `xi_script_inspect_begin` thunks, the `no_verdict`/`watchdog_cancelled` emit).
+  The watchdog is one phase (overrun → grace → hard `_Exit`+respawn); per-task
+  `CancelToken` + `Future::cancel()` + token-only `cancellation_requested()` kept.
+- **Ambient per-run TLS + guard family** (2026-07-11, `a293cfe`) —
+  `g_trigger_ctx_`/`TriggerCtxScope`, the silent-result guard, `g_run_id_` TLS +
+  `xi_script_set_run_id`. Replaced by ONE explicit host-side `RunContext`
+  (propagated by `xi::async`/`xi::parallel_for`/`xi::spawn_worker`); off-run
+  reads fail loud. See [`../reference/c-abi.md`](../reference/c-abi.md) §6.3.
 
 ## Decision log (locked-in)
 

@@ -94,16 +94,6 @@ static volatile uint64_t g_sink = 0;
 static constexpr int kScalars = 8;   // $src, seq, count, ts_us, score, x, y, pass
 static constexpr int kReads   = 4;   // seq, score, count, $src  (the consumer's M)
 
-// The CONTRACT-declared keyset for this metadata shape (the _keys.h key order).
-// A schema turns the field names into compile-time SLOTS, so the TypedPack
-// container reads a declared field by direct slot index — the offset-accessor
-// read path (doc 07 §profile-1). Field order here IS the contract order.
-struct BenchSchema : xi::PackSchema<BenchSchema> {
-    static constexpr std::array<std::string_view, 9> keys = {
-        "$src", "seq", "count", "ts_us", "score", "x", "y", "pass", "region"};
-    enum : int { kSrc, kSeq, kCount, kTsUs, kScore, kX, kY, kPass, kRegion };
-};
-
 // ---------------------------------------------------------------------------
 // PACK lane metadata — build the small plane as ONE canonical msgpack buffer.
 // Same N scalars + nested map. mp::Writer emits the canonical max-width profile
@@ -233,38 +223,6 @@ static double micro_frame_builder() {
         s += f.get_str("$src").value_or(std::string_view{}).size();
         g_sink += s;
         // f drops: arena freed in one shot, no handles.
-    });
-}
-
-// (b') PACK container, TYPED (xi_pack.hpp TypedPack<BenchSchema>) — the
-//      OFFSET-ACCESSOR read path (doc 07 §profile-1; the wave-1 exit-gate
-//      condition). Same N scalars + nested region, but keys are compile-time
-//      SLOTS: set_i64<kSeq> writes canonical bytes and points the slot at them
-//      with NO key interned; get_i64<kSeq> is slots_[kSeq]->ptr->decode (no hash,
-//      no scan). Arena chunks recycle through the per-thread pool (no per-pack
-//      heap chunk). This is the container path the shipped PackBuilder (b) lost
-//      with — the three named costs removed.
-static double micro_frame_typed() {
-    return best_us([&] {
-        xi::TypedPackBuilder<BenchSchema> b;
-        b.set_str<BenchSchema::kSrc>("matcher");
-        b.set_i64<BenchSchema::kSeq>(7);
-        b.set_i64<BenchSchema::kCount>(7 % 17);
-        b.set_i64<BenchSchema::kTsUs>(7000);
-        b.set_f64<BenchSchema::kScore>(0.7 + 7 * 0.01);
-        b.set_f64<BenchSchema::kX>(100.0 + 7 * 0.5);
-        b.set_f64<BenchSchema::kY>(50.0 + 7 * 0.25);
-        b.set_i64<BenchSchema::kPass>(1);
-        xi::mp::Bytes region = region_mp(7);
-        b.set_mp<BenchSchema::kRegion>(region.data(), region.size());
-        xi::TypedPack<BenchSchema> f = b.seal();
-        uint64_t s = 0;
-        s += (uint64_t)f.get_i64<BenchSchema::kSeq>().value_or(0);
-        s += (uint64_t)(int64_t)f.get_f64<BenchSchema::kScore>().value_or(0);
-        s += (uint64_t)f.get_i64<BenchSchema::kCount>().value_or(0);
-        s += f.get_str<BenchSchema::kSrc>().value_or(std::string_view{}).size();
-        g_sink += s;
-        // f drops: arena chunk returns to the per-thread pool, no handles.
     });
 }
 
@@ -499,10 +457,8 @@ static int64_t gate_p50(const PackOffsets& off) {
 static int gate_main(const PackOffsets& off) {
     // micro: min-of-batches (ns), the cleanest per-op metadata cost.
     double frb_ns   = micro_frame_builder()       * 1000.0;
-    double frt_ns   = micro_frame_typed()         * 1000.0;
     double frp_ns   = micro_pack_plane(off)      * 1000.0;
     std::printf("GATE frame_micro_framebuilder_ns %lld\n",       (long long)(frb_ns + 0.5));
-    std::printf("GATE frame_micro_typed_ns %lld\n",              (long long)(frt_ns + 0.5));
     std::printf("GATE frame_micro_plane_memcpy_hop_ns %lld\n",   (long long)(frp_ns + 0.5));
 
     int64_t frm_p50 = gate_p50(off);
@@ -549,13 +505,10 @@ int main(int argc, char** argv) {
     // -------- metadata-only micro (cleanest read on the 07 claims) -----------
     std::printf("--- metadata-plane MICRO (no images, no dispatch; min-of-batches, ns/op) ---\n");
     double frb_ns = micro_frame_builder()  * 1000.0;
-    double frt_ns = micro_frame_typed()    * 1000.0;
     double frp_ns = micro_pack_plane(off) * 1000.0;
     std::printf("  %-52s %9.1f ns/op\n", "PACK  PackBuilder+seal+read+drop [v3 dynamic]", frb_ns);
-    std::printf("  %-52s %9.1f ns/op\n", "PACK  TypedPack set+seal+slot-read+drop [v3 typed]", frt_ns);
     std::printf("  %-52s %9.1f ns/op\n", "PACK  mp plane + memcpy-hop + offset-read [v3 hop]", frp_ns);
     std::printf("    ^ Dynamic cost = arena build + hybrid index + interned keys + one-shot free;\n");
-    std::printf("      Typed cost   = arena build (recycled chunk) + slot offset reads, no intern, no lookup;\n");
     std::printf("      Hop cost     = mp plane build + memcpy hop + offset-read + drop.\n\n");
 
     // -------- dispatch across parallelism ------------------------------------

@@ -53,17 +53,29 @@
 inline void* g_owner_get_fn_ = nullptr;
 inline void* g_owner_set_fn_ = nullptr;
 
-// F4: trigger-context marker get/set thunks, injected by the host via
-// xi_script_set_trigger_ctx_callbacks. xi::async / xi::parallel_for carry the
-// inspect thread's "inside a trigger-bearing inspect" flag onto the worker threads
-// they spawn by reading/writing these, so the host's off-thread current_trigger()
-// misuse detection is RELATIONAL (per-thread lineage) instead of a process-global
-// heuristic. Null on an older host / non-script TU ⇒ the wrappers below are silent
-// no-ops (get() returns 0, set() does nothing) and detection degrades to off,
-// exactly as if the marker never propagated. Same `inline` rationale as the owner
-// thunks above (ODR-used unconditionally from generic async/parallel_for code).
-inline void* g_trigger_ctx_get_fn_ = nullptr;
-inline void* g_trigger_ctx_set_fn_ = nullptr;
+// A4 explicit per-run context get/set thunks, injected by the host via
+// xi_script_set_run_ctx_callbacks. xi::async / xi::parallel_for / xi::spawn_worker
+// carry the inspect thread's per-run context (run_id + frame_path + verdict slot +
+// dispatch-thread identity, an opaque host RunContext*) onto the worker threads
+// they spawn by reading/writing these — so xi::run_id() / xi::current_frame_path()
+// / xi::result() are correct on a worker (closing the spawn gap), and the host's
+// off-thread read/push detection rides that same context (owner_tid / had_trigger)
+// instead of a separate marker. Null on an older host / non-script TU ⇒ the
+// wrappers below are silent no-ops (get() returns null, set() does nothing) and
+// the context simply doesn't propagate, exactly as before. Same `inline`
+// rationale as the owner thunks above (ODR-used unconditionally from generic
+// async/parallel_for code).
+inline void* g_run_ctx_get_fn_ = nullptr;
+inline void* g_run_ctx_set_fn_ = nullptr;
+// xi::spawn_worker BY-VALUE path: a fire-and-forget worker may OUTLIVE the inspect,
+// so it must not hold a pointer into the spawning frame (that would dangle). These
+// let it install a worker-OWNED heap snapshot instead — snapshot allocates a copy of
+// the current context on the spawning thread (result_slot nulled host-side), install
+// stamps the worker's own thread id and installs it, free releases it on worker exit.
+// Null on an older host / non-script TU ⇒ spawn_worker simply propagates no context.
+inline void* g_run_ctx_snapshot_fn_       = nullptr;
+inline void* g_run_ctx_install_worker_fn_ = nullptr;
+inline void* g_run_ctx_free_fn_           = nullptr;
 
 namespace xi {
 
@@ -82,34 +94,68 @@ inline void owner_set(uint32_t id) {
     if (fn) fn(id);
 }
 
-// F4: read/write THIS thread's trigger-context marker (0 if no host wired it).
-using TriggerCtxGetFn = uint32_t (*)();
-using TriggerCtxSetFn = void     (*)(uint32_t);
-inline uint32_t trigger_ctx_get() {
-    auto fn = reinterpret_cast<TriggerCtxGetFn>(::g_trigger_ctx_get_fn_);
-    return fn ? fn() : 0u;
+// A4: read/write THIS thread's per-run context pointer (null if no host wired it).
+// The pointer is opaque to the SDK (an internal host RunContext*); we only marshal
+// it across the ABI seam so a worker inherits the run and the host's accessors
+// (run_id / frame_path / result / off-thread detection) resolve it host-side.
+using RunCtxGetFn = const void* (*)();
+using RunCtxSetFn = void        (*)(const void*);
+inline const void* run_ctx_get() {
+    auto fn = reinterpret_cast<RunCtxGetFn>(::g_run_ctx_get_fn_);
+    return fn ? fn() : nullptr;
 }
-inline void trigger_ctx_set(uint32_t v) {
-    auto fn = reinterpret_cast<TriggerCtxSetFn>(::g_trigger_ctx_set_fn_);
-    if (fn) fn(v);
+inline void run_ctx_set(const void* p) {
+    auto fn = reinterpret_cast<RunCtxSetFn>(::g_run_ctx_set_fn_);
+    if (fn) fn(p);
 }
 
-// RAII: install `v` as this thread's trigger-context marker for the scope, restore
-// the previous value on exit. Symmetric with OwnerScope — used by xi::async and
-// xi::parallel_for so a worker inherits the spawning inspect's "inside a trigger"
-// flag, and the host's off-thread detection fires for a child that reads the
-// ambient trigger instead of a captured snapshot.
-struct TriggerCtxScope {
-    uint32_t prev;
-    explicit TriggerCtxScope(uint32_t v) : prev(trigger_ctx_get()) { trigger_ctx_set(v); }
-    ~TriggerCtxScope() { trigger_ctx_set(prev); }
-    TriggerCtxScope(const TriggerCtxScope&) = delete;
-    TriggerCtxScope& operator=(const TriggerCtxScope&) = delete;
+// RAII: install `p` as this thread's per-run context for the scope, restore the
+// previous pointer on exit. Symmetric with OwnerScope — used by xi::async /
+// xi::parallel_for / xi::spawn_worker so a worker inherits the spawning inspect's
+// run, making xi::run_id() / xi::current_frame_path() / xi::result() correct on
+// the worker and the host's off-thread read/push detection accurate.
+struct RunCtxScope {
+    const void* prev;
+    explicit RunCtxScope(const void* p) : prev(run_ctx_get()) { run_ctx_set(p); }
+    ~RunCtxScope() { run_ctx_set(prev); }
+    RunCtxScope(const RunCtxScope&) = delete;
+    RunCtxScope& operator=(const RunCtxScope&) = delete;
+};
+
+// spawn_worker BY-VALUE snapshot thunks (see the g_run_ctx_snapshot_fn_ note).
+using RunCtxSnapshotFn      = void* (*)();
+using RunCtxInstallWorkerFn = void  (*)(void*);
+using RunCtxFreeFn          = void  (*)(void*);
+inline void* run_ctx_snapshot() {
+    auto fn = reinterpret_cast<RunCtxSnapshotFn>(::g_run_ctx_snapshot_fn_);
+    return fn ? fn() : nullptr;
+}
+inline void run_ctx_install_worker(void* s) {
+    auto fn = reinterpret_cast<RunCtxInstallWorkerFn>(::g_run_ctx_install_worker_fn_);
+    if (fn) fn(s);
+}
+inline void run_ctx_free(void* s) {
+    auto fn = reinterpret_cast<RunCtxFreeFn>(::g_run_ctx_free_fn_);
+    if (fn) fn(s);
+}
+
+// RAII for xi::spawn_worker: install a worker-OWNED snapshot (taken on the SPAWNING
+// thread, passed in by value) and free it on exit. NO pointer into the spawning
+// frame — structurally UAF-free even if the worker outlives the inspect. `snap` may
+// be null (spawned off a run / older host): install(null) clears the context and
+// free(null) is a no-op.
+struct WorkerRunCtxScope {
+    void*       snap;
+    const void* prev;
+    explicit WorkerRunCtxScope(void* s) : snap(s), prev(run_ctx_get()) { run_ctx_install_worker(s); }
+    ~WorkerRunCtxScope() { run_ctx_set(prev); run_ctx_free(snap); }
+    WorkerRunCtxScope(const WorkerRunCtxScope&) = delete;
+    WorkerRunCtxScope& operator=(const WorkerRunCtxScope&) = delete;
 };
 
 // RAII: install `id` as this thread's image-pool owner for the scope, restore the
-// previous owner on exit. Symmetric with the cancel-token / inspect-ticket Scope
-// — used by xi::async and xi::parallel_for to attribute worker-created images.
+// previous owner on exit. Symmetric with the cancel-token Scope — used by
+// xi::async and xi::parallel_for to attribute worker-created images.
 struct OwnerScope {
     uint32_t prev;
     explicit OwnerScope(uint32_t id) : prev(owner_get()) { owner_set(id); }
@@ -148,109 +194,19 @@ inline CancelToken*& current_cancel_token_ref() {
     return p;
 }
 
-// Watchdog cooperative-cancel, scoped by inspect EPOCH.
+// `cancellation_requested()` — cooperative-cancel poll for long-running plugin
+// / script code. Reads ONLY the per-task xi::async cancel token installed on
+// this thread (by xi::async before the user callable runs; propagated into
+// xi::parallel_for workers). Returns true once that token is flipped — via
+// Future::cancel() or a dropped-unconsumed Future. Cheap: one relaxed pointer
+// load plus, only when a token is present, one relaxed bool load — no locks.
 //
-// The host's watchdog cancels the inspect(s) that were ALREADY in flight when
-// it tripped — NOT a fresh inspect that the dispatch pool starts during the
-// 1000ms grace. The old design held a single global bool for the whole grace,
-// so every heavy frame dispatched in that ~1s window observed the stale request
-// and aborted (≈30 spurious cancellations per slow frame at 30fps). We scope
-// the cancel with a monotonic ticket instead:
-//
-//   - cancel_ticket_counter(): strictly-increasing source of inspect tickets.
-//   - begin_inspect(): each inspect draws a fresh ticket at start (host calls
-//     the `xi_script_inspect_begin` thunk on the dispatch thread before
-//     s.inspect()), installed thread-local so the inspect — and any xi::async
-//     sub-task it spawns — share one cancel scope.
-//   - arm_cancel(): the watchdog snapshots the counter's high-water as the
-//     cutoff and marks cancel active. Every inspect whose start-ticket is
-//     BELOW the cutoff (i.e. was in flight at trip time) sees the cancel; an
-//     inspect that draws its ticket after the snapshot (>= cutoff) does NOT.
-//   - clear_cancel(): the watchdog clears `active` once the targeted inspects
-//     have returned. (A genuinely-stuck inspect still overruns next watchdog
-//     tick → a fresh arm_cancel with a higher cutoff re-targets it, and the
-//     hard-trip escalation still exits the process — see service_main.cpp.)
-//
-// These live in the calling TU (script DLL or backend): the backend drives the
-// script DLL's copies via the exported thunks in xi_script_support.hpp.
-//
-// `cancellation_requested()` returns true when the per-inspect cancel applies
-// OR the per-task xi::async token is set. It is on the hot inspect poll path:
-// the cost is one relaxed bool load (early-out when no cancel is armed) plus,
-// only while a cancel IS armed, two relaxed uint64 loads — no locks.
-inline std::atomic<uint64_t>& cancel_ticket_counter() {
-    static std::atomic<uint64_t> c{1};   // 0 reserved: "no ticket / legacy"
-    return c;
-}
-
-// Reserved ticket marking a thread as a PLUGIN-OWNED worker, never an inspect
-// worker — `cancellation_requested()` never reports an inspect cancel for it.
-// Installed by xi::spawn_worker (xi_thread.hpp) at worker entry.
-//
-// Root cause this exists for: spawn_worker threads used to run with the
-// default thread-local ticket 0, and ticket 0 is the "legacy inspect with no
-// begin-hook" fallback that the cancel check treats as always-in-flight. So a
-// plugin's long-running worker (camera grab loop, ...) polling
-// xi::cancellation_requested() — as the SDK advises — was spuriously cancelled
-// for the whole ~1s grace window whenever an UNRELATED frame's watchdog
-// tripped. Plugin workers are not inspect work; they must be immune to the
-// inspect-epoch cancel entirely (their lifecycle is the plugin's own).
-// Distinct from 0, so the legacy-inspect fallback is unaffected; also never
-// drawn by cancel_ticket_counter() (which counts up from 1), and never below
-// any cancel_cutoff — but the check excludes it explicitly rather than relying
-// on that arithmetic.
-inline constexpr uint64_t kNonInspectTicket = UINT64_MAX;
-
-inline std::atomic<uint64_t>& cancel_cutoff() {
-    static std::atomic<uint64_t> c{0};
-    return c;
-}
-inline std::atomic<bool>& cancel_active() {
-    static std::atomic<bool> a{false};
-    return a;
-}
-
-// This thread's current inspect ticket (0 = not inside a ticketed inspect).
-// xi::async copies it into the worker so sub-tasks share the parent's scope.
-inline uint64_t& current_inspect_ticket_ref() {
-    static thread_local uint64_t t = 0;
-    return t;
-}
-
-// Draw a fresh, strictly-increasing ticket for an inspect about to run and
-// install it on this thread. Returns the ticket. Called once per inspect start.
-inline uint64_t begin_inspect() {
-    uint64_t t = cancel_ticket_counter().fetch_add(1, std::memory_order_relaxed);
-    current_inspect_ticket_ref() = t;
-    return t;
-}
-
-// Watchdog trip: target every inspect in flight RIGHT NOW (start-ticket below
-// the current high-water) — but never one that starts afterwards. Idempotent.
-inline void arm_cancel() {
-    cancel_cutoff().store(cancel_ticket_counter().load(std::memory_order_relaxed),
-                          std::memory_order_relaxed);
-    cancel_active().store(true, std::memory_order_relaxed);
-}
-inline void clear_cancel() {
-    cancel_active().store(false, std::memory_order_relaxed);
-}
-
+// [retired] The watchdog's cooperative EPOCH-cancel (a monotonic inspect-ticket
+// counter + arm/clear cutoff that soft-cancelled in-flight inspects) was removed
+// along with the whole soft-cancel layer. A wedged inspect now runs until the
+// watchdog's HARD trip (_Exit + FE respawn, see service_main.cpp) — there is no
+// soft-cancel state left to poll here.
 inline bool cancellation_requested() {
-    if (cancel_active().load(std::memory_order_relaxed)) {
-        uint64_t my = current_inspect_ticket_ref();
-        // my == kNonInspectTicket ⇒ a plugin-owned worker (xi::spawn_worker),
-        // not an inspect worker: NEVER subject to the inspect-epoch cancel.
-        // (Its per-task CancelToken below still applies if one is installed.)
-        //
-        // my == 0 ⇒ no ticket was drawn (legacy script lacking the
-        // inspect-begin hook, or code running outside any inspect). Treat it as
-        // "in flight" so the watchdog's cooperative cancel still reaches such
-        // code — preserves the pre-epoch global-cancel behaviour for them.
-        if (my != kNonInspectTicket &&
-            (my == 0 || my < cancel_cutoff().load(std::memory_order_relaxed)))
-            return true;
-    }
     auto* t = current_cancel_token_ref();
     return t && t->cancelled.load(std::memory_order_relaxed);
 }
@@ -366,30 +322,24 @@ auto async(F&& f, Args&&... args)
 
     auto token = std::make_shared<CancelToken>();
 
-    // Capture the spawning inspect's ticket so the worker shares its cancel
-    // scope (the worker runs on a fresh thread whose thread_local ticket would
-    // otherwise be 0 = "legacy/in-flight" and wrongly observe an unrelated
-    // trip's cancel).
-    uint64_t parent_ticket = current_inspect_ticket_ref();
-
     // C2: capture the image-pool owner active at spawn (the script during inspect,
     // or an instance if spawned inside process()) so async-created pool images are
     // attributed to it instead of anonymous (owner=0). Re-installed via OwnerScope
     // in the closure below. Zero cost when unwired (owner_get() returns 0).
     uint32_t parent_owner = detail::owner_get();
 
-    // F4: capture the spawning thread's trigger-context marker so the worker
-    // inherits "I am a child of a trigger-bearing inspect". Re-installed via
-    // TriggerCtxScope in the closure. Zero cost when unwired (returns 0).
-    uint32_t parent_trigger_ctx = detail::trigger_ctx_get();
+    // A4: capture the spawning thread's per-run context so the worker inherits the
+    // run — xi::run_id() / xi::current_frame_path() / xi::result() resolve to the
+    // correct run on the worker, and the host's off-thread detection is accurate.
+    // Re-installed via RunCtxScope in the closure. Zero cost when unwired (null).
+    const void* parent_run_ctx = detail::run_ctx_get();
 
     auto closure =
         [fn  = std::forward<F>(f),
          tup = std::make_tuple(std::forward<Args>(args)...),
          tok = token,
-         parent_ticket,
          parent_owner,
-         parent_trigger_ctx]() mutable -> R {
+         parent_run_ctx]() mutable -> R {
             // Reserve fault-stack headroom FIRST (mirrors the dispatch lane +
             // one-shot worker paths) so the crash filter can still write a
             // minidump after a STACK_OVERFLOW on this worker; then install the
@@ -397,30 +347,25 @@ auto async(F&& f, Args&&... args)
             // through std::promise to the .get() / await site.
             xi::crash::reserve_fault_stack();
             xi::install_seh_translator();
-            // Make this token + the parent inspect's ticket visible to
+            // Make this task's cancel token visible to
             // `xi::cancellation_requested()` for the duration of the user
             // callable. RAII restore on any exit path.
             struct Scope {
                 CancelToken* prev;
-                uint64_t     prev_ticket;
-                Scope(CancelToken* t, uint64_t ticket)
-                    : prev(current_cancel_token_ref()),
-                      prev_ticket(current_inspect_ticket_ref()) {
-                    current_cancel_token_ref()   = t;
-                    current_inspect_ticket_ref() = ticket;
+                explicit Scope(CancelToken* t)
+                    : prev(current_cancel_token_ref()) {
+                    current_cancel_token_ref() = t;
                 }
-                ~Scope() {
-                    current_cancel_token_ref()   = prev;
-                    current_inspect_ticket_ref() = prev_ticket;
-                }
-            } scope(tok.get(), parent_ticket);
+                ~Scope() { current_cancel_token_ref() = prev; }
+            } scope(tok.get());
             // C2: re-install the parent's image-pool owner for the duration of the
             // user callable so any pool image it creates is attributed correctly.
             detail::OwnerScope owner_scope(parent_owner);
-            // F4: re-install the parent's trigger-context marker so a current_trigger()
-            // read from THIS worker is caught as an off-thread misuse (the ambient
-            // trigger is not on this thread — the script must snapshot first).
-            detail::TriggerCtxScope trigger_ctx_scope(parent_trigger_ctx);
+            // A4: re-install the parent's per-run context so xi::run_id() /
+            // xi::current_frame_path() / xi::result() called from THIS worker
+            // resolve to the run (the spawn-gap closure), and an off-thread
+            // ambient current_trigger() read is still caught host-side.
+            detail::RunCtxScope run_ctx_scope(parent_run_ctx);
             try {
                 return std::apply(std::move(fn), std::move(tup));
             } catch (const xi::seh_exception& e) {

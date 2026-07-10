@@ -1,5 +1,7 @@
 # 26 — Red-team data-flow findings, rounds 6–7 (peripheral primitives, egress, + the rename P1)
 
+> [2026-07-11] Partially superseded: the TicketScope/cooperative-cancel and `set_run_context` machinery discussed below was retired by the core contraction (`93de38b` one-phase watchdog, `a293cfe` explicit RunContext) — see docs/internals/fe-be.md / docs/roadmap/core-simplification.md.
+
 > **Round 7 (P1 squeeze) — headline, added below.** A dedicated 4-way pass aimed
 > *only* at memory-unsafety found **L1: `cmd_rename_instance_` tears down a live
 > producer adapter without quiescing dispatch → UAF on a pack a still-running

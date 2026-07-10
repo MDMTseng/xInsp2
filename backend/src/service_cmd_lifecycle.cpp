@@ -327,15 +327,20 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             if (g_eng.script.set_owner_callbacks) {
                 g_eng.script.set_owner_callbacks((void*)owner_get_cb, (void*)owner_set_cb);
             }
-            // F4: trigger-context marker get/set thunks. Lets xi::async /
-            // xi::parallel_for carry the inspect thread's "inside a trigger" flag
-            // onto worker threads, so an off-thread current_trigger() read from a
-            // triggered inspect's child is caught relationally (never false-firing
-            // on an unrelated lane's timer-tick worker). Optional symbol — older
-            // scripts don't export it and off-thread detection degrades to a no-op.
-            if (g_eng.script.set_trigger_ctx_callbacks) {
-                g_eng.script.set_trigger_ctx_callbacks(
-                    (void*)trigger_ctx_get_cb, (void*)trigger_ctx_set_cb);
+            // A4: explicit per-run context thunks. Lets xi::async /
+            // xi::parallel_for / xi::spawn_worker carry the run's context (run_id +
+            // frame_path + verdict slot + dispatch-thread identity) onto worker
+            // threads, so xi::run_id() / xi::current_frame_path() / xi::result() are
+            // correct on a worker (the spawn-gap closure) and off-thread reads/pushes
+            // fail loud. Replaces the retired trigger-ctx marker + set_run_id /
+            // set_run_context setters. Optional symbol — older scripts don't export
+            // it and per-run accessors return the 0/"" sentinel with no propagation.
+            if (g_eng.script.set_run_ctx_callbacks) {
+                g_eng.script.set_run_ctx_callbacks(
+                    (void*)run_ctx_get_cb, (void*)run_ctx_set_cb,
+                    (void*)run_ctx_run_id_cb, (void*)run_ctx_frame_path_cb,
+                    (void*)run_ctx_snapshot_cb, (void*)run_ctx_install_worker_cb,
+                    (void*)run_ctx_free_cb);
             }
             // Result callback. Scripts without xi_result.hpp leave this null
             // and xi::result() is a no-op (run_result then defaults to NA).

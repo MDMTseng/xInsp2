@@ -1,5 +1,7 @@
 # 17 — Ordered-sink semantics on the pack plane (U3)
 
+> [2026-07-11] Partially superseded: the `xi_script_set_run_id` / `set_run_context` ambient-TLS mechanism described below was replaced by the explicit per-run RunContext (commit `a293cfe`); the ordering contract ($seq = xi::run_id(), producer-stamped before seal) is unchanged — see docs/reference/c-abi.md.
+
 Status: **DECIDED + LANDED** (2026-07-03). Owner: U3 (CUT-GATE item).
 Closes Gate P2 residual #2 (doc 10 §Gate P2) and flips matrix row C3 (doc 12).
 

@@ -1185,6 +1185,23 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_retired_terms.py)
     set_tests_properties(retired_terms PROPERTIES LABELS "docs")
+    # doc_debt: the manual companion to the two derived guards — docs/DOC_DEBT.md
+    # is the ledger where a code change that invalidates a doc page records one
+    # `- [ ]` line instead of fixing it in-branch; this fails while any unchecked
+    # item remains (and on malformed checkbox lines), so recorded debt cannot
+    # ride a green gate to merge. Same pure-stdlib Python, same "docs" label.
+    add_test(NAME doc_debt
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_doc_debt.py)
+    set_tests_properties(doc_debt PROPERTIES LABELS "docs")
+    # doc_links: the code→doc backlink checker — `// @doc <relpath>[#anchor]`
+    # comments in backend/include/xi + backend/src name the doc page teaching
+    # that region; this fails if a referenced page no longer exists (anchors not
+    # validated yet; zero markers passes — adoption is organic).
+    add_test(NAME doc_links
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_doc_links.py)
+    set_tests_properties(doc_links PROPERTIES LABELS "docs")
     # contract_schema: the contract-first spike gate. Validates every schema under
     # contract/schemas/ against the constrained-subset meta-schema (way A) and
     # every wire fixture (protocol/fixtures + contract/examples) against its mapped

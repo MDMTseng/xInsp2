@@ -39,6 +39,13 @@ docs/guides/write-a-script.md: legacy VAR/EMIT + legacy-entry material is docume
 # rule; ws-protocol.md dropped its token forms in the v12 THE CUT rewrite;
 # STUDY-sdk.md moved to docs/archive/ and is off the blessed scan set.)
 docs/guides/build-and-run.md::were removed and no: build-and-run note documents that VAR(...)/EMIT(...) were removed and no longer compile, pointing to expose
+# data-types.md names TypedPack/TypedPackBuilder/PackSchema exactly to say the
+# container "was deleted 2026-07-11" and point at Pack/PackBuilder +
+# ScriptTypedPack — retirement notes, not examples. Anchored to that wording.
+docs/reference/data-types.md::container was: data-types documents the TypedPack/TypedPackBuilder/PackSchema deletion on purpose ("container was deleted"), teaching Pack/PackBuilder + ScriptTypedPack as current
+# c-abi.md's xi_script_set_run_ctx_callbacks row says it "Replaces the retired
+# ambient-TLS xi_script_set_run_id (U3) setter" — documenting the retirement.
+docs/reference/c-abi.md::retired ambient-TLS: c-abi run_ctx_callbacks row names xi_script_set_run_id precisely to say it is retired and replaced
 
 # --- docs/archive/** --------------------------------------------------------
 # (No archived page is in the scanned blessed set today; if archived pages are

@@ -59,7 +59,11 @@ moved from typed Record views to the sealed pack:
   `get_i64<Schema::kSeq>()` resolves the slot to its key constant at compile time,
   so a mistyped slot is a build error, not a runtime miss (`examples/qa_pack_walk`
   is the reference). This is the pack analogue of the retired declared-keyset
-  Record views.
+  Record views. (Note: `ScriptTypedPack` is key-based over the opaque
+  `xi_pack_v1` ABI and needs only `Schema::keys`; it is unrelated to the
+  in-process `TypedPack<Schema>`/`PackSchema` offset container, which was
+  deleted 2026-07-11 — commit `cba51fe` — leaving `Pack`/`PackBuilder` as the
+  one in-process container.)
 - **Producer-agnostic walk.** A sink that has no producer schema enumerates an
   unknown pack with `count()` + `key_at`/`tag_at` (or the `for_each(key, tag)`
   sugar) — the pack's self-description (doc 07 §2).

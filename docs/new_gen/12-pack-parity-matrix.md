@@ -1,5 +1,7 @@
 # Pack Parity Matrix — the Gate P2 Measuring Stick
 
+> [2026-07-11] Partially superseded: the `xi_script_set_run_id` export cited in row C3 was replaced by the explicit RunContext thunks (`xi_script_set_run_ctx_callbacks`, commit `a293cfe`); `$seq = xi::run_id()` semantics are unchanged — see docs/reference/c-abi.md.
+
 | Field | Value |
 |---|---|
 | **Date** | 2026-07-03 (re-measured after the three P2 write-half branches merged — see §The write half landed) |

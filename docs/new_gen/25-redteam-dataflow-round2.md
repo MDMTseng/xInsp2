@@ -1,5 +1,7 @@
 # 25 — Red-team data-flow findings (round 2)
 
+> [2026-07-11] Partially superseded: the G3 ticket-epoch cancel, the F4 trigger-ctx marker, the J4 off-thread-push guard's TLS mechanics, and every TypedPack accessor cited below were retired/re-expressed by the core contraction (explicit RunContext `a293cfe`, coop-cancel removal `93de38b`, TypedPack deletion `cba51fe`) — see docs/internals/pack-plane.md + docs/roadmap/core-simplification.md.
+
 Status: **findings only — none fixed yet** (audit 2026-07-05). A second
 adversarial load/concurrency pass over the core data flow, run as a 4-way
 parallel review (dispatch/lifecycle · pack+pool · record→emit→sink egress ·

@@ -131,8 +131,8 @@ using xi::seh_exception;
 
 // Forward-declare: runs one inspection cycle (drives sinks + emits the run result).
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
-// frame_path (optional) is plumbed to the script via
-// `xi_script_set_run_context`; readable inside the script as
+// frame_path (optional) is carried on the A4 explicit per-run context
+// (RunContextScope); readable inside the script as
 // `xi::current_frame_path()`. Empty string means none.
 // run_one_inspection declared (with default args) in service_internal.hpp.
 
@@ -716,40 +716,33 @@ int main(int argc, char** argv) {
     };
 
     // P2.4 watchdog. Always-on monitor thread; acts when any in-flight inspect
-    // (wd_arm slot) overruns its deadline. Two-phase, now per-worker-aware:
-    //   Phase 1 — cooperative: arm the script's EPOCH-scoped cancel
-    //     (set_global_cancel(1)); xi::ops poll xi::cancellation_requested() and
-    //     bail. 1000 ms grace (big ops — 20 MP gaussian, matchTemplate, contour
-    //     walks — need a few hundred ms to finish their current chunk; 100 ms
-    //     tripped healthy scripts). The arm targets only inspects ALREADY in
-    //     flight at trip time (ticket below the high-water snapshot): under N>1
-    //     it aborts every currently-running frame this round — the intended
-    //     "something's wedged, bail" signal — but a FRESH frame the pool starts
-    //     during the grace draws a higher ticket and is NOT cancelled, so one
-    //     slow frame no longer poisons ~a second of unrelated frames. Healthy
-    //     workers re-run next tick. (Pre-fix the flag was a held global bool, so
-    //     every heavy frame dispatched in the grace window aborted spuriously —
-    //     core-bug-hunt 2026-06 #12.)
-    //   Phase 2 — hard trip: if any slot is STILL overrun after the grace, the
-    //     script ignored cooperative cancel. We do NOT TerminateThread — a kill
-    //     mid process() would leak the per-instance lock (deadlocking that
-    //     instance) and risk heap corruption. The process is unrecoverable, so
-    //     the backend EXITS; the FE supervisor respawns a clean one (and drives
-    //     the line safe). Run without an FE => backend stays down by design.
+    // (wd_arm slot) overruns its deadline. Overrun → grace → HARD trip:
+    //   Grace — after an overrun is seen, wait 1000 ms and re-check. A big op
+    //     (20 MP gaussian, matchTemplate, contour walk) can legitimately run a
+    //     few hundred ms past a tight budget and finish on its own; if the same
+    //     inspect (matched by slot index AND deadline value) has returned by the
+    //     end of the grace it was merely slow, not wedged — leave it alone.
+    //   HARD trip — if the SAME inspect is still overrun after the grace it is
+    //     wedged. We do NOT TerminateThread — a kill mid process() would leak the
+    //     per-instance lock (deadlocking that instance) and risk heap corruption.
+    //     The process is unrecoverable, so the backend EXITS; the FE supervisor
+    //     respawns a clean one (and drives the line safe). Run without an FE =>
+    //     backend stays down by design.
+    //   (The former soft cooperative-cancel phase — set_global_cancel + a polled
+    //   epoch-scoped cancel the script could honour — was retired; a wedged frame
+    //   just runs into the hard trip now.)
     g_eng.watchdog_run = true;
     g_eng.watchdog_thread = std::thread([&srv]() {
         auto now_ms = [] {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
         };
-        // Snapshot of the slot deadlines that were overrun when we armed a
-        // cooperative cancel. After the grace we hard-trip ONLY if one of THESE
-        // same inspects is still stuck (same slot still holds the same deadline)
-        // — i.e. it ignored the cooperative cancel it was actually targeted by.
-        // A different inspect overrunning by then (a fresh frame that started
-        // during the grace, which the epoch-scoped cancel deliberately did NOT
-        // target) is left for the next loop iteration to give its OWN
-        // cooperative round, rather than being hard-killed without warning.
+        // Snapshot of the slot deadlines that were overrun when the grace began.
+        // After the grace we hard-trip ONLY if one of THESE same inspects is
+        // still stuck (same slot still holds the same deadline). A different
+        // inspect overrunning by then (a fresh frame that started during the
+        // grace) is left for the next loop iteration to get its OWN grace,
+        // rather than being hard-killed without warning.
         int64_t wd_snap[WD_SLOTS];
         while (g_eng.watchdog_run.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -762,22 +755,18 @@ int main(int argc, char** argv) {
             }
             if (!any_overran) continue;
 
-            // Phase 1: cooperative cancel + grace. Log the attempt so the
-            // escalation is observable (and a hard trip can be proven to have
-            // tried the soft cancel first, not jumped straight to the kill).
+            // Grace: a slow-but-finishing frame gets 1000 ms to return on its
+            // own before we treat it as wedged. Log the overrun so the escalation
+            // is observable.
             std::fprintf(stderr,
-                "[xinsp2] watchdog: inspect overran %dms — requesting cooperative cancel\n",
+                "[xinsp2] watchdog: inspect overran %dms — grace period before hard trip\n",
                 g_eng.watchdog_ms.load());
-            {
-                std::lock_guard<std::mutex> lk(g_eng.script_mu);
-                if (g_eng.script.set_global_cancel) g_eng.script.set_global_cancel(1);
-            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-            // Did every inspect we TARGETED return? (Its slot is now free or
-            // re-armed by a different inspect with a different deadline.) Match
-            // on slot index AND deadline value so a fresh inspect reusing the
-            // slot is not mistaken for the original stuck one.
+            // Did every inspect that overran return during the grace? (Its slot
+            // is now free or re-armed by a different inspect with a different
+            // deadline.) Match on slot index AND deadline value so a fresh
+            // inspect reusing the slot is not mistaken for the original stuck one.
             bool still_stuck = false;
             for (int i = 0; i < WD_SLOTS; ++i) {
                 if (wd_snap[i] != 0 && g_eng.wd_deadlines[i].load() == wd_snap[i]) {
@@ -785,33 +774,25 @@ int main(int argc, char** argv) {
                 }
             }
             if (!still_stuck) {
-                {
-                    std::lock_guard<std::mutex> lk(g_eng.script_mu);
-                    if (g_eng.script.set_global_cancel) g_eng.script.set_global_cancel(0);
-                }
-                int n = ++g_eng.watchdog_trips;
+                // Slow, not wedged: the frame finished during the grace. No trip.
                 std::fprintf(stderr,
-                    "[xinsp2] watchdog tripped (#%d) — script honoured cooperative cancel\n", n);
-                emit_error_log(srv,
-                    "watchdog tripped — inspect exceeded "
-                    + std::to_string(g_eng.watchdog_ms.load())
-                    + "ms; cooperative cancel succeeded");
+                    "[xinsp2] watchdog: overrunning inspect finished during grace — not tripped\n");
                 continue;
             }
 
-            // Phase 2: hard trip — exit for FE respawn (see header above).
+            // Hard trip — exit for FE respawn (see header above).
             ++g_eng.watchdog_trips;
             // Health contract: an unrecoverable wedge → `fault`. Best-effort push
             // before the exit (the FE will respawn into a fresh `boot`).
             xi::health().set_state(xi::SysState::Fault);
             std::fprintf(stderr,
-                "[xinsp2] watchdog HARD trip - inspect exceeded %dms and ignored "
-                "cooperative cancel; exiting for supervisor respawn (rc=0x%04X)\n",
+                "[xinsp2] watchdog HARD trip - inspect exceeded %dms and stayed "
+                "wedged past the grace; exiting for supervisor respawn (rc=0x%04X)\n",
                 g_eng.watchdog_ms.load(), WATCHDOG_EXIT_CODE);
             emit_error_log(srv,
                 "watchdog HARD trip — inspect exceeded "
                 + std::to_string(g_eng.watchdog_ms.load())
-                + "ms and ignored cooperative cancel; backend exiting for respawn");
+                + "ms and stayed wedged past the grace; backend exiting for respawn");
             std::fflush(stderr);
             std::fflush(stdout);
             // H7: if a worker is mid-write_minidump, let its dump land before we

@@ -1,5 +1,7 @@
 # xInsp2 Real-Time Performance and Determinism Review
 
+> [2026-07-11] Partially superseded: the watchdog's cooperative-cancellation phase reviewed below was retired (`93de38b` — one-phase: overrun → grace → hard _Exit+respawn; `cancellation_requested()` is token-only) — see docs/internals/fe-be.md.
+
 | Field | Value |
 |---|---|
 | Review date | 2026-07-02 |

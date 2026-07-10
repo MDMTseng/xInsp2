@@ -10,7 +10,6 @@
 # gated metrics are:
 #   frame_micro_record_roundtrip_ns          v2 metadata roundtrip (min-of-batches)
 #   frame_micro_framebuilder_ns              v3 PackBuilder+seal+read+drop (dynamic)
-#   frame_micro_typed_ns                     v3 TypedPack set+seal+slot-read+drop (offset-accessor path)
 #   frame_micro_plane_memcpy_hop_ns          v3 mp plane + memcpy-hop + offset-read
 #   frame_hotpath_record_p50_us_320x240x3_p1 v2 closed-loop single-worker p50
 #   frame_hotpath_frame_p50_us_320x240x3_p1  v3 closed-loop single-worker p50

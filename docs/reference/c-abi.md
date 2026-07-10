@@ -540,7 +540,7 @@ script lacks them and the host degrades as noted (canonical list:
 |---|---|---|
 | `xi_script_set_use_pack_callback` | Host wires the `xi::use(name).process(ScriptPack)` pack-door callback (gate P2). | `process(ScriptPack)` yields an empty pack |
 | `xi_script_set_use_push_pack_callback` | Host wires the `xi::use(sink).push(pack)` staged-push thunk. | pack push not wired |
-| `xi_script_set_run_id` | Per-run arrival id → the script's `xi::run_id()` (U3, ordering — the value a producer stamps as `"$seq"` before seal). | `xi::run_id()` reads 0 |
+| `xi_script_set_run_ctx_callbacks` | Host wires the explicit per-run **RunContext** thunks (A4): get/set propagation for xi-spawned workers plus the `run_id` / `frame_path` read thunks behind `xi::run_id()` / `xi::current_frame_path()` (ordering — `run_id` is the value a producer stamps as `"$seq"` before seal). Replaces the retired ambient-TLS `xi_script_set_run_id` (U3) setter. | `xi::run_id()` reads 0, `current_frame_path()` reads `""` |
 | `xi_script_kv_get` / `xi_script_kv_set` | The kv channel (U2) — the script's sole cross-frame state store: the store crosses as **canonical-msgpack bytes with explicit lengths** — never NUL-terminated (msgpack contains NULs). `get` uses the grow-and-retry convention (bytes written, or `-needed`); `0` = the store is empty. | the script has no kv state store |
 | `xi_script_kv_schema_version` | The kv schema stamp (`XI_KV_SCHEMA(N)`). | schema treated as 0 |
 | `xi_script_kv_change` | Typed migration hook across a hot-reload (old bytes + schemas in, migrated bytes out, same `-needed` convention); declining (≤ 0) drops the prior store. | prior kv store dropped on schema mismatch |

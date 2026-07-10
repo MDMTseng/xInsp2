@@ -1,7 +1,14 @@
 # Hot-path performance — findings, baseline, and roadmap
 
 > **Status:** findings-only (nothing here is implemented yet). Captured from the
-> 2026-07-10 hot-path scan + `bench_*` baseline. Speed-first is spine principle #1
+> 2026-07-10 hot-path scan + `bench_*` baseline.
+>
+> **[2026-07-11] TypedPack deleted (commit `cba51fe`):** the in-process
+> `TypedPack<Schema>`/`TypedPackBuilder` container this page benchmarks was
+> deleted (0 production consumers; the `frame_micro_typed_ns` perf baseline was
+> retired with it). The `TypedPack` numbers below are kept as the historical
+> measurement; items **B-2** and the "steer to TypedPack" half of **B-1** are
+> **moot**. Speed-first is spine principle #1
 > ("zero-copy, no I/O or allocation on the per-frame path, **measure before you
 > trade it away**"), so every item below is a *candidate* to be benchmarked
 > before/after, not a mandate.
@@ -106,16 +113,17 @@ amortized: the EmitTurn gate itself is skipped when `n==1` — `service_dispatch
 ### B-1 — dynamic pack > 24 keys builds an `unordered_map` at every seal
 `xi_pack.hpp:453/557` — 25+ entries → `unordered_map` (~N node allocs) built eagerly
 at seal, 100% waste for index-order consumers (record/expose dumpers). **Fix (B):**
-cap dynamic per-frame packs at ≤24 keys and steer wider field sets to a declared
-`TypedPack` (zero lookup cost at any width — that's what it exists for); or build the
-index lazily on first `find`.
+cap dynamic per-frame packs at ≤24 keys, or build the
+index lazily on first `find`. *(The original "steer wider field sets to a declared
+`TypedPack`" option is moot — TypedPack was deleted 2026-07-11, `cba51fe`.)*
 
-### B-2 — undeclared key in a TypedPack silently degrades to the dynamic path
+### ~~B-2 — undeclared key in a TypedPack silently degrades to the dynamic path~~ (MOOT 2026-07-11 — TypedPack deleted, `cba51fe`)
 `xi_pack.hpp:916-946` — an `add_*(key,…)` for a key not in the schema grows a `dyn_`
 vector + interns the key, and every subsequent string-key read scans the schema table
 then the side list. Silent; profiles show diffuse cost. **Fix (B):** an opt-in
 `strict` `TypedPackBuilder` that fails loud on an undeclared key (one compile flag,
 breaks only the mistake it targets). Saves the 273 ns/pack dynamic tax too.
+*(Resolved by deletion: the whole silent-degrade class is unrepresentable now.)*
 
 ### B-3 — `add_str`/`add_mp` bypass the large-object threshold; arena freelist pins by count not bytes
 `xi_pack.hpp:636/709` — unlike `add_bin`, no `kPackLargeThreshold` check, so a large
@@ -151,8 +159,8 @@ sustained emission into a persistent lane.
 1. **C-1 ImagePool pixel recycling** — biggest by the numbers (frame-buffer create
    dominates: 6.5 µs–344 µs), but touches the lock-free pool core → its own PR + a
    focused `bench_image_pool` before/after and a concurrency review.
-2. **B-2 strict TypedPack + B-1 >24-key steer** — cheap, saves 273 ns/pack, catches a
-   silent-degrade class.
+2. ~~**B-2 strict TypedPack + B-1 >24-key steer**~~ — moot 2026-07-11 (TypedPack
+   deleted, `cba51fe`); only B-1's lazy-index option remains live.
 3. **A-2/A-1/A-3 + B-3 + the kChunk constant** — behavior-preserving fast-path caches;
    biggest under the headless + multi-source shapes; low risk.
 4. **B-4 one-shot rate-gate** — a clean reject of a misconfiguration.

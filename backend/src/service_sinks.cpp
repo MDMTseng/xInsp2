@@ -147,9 +147,9 @@ static int use_push_pack_inline_(const char* name, xi_pack_handle pack) {
 }
 
 // J4: reject a use(sink).push() issued off the dispatch thread. Defined below,
-// next to the READ-path guard (warn_trigger_off_thread_) whose g_trigger_ctx_ /
-// g_current_trigger markers they reuse — forward-declared here so use_push_pack_cb
-// can call them before those thread-context markers are defined.
+// next to the READ-path guard (warn_trigger_off_thread_) whose A4 RunContext
+// (g_run_ctx owner_tid) they reuse — forward-declared here so use_push_pack_cb
+// can call them before those context helpers are defined.
 static bool push_off_dispatch_thread_();
 static void warn_push_off_thread_(const char* name);
 
@@ -447,44 +447,25 @@ void wd_disarm(int slot) { if (slot >= 0) g_eng.wd_deadlines[slot].store(0); }  
 // dispatch threads can each have their own current trigger.
 thread_local const xi::TriggerEvent* g_current_trigger = nullptr;   // DEFINED here (decl in header)
 
-// F4: per-thread trigger-context marker — "this thread is INSIDE, or a CHILD of,
-// a trigger-bearing inspect". THREAD-LOCAL and RELATIONAL (this replaces the old
-// A1 process-global inspect_tid, which was a single atomic holding the last
-// scope's tid — a fatally unsound heuristic under max_parallel>1: a benign
-// timer-tick worker on lane B calling current_trigger() would see lane A's tid !=
-// 0 and abort, even though B never had a trigger; and lane B's scope storing 0
-// masked a genuine off-thread misuse on lane A).
-//
-// The marker is set by CurrentTriggerScope on the inspect thread, and PROPAGATED
-// BY VALUE into the worker threads xi::async / xi::parallel_for spawn (via the
-// trigger_ctx get/set thunks, exactly like the image-pool owner). So:
-//   * inspect thread of a triggered frame  → marker=1, g_current_trigger != null
-//     (warn is never reached — the thunk returns the real trigger).
-//   * a child worker of that inspect        → marker=1 (propagated), but
-//     g_current_trigger==null (thread_local, not inherited): the script read the
-//     ambient trigger off-thread instead of snapshotting → fail loud. DETECTED.
-//   * a timer-tick / plain cmd:run worker    → marker=0 (its inspect had no
-//     CurrentTriggerScope): reading current_trigger() is the legitimate "no
-//     trigger" case → quiet, even while ANOTHER lane runs a triggered frame.
-// TRADEOFF: a hand-rolled `#pragma omp` region (NOT xi::parallel_for) that reads
-// the ambient trigger off-thread is no longer flagged — the marker only rides the
-// blessed primitives. That is the correct trade: the old heuristic "caught" it
-// only by also aborting correct programs, and TriggerSnapshot / the A4 explicit
-// entry make the off-thread ambient read unnecessary anyway.
-static thread_local int g_trigger_ctx_ = 0;
-
-// F4: bridge the marker across the ABI seam for xi::async / xi::parallel_for.
-uint32_t trigger_ctx_get_cb()      { return (uint32_t)g_trigger_ctx_; }
-void     trigger_ctx_set_cb(uint32_t v) { g_trigger_ctx_ = (int)v; }
-
-// F4: invoked from a trigger thunk's "no current trigger" branch. Fires ONLY when
-// THIS thread is inside / a child of a trigger-bearing inspect (marker set here or
-// propagated from the spawning inspect) yet the ambient trigger is null here — the
-// off-thread-read silent-bug class. When the marker is 0 (genuinely no trigger on
-// this thread's lineage: plain cmd:run / timer tick, on any lane) it returns
-// quietly so the thunk preserves its empty / XI_IMAGE_NULL semantics.
+// F4: invoked from the trigger info thunk's "no current trigger" branch. The
+// relational detection now rides the A4 explicit RunContext (g_run_ctx) instead
+// of a separate integer marker: the context is installed on the dispatch thread
+// (carrying owner_tid + had_trigger) and PROPAGATED BY VALUE onto xi::async /
+// xi::parallel_for / xi::spawn_worker workers, while g_current_trigger stays
+// thread_local and is NOT inherited. So the ambient current_trigger() is null on
+// a worker even though the context is present. Fire ONLY when this is a worker of
+// a TRIGGERED run — the context is present, its owner_tid differs from this
+// thread (⇒ a spawned worker, not the dispatch thread), and the run carried a
+// trigger (had_trigger). A dispatch thread of a triggered frame never reaches
+// here (g_current_trigger != null); a timer-tick / plain cmd:run thread has
+// had_trigger == false, so reading current_trigger() there is the legitimate "no
+// trigger" case → quiet. A hand-rolled `#pragma omp` region (NOT the blessed
+// primitives) keeps the context of the thread it runs on, so an off-thread read
+// from one is not flagged — the same documented trade as before.
 static void warn_trigger_off_thread_() {
-    if (g_trigger_ctx_ == 0) return;   // this thread's lineage has no trigger
+    if (!(g_run_ctx && g_run_ctx->had_trigger &&
+          g_run_ctx->owner_tid != std::this_thread::get_id()))
+        return;   // dispatch thread, or no triggered run in this thread's lineage
     static constexpr const char* kMsg =
         "[xinsp2] current_trigger() called off the inspect thread — read the "
         "trigger ON the inspect thread and capture into the parallel body "
@@ -502,18 +483,23 @@ static void warn_trigger_off_thread_() {
 }
 
 // J4: WRITE-path analogue of the READ guard above — is this use(sink).push()
-// running off the dispatch thread? Detected the SAME way: g_trigger_ctx_ marks
-// "this thread is inside / a child of a trigger-bearing inspect" (set by
-// CurrentTriggerScope, propagated into xi::async / xi::parallel_for workers), while
-// g_current_trigger is thread_local and NOT inherited. So on the real dispatch
-// thread of a triggered frame g_current_trigger != null (→ allowed; its g_staged IS
-// flushed after the inspect); on a timer-tick / cmd:run dispatch thread the marker
-// is 0 (→ allowed; the same thread flushes). A CHILD worker of a triggered inspect
-// has marker=1 but g_current_trigger==null → its g_staged is never drained → REJECT.
-// Same documented blind spot as the read guard: a child of a source-less (marker-0)
-// inspect is not flagged (the marker only rides the blessed primitives).
+// running off the dispatch thread? push() STAGES into the dispatch thread's
+// thread_local g_staged, which is drained ONLY on that thread (drain_/flush_
+// staged_emits_); a push from a spawned worker would stage into THAT worker's
+// never-flushed g_staged (leaked ref + dropped delivery). Staging genuinely
+// cannot be made worker-safe here, so the rejection is PRESERVED — but now driven
+// off the A4 RunContext, not the retired marker: the context carries owner_tid
+// (the dispatch thread that owns g_staged) and is propagated by value onto
+// workers, so a tid mismatch means "spawned worker" for BOTH triggered and
+// timer-tick / cmd:run dispatch threads (each installs its own owner_tid). Off a
+// run entirely (g_run_ctx == null) nothing is staged, so allow. A DETACHED SNAPSHOT
+// (a spawn_worker context — result_slot nulled) has its own thread's owner_tid, but
+// its g_staged is never flushed either, so it is rejected on the result_slot marker
+// (structural — independent of the owner_tid comparison).
 static bool push_off_dispatch_thread_() {
-    return g_trigger_ctx_ != 0 && g_current_trigger == nullptr;
+    if (!g_run_ctx) return false;               // off any run: nothing staged here
+    if (!g_run_ctx->result_slot) return true;   // detached snapshot (spawn_worker): never flushed → reject
+    return g_run_ctx->owner_tid != std::this_thread::get_id();
 }
 
 // Once-per-sink-name loud rejection of an off-dispatch-thread push. Mirrors
@@ -571,16 +557,14 @@ void release_trigger_event_(xi::TriggerEvent& ev) {   // decl in header (cross-T
 // (they touch the file-local release_trigger_event_).
 CurrentTriggerScope::CurrentTriggerScope(xi::TriggerEvent& ev) : ev_(ev) {
     g_current_trigger = &ev;
-    // F4: mark THIS thread as inside a trigger-bearing inspect. xi::async /
-    // xi::parallel_for read this marker (via trigger_ctx_get_cb) at spawn time and
-    // re-install it on their worker threads, so a child that reads current_trigger()
-    // off-thread is caught — while a timer-tick worker on another lane (marker 0)
-    // is not. Not nested (the dispatch worker runs one inspect at a time), so a
-    // plain set/clear mirrors the pre-existing g_current_trigger discipline.
-    g_trigger_ctx_ = 1;
+    // F4: the "this run carried a trigger" signal now rides the A4 RunContext
+    // (RunContextScope, installed by run_inspection_compute_ with had_trigger =
+    // g_current_trigger != null) instead of a separate marker set here — so the
+    // scopes stay decoupled and there is one carrier. g_current_trigger remains
+    // thread_local + not propagated (its off-thread nullness is what the read
+    // guard keys on).
 }
 CurrentTriggerScope::~CurrentTriggerScope() {
-    g_trigger_ctx_ = 0;
     g_current_trigger = nullptr;
     release_trigger_event_(ev_);
 }

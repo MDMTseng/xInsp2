@@ -57,8 +57,6 @@ struct LoadedScript {
                                         void* grab_fn, void* host_api);
     using SetTriggerCallbacksFn = void (*)(void* info_fn, void* image_fn,
                                            void* sources_fn);
-    using SetRunContextFn         = void (*)(const char* frame_path);
-    using SetGlobalCancelFn       = void (*)(int set);
 
     InspectFn          inspect          = nullptr;
     InspectTvFn        inspect_tv       = nullptr;   // A4 explicit-trigger entry (preferred)
@@ -82,10 +80,15 @@ struct LoadedScript {
     // it and worker-created images stay anonymous (owner=0).
     using SetOwnerCallbacksFn = void (*)(void* get_fn, void* set_fn);
     SetOwnerCallbacksFn set_owner_callbacks = nullptr;
-    // F4: trigger-context marker get/set thunks. Optional symbol — older scripts
-    // lack it and off-thread current_trigger() misuse detection is a no-op.
-    using SetTriggerCtxCallbacksFn = void (*)(void* get_fn, void* set_fn);
-    SetTriggerCtxCallbacksFn set_trigger_ctx_callbacks = nullptr;
+    // A4: explicit per-run context thunks (get/set propagation + run_id/frame_path
+    // read). Optional symbol — older scripts lack it and per-run accessors return
+    // the 0/"" sentinel with no propagation. Replaces the retired
+    // set_trigger_ctx_callbacks marker AND set_run_id/set_run_context setters.
+    using SetRunCtxCallbacksFn = void (*)(void* get_fn, void* set_fn,
+                                          void* run_id_fn, void* frame_path_fn,
+                                          void* snapshot_fn, void* install_worker_fn,
+                                          void* free_fn);
+    SetRunCtxCallbacksFn set_run_ctx_callbacks = nullptr;
     using SetResultCallbackFn = void (*)(void* fn);
     SetResultCallbackFn set_result_callback = nullptr;
     // polaris2 Gate P2: xi::use() pack-door process callback. Optional symbol —
@@ -97,18 +100,6 @@ struct LoadedScript {
     // and the host simply doesn't wire the pack push.
     using SetUsePushPackCallbackFn = void (*)(void* push_fn);
     SetUsePushPackCallbackFn set_use_push_pack_callback = nullptr;
-    SetRunContextFn    set_run_context  = nullptr;
-    // U3 (docs/new_gen/17): per-run arrival/run id → the script's xi::run_id().
-    // Optional symbol — older scripts lack it and read 0.
-    using SetRunIdFn = void (*)(long long run_id);
-    SetRunIdFn         set_run_id       = nullptr;
-    SetGlobalCancelFn  set_global_cancel = nullptr;
-    // Inspect-start hook: draws this inspect's cancel ticket so the watchdog's
-    // cooperative cancel is scoped to inspects in flight at trip time, not
-    // fresh ones dispatched during the grace. Optional symbol (older scripts
-    // lack it → legacy global-cancel behaviour).
-    using InspectBeginFn = void (*)(void);
-    InspectBeginFn     inspect_begin    = nullptr;
 
     // U2 (docs/new_gen/16) — the kv channel (post-Record state). Canonical-mp
     // BYTES with explicit lengths (never NUL-terminated). All optional
@@ -167,13 +158,9 @@ inline bool load_script(const std::string& dll_path, LoadedScript& out, std::str
     out.set_trigger_meta_callback = reinterpret_cast<LoadedScript::SetTriggerMetaCallbackFn>(GetProcAddress(h, "xi_script_set_trigger_meta_callback"));
     out.set_status_callback = reinterpret_cast<LoadedScript::SetStatusCallbackFn>(GetProcAddress(h, "xi_script_set_status_callback"));
     out.set_owner_callbacks = reinterpret_cast<LoadedScript::SetOwnerCallbacksFn>(GetProcAddress(h, "xi_script_set_owner_callbacks"));
-    out.set_trigger_ctx_callbacks = reinterpret_cast<LoadedScript::SetTriggerCtxCallbacksFn>(GetProcAddress(h, "xi_script_set_trigger_ctx_callbacks"));
+    out.set_run_ctx_callbacks = reinterpret_cast<LoadedScript::SetRunCtxCallbacksFn>(GetProcAddress(h, "xi_script_set_run_ctx_callbacks"));
     out.set_result_callback = reinterpret_cast<LoadedScript::SetResultCallbackFn>(GetProcAddress(h, "xi_script_set_result_callback"));
     out.set_use_pack_callback = reinterpret_cast<LoadedScript::SetUsePackCallbackFn>(GetProcAddress(h, "xi_script_set_use_pack_callback"));
-    out.set_run_context = reinterpret_cast<LoadedScript::SetRunContextFn>(GetProcAddress(h, "xi_script_set_run_context"));
-    out.set_run_id      = reinterpret_cast<LoadedScript::SetRunIdFn>(GetProcAddress(h, "xi_script_set_run_id"));
-    out.set_global_cancel = reinterpret_cast<LoadedScript::SetGlobalCancelFn>(GetProcAddress(h, "xi_script_set_global_cancel"));
-    out.inspect_begin     = reinterpret_cast<LoadedScript::InspectBeginFn>(GetProcAddress(h, "xi_script_inspect_begin"));
     out.get_kv               = reinterpret_cast<LoadedScript::GetKvFn>(GetProcAddress(h, "xi_script_kv_get"));
     out.set_kv               = reinterpret_cast<LoadedScript::SetKvFn>(GetProcAddress(h, "xi_script_kv_set"));
     out.kv_schema_version    = reinterpret_cast<LoadedScript::KvSchemaVersionFn>(GetProcAddress(h, "xi_script_kv_schema_version"));
