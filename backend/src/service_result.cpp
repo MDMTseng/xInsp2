@@ -183,7 +183,8 @@ void result_cb(int code, const char* msg) {
         return;
     }
     RunResult& rr = *g_run_ctx->result_slot;
-    if (code <= kResultSystemBand) {
+    if (reject_reserved_result_code(code, msg, rr.code, rr.msg)) {
+        // Backend-side observability on top of the shared rejection core.
         if (auto* srv = g_eng.srv_for_bp.load(std::memory_order_acquire)) {
             xp::LogMsg lm;
             lm.level = "warn";
@@ -192,9 +193,6 @@ void result_cb(int code, const char* msg) {
                      "NA (0) — fix the script's result code.";
             srv->send_text(lm.to_json());
         }
-        rr.code = 0;   // NA, not a fake ng1
-        rr.msg = "[invalid result code " + std::to_string(code) + ", reserved band] ";
-        rr.msg += (msg ? msg : "");
         rr.set = true;
         return;
     }
@@ -203,37 +201,19 @@ void result_cb(int code, const char* msg) {
     rr.set = true;
 }
 
-// Stable schema tag for the run_result wire event (bump on a breaking change to
-// the field set). Rides as an additive "schema" field so consumers can version.
-static constexpr const char* kRunResultSchema = "xi.run-outcome/1";
+// kRunResultSchema (the stable wire schema tag) lives in xi_result_class.hpp,
+// shared with the headless runner's report envelope.
 
-// Format a 128-bit trigger id as a 32-char lowercase hex string ("hi" then "lo",
-// each zero-padded to 16). A null id (0/0) → empty string (omitted on the wire).
+// Format a 128-bit trigger id as a 32-char lowercase hex string via the shared
+// SDK formatter (xi::trigger_id_hex128). The host adds the wire rule on top:
+// a null id (0/0) → empty string (omitted on the wire).
 std::string trigger_id_hex(xi_trigger_id id) {   // decl in header (cross-TU)
     if (id.hi == 0 && id.lo == 0) return {};
-    static const char* d = "0123456789abcdef";
-    std::string s;
-    s.reserve(32);
-    for (int shift = 60; shift >= 0; shift -= 4) s.push_back(d[(id.hi >> shift) & 0xF]);
-    for (int shift = 60; shift >= 0; shift -= 4) s.push_back(d[(id.lo >> shift) & 0xF]);
-    return s;
+    return xi::trigger_id_hex128(id.hi, id.lo);
 }
 
-// Derive the outcome class string from the EXISTING signed code — a pure read,
-// it never changes the numeric code. Bands: >0 → "ok"; ==0 → "na"; the reserved
-// system markers map to their own classes (dropped/crashed/no_verdict); a valid
-// ng code (<0 and above the reserved system band) → "ng"; anything else in the
-// system band → "na". The crash/no-verdict paths now emit their own reserved
-// codes, so class and code agree even when emit_run_result derives the class.
-static const char* outcome_class_for_code(int code) {
-    if (code == XI_SYS_DROPPED)     return "dropped";
-    if (code == XI_SYS_CRASHED)     return "crashed";
-    if (code == XI_SYS_NO_VERDICT)  return "no_verdict";
-    if (code > 0)                return "ok";
-    if (code == 0)               return "na";
-    if (code > kResultSystemBand) return "ng";   // valid ng band: <0 and > -990000
-    return "na";                                  // other reserved system codes
-}
+// outcome_class_for_code (code → class mapping) lives in xi_result_class.hpp,
+// shared with the headless runner.
 
 // Emit a `run_result` wire event. Fields ride directly in the event data (same
 // envelope shape as run_finished). Used by the inspect path (run_id >= 0) and the
@@ -247,8 +227,9 @@ static const char* outcome_class_for_code(int code) {
 // script_generation (the monotonic version of the active loaded script DLL that
 // produced the result; omitted when 0/unknown). The existing fields
 // (code/msg/run_id/ms/source/group) and their numeric values are UNCHANGED.
-// `cls`: if non-empty, overrides the code-derived class (used by the crash path,
-// which keeps code 0 but is "crashed"). `reason_code`: optional, omitted if empty.
+// `cls`: if non-empty, overrides the code-derived class (the crash path passes
+// XI_SYS_CRASHED + "crashed", so class and code agree either way).
+// `reason_code`: optional, omitted if empty.
 void emit_run_result(xi::ws::Server& srv, int code, const std::string& msg,
                             int64_t run_id, int64_t ms,
                             const std::string& source, const std::string& group,

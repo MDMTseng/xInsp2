@@ -814,7 +814,7 @@ Use `dequeued_at_us()` to split:
 XI_INSPECT_ENTRY(t, frame) {
     if (!t.is_active()) return;
 
-    int64_t now = xi::now_us();
+    int64_t now = xi::wall_us();
     double queue_wait_us = (double)(t.dequeued_at_us() - t.timestamp_us());  // grows during surge
     double inspect_us    = (double)(now              - t.dequeued_at_us());  // your code's actual cost
     // surface these however you like — a log line, the `expose` plugin, a custom

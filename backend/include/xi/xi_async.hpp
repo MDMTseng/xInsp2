@@ -176,10 +176,9 @@ struct OwnerScope {
 // cancelled mid-op; structure work into chunks and poll between them
 // if cancellation responsiveness matters.
 //
-// TODO(watchdog): hook this up so cmd:run's watchdog cancels all
-// outstanding tokens before falling back to TerminateThread. Lets a
-// stuck script abort cleanly when its ops are cooperative, before we
-// reach for the unsafe kill primitive.
+// Tokens are per-task only (Future::cancel); the watchdog does not
+// drive them — deliberately no global soft-cancel phase, and no thread
+// kills (a wedged frame goes grace → process exit for FE respawn).
 struct CancelToken {
     std::atomic<bool> cancelled{false};
 };

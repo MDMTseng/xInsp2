@@ -43,6 +43,8 @@
 #include <xi/xi_seh.hpp>
 #include <xi/xi_crash_dump.hpp>
 
+#include "xi_result_class.hpp"   // XI_SYS_* band + outcome_class_for_code (shared with runner_main)
+
 #ifdef _WIN32
 #  ifndef NOMINMAX
 #    define NOMINMAX
@@ -172,22 +174,22 @@ struct GroupLane {
 };
 
 // ---- shared thread_local globals (defined in exactly one TU) ---------------
-// g_staged      — service_sinks section (defined in service_main.cpp)
-// g_current_trigger — trigger-access section (defined in service_main.cpp)
-// g_run_result  — result section (defined in service_main.cpp)
+// g_staged      — defined in service_sinks.cpp
+// g_current_trigger — defined in service_sinks.cpp
+// g_run_result  — defined in service_result.cpp
 struct StagedEmit {
     std::string      target;   // destination sink instance name
     xi::TriggerEvent rec;      // carries one xi_pack_handle (frames + meta doc live in the pack); host owns that ref
 };
 extern thread_local std::vector<StagedEmit> g_staged;
 
-// staged-sink drain / flush (definitions in service_main.cpp).
+// staged-sink drain / flush (definitions in service_sinks.cpp).
 void drain_staged_emits_();
 void flush_staged_emits_(int64_t run_id);
 // RAII backstop: drains any staged-but-unflushed sink calls on scope exit.
 struct StagedEmitGuard { ~StagedEmitGuard() { drain_staged_emits_(); } };
 
-// Watchdog slot arm/disarm (definitions in service_main.cpp).
+// Watchdog slot arm/disarm (definitions in service_sinks.cpp).
 int  wd_arm(int64_t deadline);
 void wd_disarm(int slot);
 extern thread_local const xi::TriggerEvent* g_current_trigger;
@@ -256,14 +258,9 @@ void        run_ctx_install_worker_cb(void* s);  // worker thread → install `s
 void        run_ctx_free_cb(void* s);            // worker thread → free the snapshot
 
 // ---- shared constants ------------------------------------------------------
-// Framework system-fail enum: a reserved band (<= -990000) the user API refuses
-// to set. See docs/roadmap/run-result.md.
-enum : int {
-    XI_SYS_DROPPED    = -999001,  // overflow: event dropped before it could run
-    XI_SYS_CRASHED    = -999002,  // caught inspect error (throw/crash) — the run did not verdict
-    XI_SYS_NO_VERDICT = -999005,  // ran to completion but script set no RESULT (was v1.1 opt-in)
-};
-static constexpr int          kResultSystemBand = -990000;
+// Framework system-fail band (XI_SYS_* / kResultSystemBand / kRunResultSchema /
+// outcome_class_for_code) lives in xi_result_class.hpp — shared with the
+// headless runner. See docs/roadmap/run-result.md.
 static constexpr size_t       kRecentErrorsCap  = 64;
 static const int              WATCHDOG_EXIT_CODE = 0x5744;  // 'WD' — backend self-exit on a hard trip
 // Hard ceiling on a whole-file slurp that gets embedded verbatim in a command
@@ -294,7 +291,7 @@ inline void crash_set(char* dst, size_t n, const char* src) { xi::crash::set(dst
 inline void crash_set_phase(const char* phase) { xi::crash::set_phase(phase); }
 void reserve_fault_stack();
 
-// ---- RAII: current-trigger scope (defined in service_main.cpp) -------------
+// ---- RAII: current-trigger scope (defined in service_sinks.cpp) ------------
 struct CurrentTriggerScope {
     xi::TriggerEvent& ev_;   // non-const: dtor releases the event's pack ref (release_trigger_event_)
     explicit CurrentTriggerScope(xi::TriggerEvent& ev);
@@ -366,7 +363,6 @@ int  use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* ou
 // script-held sealed pack to a named instance's xi.pack@1 door. Sink targets
 // are staged (frame-ordered flush, like use_process_cb); others run inline.
 int  use_push_pack_cb(const char* name, xi_pack_handle pack);
-xi_image_handle use_grab_cb(const char* name, int timeout_ms);
 uint32_t owner_get_cb();
 void     owner_set_cb(uint32_t id);
 void     trigger_info_cb(CurrentTriggerInfoC* out);

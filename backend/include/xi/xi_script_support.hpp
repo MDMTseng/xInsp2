@@ -25,6 +25,7 @@
 #include "xi_cv.hpp"
 #include "xi_script.hpp"
 #include "xi_kv.hpp"      // U2: xi::kv() thunk bodies (xi_script_kv_* exports below)
+#include "xi_json_escape.hpp"  // the ONE JSON string-escape primitive (esc forwarder)
 #include "xi_seh.hpp"     // B2 warmup installs the SEH translator on the omp pool
 
 #include <cstdio>
@@ -69,30 +70,10 @@ inline int g_omp_cap_applied_ = apply_omp_thread_cap_();  // runs at DLL load
 
 namespace xi_script_detail {
 
-// Trivial JSON string escape for names and string values. Same rules as
-// the backend's xi_protocol.hpp but inlined here to keep this header
-// independent of that file.
+// JSON string escape for names and string values — one-line forwarder to the
+// ONE escape primitive (xi_json_escape.hpp, std-only leaf); call sites unchanged.
 inline void esc(std::string& out, const char* s) {
-    out.push_back('"');
-    for (; *s; ++s) {
-        char c = *s;
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if ((unsigned char)c < 0x20) {
-                    char b[8];
-                    std::snprintf(b, sizeof(b), "\\u%04x", (unsigned)c);
-                    out += b;
-                } else {
-                    out.push_back(c);
-                }
-        }
-    }
-    out.push_back('"');
+    xi::json_escape_into(out, s ? s : "");
 }
 
 } // namespace xi_script_detail
@@ -262,11 +243,11 @@ XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
     // the host now passes null and nothing stores it.
     (void)process_fn;
     g_use_exchange_fn_  = exchange_fn;
-    // grab_fn: the host still feeds this slot with its use_grab_cb stub, but the
-    // SDK-side landing pad (g_use_grab_fn_) is gone — the pull-style xi::grab()
-    // that read it was removed in the v11 push-only cleanup (see xi_use.hpp), so
-    // nothing consumes it. The ABI parameter is retained (dropping it is a
-    // coordinated host<->script signature change) but no longer stored.
+    // grab_fn: the host now passes nullptr — the SDK-side landing pad
+    // (g_use_grab_fn_) is gone and the pull-style xi::grab() that read it was
+    // removed in the v11 push-only cleanup (see xi_use.hpp), so nothing consumes
+    // it. The ABI parameter is retained (dropping it is a coordinated
+    // host<->script signature change) but never stored.
     (void)grab_fn;
     g_use_host_api_     = host_api;
 }
@@ -386,7 +367,7 @@ XI_SCRIPT_EXPORT int xi_script_kv_schema_version(void) {
 // Typed code_change for the kv channel (see xi_kv.hpp set_kv_migrate). Always
 // present in a recompiled script; "no migrator registered" returns 0, which is
 // indistinguishable from a missing symbol — the host's drop fallback is
-// identical either way (same contract as xi_script_code_change above).
+// identical either way.
 XI_SCRIPT_EXPORT int xi_script_kv_change(const uint8_t* old_bytes, int old_len,
                                          int old_schema, int new_schema,
                                          uint8_t* buf, int buflen) {

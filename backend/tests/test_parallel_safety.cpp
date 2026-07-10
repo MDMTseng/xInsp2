@@ -65,15 +65,12 @@ static std::atomic<int> g_failures{0};
 // the storage and points the trigger thunks at its own canned state. (The owner
 // thunks g_owner_get_fn_/g_owner_set_fn_ are inline-defined in xi_async.hpp —
 // we only assign them, below.)
-void* g_use_process_fn_   = nullptr;
 void* g_use_exchange_fn_  = nullptr;
-void* g_use_grab_fn_      = nullptr;
 void* g_use_host_api_     = nullptr;
 void* g_trigger_info_fn_  = nullptr;
 void* g_trigger_image_fn_ = nullptr;
 void* g_trigger_sources_fn_ = nullptr;
 void* g_trigger_leader_fn_  = nullptr;
-void* g_trigger_meta_fn_    = nullptr;
 // A4 explicit per-run context thunks (this TU plays the host — see xi_io.hpp /
 // xi_result.hpp externs). g_run_ctx_get_fn_/set_fn_ are inline globals in
 // xi_async.hpp (we only assign them, in wire_run_ctx_thunks below).

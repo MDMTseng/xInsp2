@@ -237,10 +237,10 @@ void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         spawn_group_pool_(&srv, interval_ms);
 
         // The watchdog now tracks a per-inspect slot, so it protects every
-        // worker under N>1 (no longer bypassed). On a hard trip the backend
-        // exits for the FE to respawn; under N>1 the cooperative-cancel phase
-        // is global (aborts all in-flight frames that round). See
-        // run_one_inspection() + docs/guides/write-a-script.md.
+        // worker under N>1 (no longer bypassed). An overrunning inspect gets a
+        // grace window; if the same frame is still wedged after it, the backend
+        // exits for the FE to respawn. See the watchdog monitor thread in
+        // service_main.cpp + docs/guides/write-a-script.md.
 
         int n_threads = std::max(1, g_eng.plugin_mgr.project().dispatch_threads);
         // Health contract: dispatch is live → `running` (recompute may immediately

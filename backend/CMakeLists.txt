@@ -333,7 +333,7 @@ add_test(NAME golden_plugin COMMAND test_golden_plugin)
 # [ABI v12 THE CUT: OQ-7 static cross-plugin Record field contract removed. The
 #  xi_plugin_record_schema export + xi_record_schema.hpp were deleted with the
 #  Record data plane; schema_fixture_plugin.cpp and test_record_schema.cpp are
-#  gone. The pack plane carries its own schema (contract codegen / PackSchema),
+#  gone. The pack plane carries its own schema (contract codegen key arrays),
 #  covered by the pack tests.]
 
 # B2 — a plugin operator that throws must not unwind across the extern "C" ABI
@@ -671,8 +671,8 @@ else()
 endif()
 add_test(NAME parallel_safety COMMAND test_parallel_safety)
 
-# High-stress race nets for the owner-propagation + watchdog epoch-cancel GAPs
-# (§28 Tier-2/3). Same /openmp requirement as parallel_safety so parallel_for
+# High-stress race nets for the owner-propagation GAPs (§28 Tier-2/3).
+# Same /openmp requirement as parallel_safety so parallel_for
 # hits the real threaded owner-reinstall path. The _heavy variant scales the
 # contention; run under -DXINSP2_SANITIZE=address for the UAF/corruption subset.
 add_executable(test_owner_cancel_stress tests/test_owner_cancel_stress.cpp)

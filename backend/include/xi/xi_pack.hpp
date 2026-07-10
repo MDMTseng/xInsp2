@@ -439,20 +439,6 @@ struct Entry {
     xi_image_handle handle = XI_IMAGE_NULL;  // pool buffer (pooled forms)
     int32_t  w = 0, h = 0, c = 0;         // image descriptor dims
 };
-
-// One slot for the TYPED (schema) path. The key is IMPLICIT — it is the slot's
-// compile-time position — so no key string is stored and none is interned. A
-// slot carries the same payload duality as Entry (inline arena bytes OR a pool
-// buffer). `present` distinguishes a set slot from a declared-but-unset one.
-struct Slot {
-    PackTag tag = PackTag::I64;
-    bool     present = false;
-    bool     pooled  = false;
-    const uint8_t* inl = nullptr;
-    uint32_t inl_len = 0;
-    xi_image_handle handle = XI_IMAGE_NULL;
-    int32_t  w = 0, h = 0, c = 0;
-};
 } // namespace pack_detail
 
 class PackBuilder;

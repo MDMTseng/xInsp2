@@ -53,6 +53,7 @@
 #include "xi_instance.hpp"    // InstanceRegistry (owner -> live adapter)
 #include "xi_seh.hpp"         // seh_exception + recover_seh_stack_or_die
 #include "xi_clock.hpp"       // R2: mono_us() for cap-call latency metering
+#include "xi_json_escape.hpp" // the ONE JSON string-escape primitive (std-only leaf)
 
 #include <atomic>
 #include <cstdint>
@@ -299,13 +300,8 @@ public:
         for (const auto& [name, s] : stats_) {
             if (!first) out += ",";
             first = false;
-            out += "\"";
-            for (char ch : name) {   // minimal JSON-string escape (names are dotted ids)
-                if (ch == '"' || ch == '\\') { out += '\\'; out += ch; }
-                else if ((unsigned char)ch < 0x20) { char b[8]; std::snprintf(b, sizeof(b), "\\u%04x", ch); out += b; }
-                else out += ch;
-            }
-            out += "\":{\"calls\":"    + std::to_string(s.calls)
+            json_escape_into(out, name);   // the ONE escape primitive (quotes included)
+            out += ":{\"calls\":"          + std::to_string(s.calls)
                  + ",\"errors\":"      + std::to_string(s.errors)
                  + ",\"total_us\":"    + std::to_string(s.total_us)
                  + ",\"max_us\":"      + std::to_string(s.max_us) + "}";

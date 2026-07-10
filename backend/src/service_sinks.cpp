@@ -219,12 +219,6 @@ int use_exchange_cb(const char* name, const char* cmd,
     return n;
 }
 
-// grab() was the legacy pull model (xi::ImageSource queue). Sources now PUSH via
-// emit_record and scripts read current_trigger(), so there's nothing to grab.
-xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
-    return XI_IMAGE_NULL;
-}
-
 // polaris2 Gate P2 — xi::use(...).process(ScriptPack) wired into the script DLL:
 // drive the target plugin's xi.pack@1 pack door with a sealed host pack. Runs
 // INLINE on this thread under the same item-14 fault gates as the Record path
@@ -360,13 +354,12 @@ xi::crash::Context& crash_ctx() { return xi::crash::ctx(); }
 // Per-worker deadlines: the parallel dispatch pool (parallelism.dispatch_threads
 // > 1) runs N inspects at once, so the watchdog tracks a SLOT per in-flight
 // inspect (each arms a free slot on entry, clears it on exit). The monitor scans
-// all slots. On a deadline breach it first asks the script to cancel cooperatively
-// (a GLOBAL flag — under N>1 this aborts every in-flight frame, which is the
-// intended "something's wedged, bail this round" signal); if the script ignores
-// that for the grace window, the process is unrecoverable (a forced thread kill
-// would leak the per-instance lock + risk heap corruption), so the backend
-// exits and the FE supervisor respawns a clean one. See docs/guides/writing-a-
-// script.md (Parallel dispatch) + internals/fe-be.md.
+// all slots. On a deadline breach the overrunning inspect gets a grace window
+// (a merely-slow frame finishes and is left alone); if the SAME inspect is
+// still overrun after the grace it is wedged, and the process is unrecoverable
+// (a forced thread kill would leak the per-instance lock + risk heap
+// corruption), so the backend exits and the FE supervisor respawns a clean one.
+// See docs/guides/writing-a-script.md (Parallel dispatch) + internals/fe-be.md.
 // Per-slot inspect deadline (steady_clock epoch-ms); 0 = free. Written by the
 // dispatch/run thread that owns the slot, read by the watchdog thread.
 // WATCHDOG_EXIT_CODE moved to service_internal.hpp.

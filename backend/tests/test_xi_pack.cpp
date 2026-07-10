@@ -105,8 +105,9 @@ static void test_lifecycle_and_contract_layer() {
 
 // ------------------------------------------------------------------
 // Bool entry (pack-plane hardening — the json_source bool-entry gap): builder ->
-// canonical 0xc2/0xc3 arena byte -> tagged walk -> typed reads, on BOTH access
-// paths, fail-closed against i64 in both directions (an i64 0/1 is NOT a bool).
+// canonical 0xc2/0xc3 arena byte -> tagged walk -> typed reads on the dynamic
+// (string-keyed) path, fail-closed against i64 in both directions (an i64 0/1
+// is NOT a bool).
 // ------------------------------------------------------------------
 static void test_bool_entry() {
     // Dynamic (string-keyed) path.

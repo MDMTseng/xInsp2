@@ -264,7 +264,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 g_eng.script.set_use_callbacks(
                     nullptr,   // THE CUT: the Record use()->process bridge is gone
                     (void*)use_exchange_cb,
-                    (void*)use_grab_cb,
+                    nullptr,   // grab_fn slot retained in the ABI; SDK discards it
                     (void*)script_host_api_());
             }
             // polaris2 Gate P2: pack-door process callback, so scripts can
