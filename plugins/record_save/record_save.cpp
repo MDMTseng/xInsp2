@@ -17,6 +17,7 @@
 //
 
 #include <xi/xi_abi.hpp>
+#include <xi/xi_atomic_io.hpp>      // xi::atomic_write — temp+rename; no truncated .xex1 behind saved:true
 #include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
 #include "yyjson.h"   // parses def commands with yyjson
 #include "xex1_pack_dump.hpp"  // xi::xex1::encode_pack_v3 — the shared pack->v3 dump
@@ -28,6 +29,8 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 class RecordSave : public xi::Plugin {
@@ -57,13 +60,51 @@ public:
         std::vector<uint8_t> frame =
             xi::xex1::encode_pack_v3(in, channel, seq, has_channel, has_seq);
 
-        std::filesystem::create_directories(output_dir_);
-        std::string base = render_filename(naming_rule_, ++save_count_);
-        std::filesystem::path path = std::filesystem::path(output_dir_) / (base + ".xex1");
-        {
-            std::ofstream f(path.string(), std::ios::binary);
-            f.write(reinterpret_cast<const char*>(frame.data()), (std::streamsize)frame.size());
+        std::error_code dir_ec;
+        std::filesystem::create_directories(output_dir_, dir_ec);
+        if (dir_ec) {
+            out.boolean("saved", false)
+               .str("reason", "create_directories failed: " + dir_ec.message())
+               .str("output_dir", output_dir_);
+            return;
         }
+
+        // GUARD — path containment. render_filename copies non-token chars
+        // verbatim and fs::operator/ REPLACES the left side when the right is
+        // absolute, so an operator-supplied naming_rule like "../x" (or an
+        // absolute base) would write OUTSIDE output_dir_. Root cause: no
+        // sanitation of naming_rule/output_dir at config-set time
+        // (set_naming_rule / set_def); a fuller fix would validate/reject
+        // there. Until then: refuse any rendered base that could leave the
+        // directory and fail the save LOUD (saved:false + reason) rather than
+        // write outside. With separators, "..", and ':' rejected, base is a
+        // single lexical filename, so output_dir_/base cannot escape.
+        const int next_count = save_count_ + 1;   // advance ONLY after a successful write
+        std::string base = render_filename(naming_rule_, next_count);
+        if (base.empty()
+            || base.find('/')  != std::string::npos
+            || base.find('\\') != std::string::npos
+            || base.find("..") != std::string::npos
+            || base.find(':')  != std::string::npos) {
+            out.boolean("saved", false)
+               .str("reason", "naming_rule renders unsafe base name (empty, path separator, '..' or ':'): \"" + base + "\"");
+            return;
+        }
+        std::filesystem::path path = std::filesystem::path(output_dir_) / (base + ".xex1");
+
+        // Atomic + checked: the plain ofstream write here was unchecked, so
+        // disk-full / IO error shipped saved:true over a truncated or empty
+        // file. atomic_write stages to <path>.tmp, flushes, and renames —
+        // readers never observe a partial .xex1, and a failed write is
+        // reported honestly (saved:false, count NOT advanced).
+        const std::string_view bytes(reinterpret_cast<const char*>(frame.data()), frame.size());
+        if (!xi::atomic_write(path, bytes)) {
+            out.boolean("saved", false)
+               .str("reason", "write failed (disk full / IO error): " + path.string())
+               .i64("bytes", (int64_t)frame.size());
+            return;
+        }
+        save_count_ = next_count;
 
         out.boolean("saved", true)
            .i64("count", save_count_)

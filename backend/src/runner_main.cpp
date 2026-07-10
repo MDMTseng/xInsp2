@@ -324,6 +324,16 @@ int main(int argc, char** argv) {
         print_usage();
         return args.help ? 0 : 2;
     }
+    // --frames is operator input parsed with stoi and never range-checked: a
+    // negative value would wrap in the size_t reserve arithmetic below
+    // (frames * 256 → ~1.8e19) and terminate with an uncaught
+    // std::length_error before frame 0 — no report, and an exit outside the
+    // documented contract. Reject it here as a bad arg (infra failure, exit
+    // 2), same as a missing project folder / include dir.
+    if (args.frames < 0) {
+        std::fprintf(stderr, "[runner] bad --frames=%d — must be >= 0\n", args.frames);
+        return 2;
+    }
     if (!fs::exists(args.project_dir)) {
         std::fprintf(stderr, "[runner] project folder not found: %s\n", args.project_dir.c_str());
         return 2;
@@ -462,7 +472,16 @@ int main(int argc, char** argv) {
     std::string proj_json;
     xi::proto::json_escape_into(proj_json, args.project_dir);
     std::string body;
-    body.reserve(args.frames * 256);
+    // The reserve is a size HINT derived from operator input — cap the
+    // arithmetic so a huge (but valid) --frames can't make reserve() throw
+    // std::length_error or grab gigabytes up front. Past the cap the string
+    // simply grows on demand. (args.frames >= 0 is guaranteed by the arg
+    // check at startup.)
+    constexpr int kReserveFramesCap = 1 << 20;   // 1M frames → 256 MB hint max
+    const size_t reserve_frames = (args.frames < kReserveFramesCap)
+                                      ? (size_t)args.frames
+                                      : (size_t)kReserveFramesCap;
+    body.reserve(reserve_frames * 256);
     body += "{\"project\":";
     body += proj_json;
     // Identity envelope (additive; mirrors the live backend's run_result).
