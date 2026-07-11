@@ -128,13 +128,36 @@ next round has a record:
 - **Per-thread dispatch affinity/scheduling** (`service_dispatch.cpp`) stays a
   no-op. Process-level priority (`setpriority`) is done; thread affinity
   (`pthread_setaffinity_np` / `cpu_set_t`) + per-worker scheduling are not.
-- **~38 `examples/qa_*/driver.py` e2e drivers still `nt`-only.** Recipe:
-  `ports.backend_exe()` + drop the `os.name != "nt"` skip +
-  `LOCALAPPDATA/Temp` → `tempfile.gettempdir()` (with env `TMPDIR` so the Linux
-  backend honours the isolation dir). Ported+passing so far: qa_watchdog,
-  qa_reentrancy, qa_min_interval, qa_get_dashboard, qa_semaphore_queue,
-  qa_runtime_settings. Some surface real gaps that need a feature fix or a
-  scoped skip (e.g. `qa_local_auto` "image not delivered").
+- **`examples/qa_*/driver.py` e2e drivers.** Recipe: `ports.backend_exe()`/
+  `fe_exe()` + drop the `os.name != "nt"` skip + `LOCALAPPDATA/Temp` →
+  `tempfile.gettempdir()` (with env `TMPDIR` so the Linux backend honours the
+  isolation dir); Windows process tooling (`taskkill`/`tasklist`/PowerShell) →
+  POSIX (`os.kill`/`/proc/<pid>/fd`). **19 ported + passing on Linux:**
+  qa_watchdog, qa_reentrancy, qa_min_interval, qa_get_dashboard,
+  qa_semaphore_queue, qa_runtime_settings, qa_dispatch_groups, qa_edge,
+  qa_group_parallelism, qa_group_stress, qa_instance_def_recompile,
+  qa_overflow_block, qa_pack_poly_door, qa_param_state_isolation,
+  qa_plugin_queue_sim, qa_recipe_script_instance, qa_run_result,
+  qa_two_group_paths, qa_working_copy. The remaining ~26 are correctly ported
+  but SKIP on Linux because they hit backend/build gaps below (NOT per-driver
+  windowisms) — kept nt-only until those land, so they never falsely FAIL:
+    - **Global example plugins aren't built/loadable on Linux** (~17 drivers:
+      the `expose`/`mock_camera`/`blob_analysis`/`record_*`/… families). Two
+      sub-gaps: (a) the `plugins/` tree isn't built for Linux, and (b) the
+      plugin loader `dlopen`s the manifest's `xi-<name>.dll` verbatim with no
+      `.dll`→`.so` mapping, so even a built `.so` wouldn't resolve. This is the
+      single highest-value next step — it unblocks the whole pack-* / multi-plugin
+      driver set.
+    - **Image codec unavailable in the backend build** (qa_cap_imgcodec,
+      qa_cap_imgcodec_autoload, qa_jpeg_preview): the imgcodec capability factory
+      returns null (`opencv=no turbojpeg=no ipp=no` at toolchain-probe time),
+      so `xi.jpeg.encode` / `xi.image.decode` aren't offered. Needs the codec
+      (OpenCV imgcodecs or turbojpeg) linked + probed into the backend on Linux.
+    - Misc: `tools/export_bundle.py` is Windows-only (qa_export_bundle);
+      qa_local_auto's local auto image source delivers no frames; qa_cpu_affinity
+      needs per-thread affinity (separate deferred item above); qa_func/qa_recover
+      are FE-based + need the `expose` plugin or missing fixtures;
+      qa_lifecycle_teardown opens fixture projects absent from this branch.
 - **Precise plugin-quarantine crash attribution** wants a real dump on the
   faulting thread; the terminate-path minidump unwinds the fault frame (module
   blame is preserved via `xi::last_fault_addr()`, but the culprit cross-check is

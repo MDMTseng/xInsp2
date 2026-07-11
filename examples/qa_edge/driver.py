@@ -40,7 +40,9 @@ driver SKIPs on non-nt. The orphan guarantee maps to PR_SET_PDEATHSIG on Linux
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -50,9 +52,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(REPO_ROOT / "examples" / "lib"))
-from ports import free_port  # noqa: E402
+from ports import free_port, backend_exe, fe_exe  # noqa: E402
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
-FE_EXE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-fe{EXE_SUFFIX}"
+FE_EXE = fe_exe()
 
 # Ephemeral, probed-free ports (were the reserved 7910-7913): a stale/foreign
 # backend on a fixed port would make these edge tests false-fail.
@@ -80,31 +82,40 @@ def wait_port(port: int, up: bool, deadline_s: float) -> bool:
 
 
 def hard_kill_tree(pid: int) -> None:
-    """Force-kill a process tree by PID. Used to simulate a hard FE crash
-    (the case Ctrl-C does NOT cover). Per memory rule feedback_no_kill_unknown_node
-    we only ever pass a PID we ourselves spawned (the FE we launched)."""
-    if os.name != "nt":
+    """Force-kill the FE by PID to simulate a hard FE crash (the case Ctrl-C
+    does NOT cover). Per memory rule feedback_no_kill_unknown_node we only ever
+    pass a PID we ourselves spawned (the FE we launched). We deliberately kill
+    ONLY the FE (not its child backend): on Linux the backend must reap itself
+    via PR_SET_PDEATHSIG when its parent FE dies — that reap is exactly what the
+    orphan cases assert. On Windows the Job Object KILL_ON_JOB_CLOSE reaps it."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return
-    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def fe_handle_count(pid: int) -> int | None:
-    """Best-effort open-handle count for the FE process (QE-L1 leak check).
-    Uses 'tasklist /fi' which reports a Handles column only with /v on some
-    builds; if unavailable we return None and the caller treats QE-L1 as a
-    documented-but-unmeasured check rather than a failure."""
-    if os.name != "nt":
-        return None
+    """Best-effort open-handle/fd count for the FE process (QE-L1 leak check).
+    On Linux we count entries in /proc/<pid>/fd. On Windows the equivalent
+    (HandleCount) needs tooling we can't guarantee, so we return None and the
+    caller treats QE-L1 as a documented-but-unmeasured check."""
+    if os.name == "nt":
+        try:
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-Process -Id {pid}).HandleCount"],
+                stderr=subprocess.DEVNULL, timeout=10,
+            ).decode("utf-8", "ignore").strip()
+            return int(out)
+        except Exception:
+            return None
     try:
-        # `typeperf`/handle.exe aren't guaranteed; fall back to None gracefully.
-        out = subprocess.check_output(
-            ["powershell", "-NoProfile", "-Command",
-             f"(Get-Process -Id {pid}).HandleCount"],
-            stderr=subprocess.DEVNULL, timeout=10,
-        ).decode("utf-8", "ignore").strip()
-        return int(out)
-    except Exception:
+        return len(os.listdir(f"/proc/{pid}/fd"))
+    except OSError:
         return None
 
 
@@ -123,10 +134,6 @@ def launch_fe(port: int, project: str, fps: int, log_path: Path,
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: xinsp-fe + Job Object orphan-kill are Windows-only "
-              "(see docs/roadmap/linux-port.md)")
-        return 0
     if not FE_EXE.exists():
         sys.exit(f"FAIL: xinsp-fe not found: {FE_EXE}\n"
                  f"build it: cmake --build backend/build --config Release "
@@ -204,20 +211,28 @@ def main() -> int:
         log3.close()
 
     # ---- QE-S1: --project injection value is a PATH, not a shell -----------
-    # CreateProcessA receives argv directly (no cmd.exe), so a shell-ish value
-    # cannot spawn calc.exe. We assert: no calc.exe appeared, and the FE did not
-    # leave an orphan. The backend will simply fail to open the bogus path.
+    # execv/CreateProcessA receive argv directly (no /bin/sh, no cmd.exe), so a
+    # shell-ish --project value cannot execute an embedded command. We inject a
+    # value that WOULD create a sentinel file if any shell ever interpreted it,
+    # then assert the sentinel never appeared (and no orphan was left). The
+    # backend simply fails to open the bogus path.
     print("[QE-S1] --project shell-injection value is treated as a path, not run")
-    calc_before = _count_proc("calc.exe") + _count_proc("calculator.exe")
-    inject = 'bogus" & calc.exe & "tail'
+    sentinel = ROOT / "fixtures" / "qe_s1_pwned"
+    with contextlib.suppress(OSError):
+        sentinel.unlink()
+    if os.name == "nt":
+        inject = f'bogus" & echo pwned > "{sentinel}" & "tail'
+    else:
+        inject = f'bogus"; touch "{sentinel}"; "tail'
     proc4, log4 = launch_fe(PORT_INJECT, inject, 0, ROOT / "qe_s1.fe.log")
     try:
         time.sleep(3.0)   # give any (mis)spawn time to appear
-        calc_after = _count_proc("calc.exe") + _count_proc("calculator.exe")
-        summary["QE-S1_calc_spawned"] = calc_after > calc_before
-        if calc_after > calc_before:
-            failures.append("QE-S1: an injected calc.exe appeared — --project "
-                            "value reached a shell (CRITICAL security regression)")
+        pwned = sentinel.exists()
+        summary["QE-S1_injection_executed"] = pwned
+        if pwned:
+            failures.append("QE-S1: injected --project value created a sentinel "
+                            "file — value reached a shell (CRITICAL security "
+                            "regression)")
     finally:
         hard_kill_tree(proc4.pid)
         try:
@@ -268,19 +283,6 @@ def main() -> int:
         json.dumps({"pass": not failures, "failures": failures, "summary": summary},
                    indent=2), encoding="utf-8")
     return 1 if failures else 0
-
-
-def _count_proc(image: str) -> int:
-    if os.name != "nt":
-        return 0
-    try:
-        out = subprocess.check_output(
-            ["tasklist", "/fi", f"imagename eq {image}", "/fo", "csv", "/nh"],
-            stderr=subprocess.DEVNULL,
-        ).decode("utf-8", "ignore").lower()
-        return out.count(image.lower())
-    except Exception:
-        return 0
 
 
 if __name__ == "__main__":
