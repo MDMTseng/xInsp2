@@ -104,6 +104,42 @@
 
 ---
 
+## Deferred on the Linux port (with reasons)
+
+The headless backend is functionally complete + ctest-green on Linux/aarch64.
+These are known, deliberately-deferred items (not blockers), kept here so the
+next round has a record:
+
+- **`tools/gate.py` doesn't run on Linux yet.** Its `build` stage assumes the
+  Windows `build/Release` layout, and the `docs`/`sdk` stages need `node` on
+  PATH (absent on the Pi). The Linux batches are validated with `ninja` +
+  the full `ctest` (which also runs the doc-coverage / retired-terms gates) +
+  the relevant `examples/qa_*` e2e driver. Making `gate.py` platform-aware
+  (build-linux layout, skip/soft-fail node stages when node is absent) is the
+  port item so the ONE authoritative gate covers Linux too.
+- **FE↔backend Job-Object orphan parity.** `killpg` covers clean + signalled FE
+  exits; an FE that is itself SIGKILLed orphans the backend. Needs a cgroup or
+  pidfd babysitter for full parity (`fe_main.cpp`).
+- **`build:cmake` plugin build is not timeout-bounded on POSIX.** The Windows
+  path kills the tree after `kCmakeBuildTimeoutMs`; the POSIX `popen` path is
+  functional but unbounded (a wedged toolchain stalls the control plane). A
+  fork/exec + poll-timeout + `killpg` version (cf. certify's fork+waitpid) is
+  the follow-up (`xi_cmake_build.hpp`).
+- **Per-thread dispatch affinity/scheduling** (`service_dispatch.cpp`) stays a
+  no-op. Process-level priority (`setpriority`) is done; thread affinity
+  (`pthread_setaffinity_np` / `cpu_set_t`) + per-worker scheduling are not.
+- **~38 `examples/qa_*/driver.py` e2e drivers still `nt`-only.** Recipe:
+  `ports.backend_exe()` + drop the `os.name != "nt"` skip +
+  `LOCALAPPDATA/Temp` → `tempfile.gettempdir()` (with env `TMPDIR` so the Linux
+  backend honours the isolation dir). Ported+passing so far: qa_watchdog,
+  qa_reentrancy, qa_min_interval, qa_get_dashboard, qa_semaphore_queue,
+  qa_runtime_settings. Some surface real gaps that need a feature fix or a
+  scoped skip (e.g. `qa_local_auto` "image not delivered").
+- **Precise plugin-quarantine crash attribution** wants a real dump on the
+  faulting thread; the terminate-path minidump unwinds the fault frame (module
+  blame is preserved via `xi::last_fault_addr()`, but the culprit cross-check is
+  weaker). A signal-time dump would conflict with the fault-catching model.
+
 ## Going-forward rule
 
 **Any new code or bug fix from this point on should be cross-platform
