@@ -67,8 +67,10 @@ Reads hand back **borrowed spans** into the pack's arena/pool buffers, valid whi
 the caller's ref on the handle is held. There are no string literals at call sites
 in ported plugins: a plugin reads/writes with its schema's key **constants**
 (`_keys.gen.h`, see [`typed-io.md`](./typed-io.md)), still drift-proof, but the
-resolve across the door is by key **string** through the vtable, not by a
-compile-time offset (that offset speed is a same-DLL `TypedPack` property).
+resolve across the door is by key **string** through the vtable — there is no
+compile-time-offset path (the same-DLL `TypedPack<Schema>` container that
+offered one was deleted 2026-07-11, commit `cba51fe`, with zero production
+consumers).
 
 ### Storage duality (D1)
 

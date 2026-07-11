@@ -56,7 +56,9 @@ static void quarantine_instance_(const char* name, xi::CAbiInstanceAdapter* adap
 // Consult the caught-fault policy AFTER note_instance_crash_ has already marked the
 // instance runtime-`degraded`. reuse: nothing more (stays in service). reinit:
 // request a rebuild before the instance's next use. refuse: quarantine now.
-static void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+// External linkage (not static): cmd_exchange_instance_ (service_cmd_dispatch.cpp)
+// shares this fault boundary for its own plugin-entering exchange() call.
+void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* adapter) {
     switch (adapter->on_fault()) {
         case xi::OnFault::Reuse:  break;
         case xi::OnFault::Reinit: adapter->request_reinit(); break;
@@ -69,7 +71,9 @@ static void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* ad
 // failed rebuild keeps the old instance live and escalates to refuse after
 // kReinitEscalateAfter consecutive failures. Runs on the caller thread just before
 // process(); reinit() serializes itself via the instance's CallScope.
-static void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+// External linkage (not static): shared with cmd_exchange_instance_ — see
+// apply_on_fault_policy_ above.
+void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter) {
     // H5: CONSUME the pending flag with one atomic test-and-clear before rebuilding.
     // Two callers can both observe reinit_pending()==true and reach here (the outer
     // check is a cheap fast-path, not a gate); the exchange lets exactly ONE win.
@@ -116,36 +120,22 @@ static int use_push_pack_inline_(const char* name, xi_pack_handle pack) {
     if (!inst) return -1;
     auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
     if (!adapter || !adapter->has_pack_door()) return -4;
-    if (adapter->quarantined()) return -3;
-    if (adapter->reinit_pending()) {
-        apply_pending_reinit_(name, adapter);
-        if (adapter->quarantined()) return -3;
-    }
-    stamp_culprit_(name, inst->plugin_name());
-    try {
+    // Wave-2 #1: the six-step ritual now lives in guarded_plugin_call (data
+    // plane ⇒ quarantine-gated). The ack pack is dropped (fire-and-forget).
+    auto r = guarded_plugin_call(name, adapter, inst->plugin_name(), "pack door",
+                                 /*gate_quarantined=*/true, [&] {
         xi_pack_handle ack = adapter->run_pack_door(pack);
         if (ack != XI_PACK_NULL) xi::PackRegistry::instance().release(ack);
-        return 0;
-    } catch (const seh_exception& e) {
-        std::fprintf(stderr, "[xinsp2] use(\"%s\").push(pack) crashed: 0x%08X (%s)\n",
-                     name, e.code, e.what());
-        char why[96]; std::snprintf(why, sizeof(why), "pack door crashed: 0x%08X", e.code);
-        note_instance_crash_(name, why);
-        apply_on_fault_policy_(name, adapter);
-        xi::recover_seh_stack_or_die(e.code, "plugin pack door");
-        return -2;
-    } catch (...) {
-        std::fprintf(stderr, "[xinsp2] use(\"%s\").push(pack) threw exception\n", name);
-        note_instance_crash_(name, "pack door threw an exception");
-        apply_on_fault_policy_(name, adapter);
-        return -2;
-    }
+    });
+    if (r.kind == PluginCallResult::Kind::Quarantined) return -3;
+    if (!r.ok()) return -2;
+    return 0;
 }
 
 // J4: reject a use(sink).push() issued off the dispatch thread. Defined below,
-// next to the READ-path guard (warn_trigger_off_thread_) whose g_trigger_ctx_ /
-// g_current_trigger markers they reuse — forward-declared here so use_push_pack_cb
-// can call them before those thread-context markers are defined.
+// next to the READ-path guard (warn_trigger_off_thread_) whose A4 RunContext
+// (g_run_ctx owner_tid) they reuse — forward-declared here so use_push_pack_cb
+// can call them before those context helpers are defined.
 static bool push_off_dispatch_thread_();
 static void warn_push_off_thread_(const char* name);
 
@@ -177,16 +167,11 @@ int use_push_pack_cb(const char* name, xi_pack_handle pack) {
         // push() returns, so retain BEFORE returning. Balanced by
         // release_trigger_event_ at flush/drain.
         //
-        // L2: retain_untagged, NOT the owner-tagged retain(). This staged ref is
-        // the exact analogue of f_emit_pack's dispatch-event ref — taken here on
-        // the dispatch thread (where current_owner() is the SCRIPT owner S via the
-        // service_inspect OwnerGuard) but RELEASED off-guard by the bus releaser
-        // (release_trigger_event_ → f_release_for_bus → release_as(pack, 0)), which
-        // is deliberately unattributable. An owner-tagged retain would charge bucket
-        // S while the untagged release can't decrement it, stranding a phantom S
-        // bucket (transient Σbuckets ≤ rc over-count — diagnostic only, fail-closed,
-        // never an over-release). retain_untagged keeps both sides untagged so they
-        // balance, mirroring f_emit_pack's deliberate choice for the same reason.
+        // L2 (historical): under the old counted ledger this HAD to be
+        // retain_untagged to avoid stranding a phantom script-owner bucket.
+        // Under the single-creator-tag registry every retain is an untracked
+        // ++rc, so this pairs trivially with the bus releaser
+        // (release_trigger_event_ → f_release_for_bus → release_as(pack, 0)).
         xi::PackRegistry::instance().retain_untagged(pack);
         StagedEmit item;
         item.target   = name;
@@ -197,34 +182,41 @@ int use_push_pack_cb(const char* name, xi_pack_handle pack) {
     return use_push_pack_inline_(name, pack);
 }
 
+// Script→plugin request/reply (xi::use(name).exchange(cmd)). exchange() ENTERS
+// PLUGIN CODE, so it carries the same item-14 fault surface as its siblings
+// (use_push_pack_inline_ / use_pack_process_cb): refuse → -3 without entering
+// plugin code, pending reinit applied first, culprit stamped, and a caught
+// crash feeds note_instance_crash_ + apply_on_fault_policy_ — otherwise a
+// quarantined instance is still entered every frame via exchange(), and an
+// exchange()-only crash-loop never trips health/reinit/refuse.
+// NOTE on the crash return: this surface keeps -1 (NOT the pack path's -2).
+// The script-side caller (UseProxy::exchange, xi_use.hpp) treats -1 as the
+// terminal miss and RETRIES any other negative as "buffer too small, need -n
+// bytes" — a -2 would re-enter a just-crashed plugin once more. The -3
+// quarantine refuse is safe under that retry: the retry hits this gate again
+// and is refused without touching the plugin.
 int use_exchange_cb(const char* name, const char* cmd,
                            char* rsp, int rsplen) {
-    try {
-        auto inst = xi::InstanceRegistry::instance().find(name);
-        if (!inst) return -1;
+    if (!name) return -1;
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    // Item-14 gates live on the C-ABI adapter; a non-adapter instance has no
+    // quarantine/reinit state — guarded_plugin_call skips the gates/policy for
+    // a null adapter but keeps the culprit stamp + catch + stack recovery.
+    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    int n = 0;
+    auto r = guarded_plugin_call(name, adapter, inst->plugin_name(), "exchange()",
+                                 /*gate_quarantined=*/true, [&] {
         std::string result = inst->exchange(cmd);
-        int n = (int)result.size();
-        if (rsplen < n + 1) return -n;
+        int need = (int)result.size();
+        if (rsplen < need + 1) { n = -need; return; }
         std::memcpy(rsp, result.data(), result.size());
         rsp[result.size()] = 0;
-        return n;
-    } catch (const seh_exception& e) {
-        std::fprintf(stderr, "[xinsp2] use_exchange('%s') crashed: 0x%08X (%s)\n",
-                     name, e.code, e.what());
-        // Swallowed on a surviving thread (lane worker under a script's use().exchange(),
-        // or the command thread) — restore the stack guard page after an overflow.
-        xi::recover_seh_stack_or_die(e.code, "plugin exchange()");
-        return -1;
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "[xinsp2] use_exchange('%s') threw: %s\n", name, e.what());
-        return -1;
-    }
-}
-
-// grab() was the legacy pull model (xi::ImageSource queue). Sources now PUSH via
-// emit_record and scripts read current_trigger(), so there's nothing to grab.
-xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
-    return XI_IMAGE_NULL;
+        n = need;
+    });
+    if (r.kind == PluginCallResult::Kind::Quarantined) return -3;
+    if (!r.ok()) return -1;   // crash/throw stays -1 — see the retry note above
+    return n;
 }
 
 // polaris2 Gate P2 — xi::use(...).process(ScriptPack) wired into the script DLL:
@@ -271,35 +263,18 @@ int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out
     // U3: static misuse — checked BEFORE the fault gates (the plugin is never
     // entered, no health/quarantine state is touched).
     if (adapter->is_sink()) return -5;
-    if (adapter->quarantined()) return -3;
-    if (adapter->reinit_pending()) {
-        apply_pending_reinit_(name, adapter);
-        if (adapter->quarantined()) return -3;
-    }
     if (!adapter->has_pack_door()) return -4;      // Record-only plugin
-    stamp_culprit_(name, inst->plugin_name());
-    try {
+    // Wave-2 #1: shared fault boundary (data plane ⇒ quarantine-gated).
+    auto r = guarded_plugin_call(name, adapter, inst->plugin_name(), "pack door",
+                                 /*gate_quarantined=*/true, [&] {
         *out = adapter->run_pack_door(in);         // OwnerGuard + CallScope inside
-        return 0;
-    } catch (const seh_exception& e) {
-        std::fprintf(stderr, "[xinsp2] use_pack_process('%s') crashed: 0x%08X (%s)\n",
-                     name, e.code, e.what());
-        char why[96]; std::snprintf(why, sizeof(why), "pack door crashed: 0x%08X", e.code);
-        note_instance_crash_(name, why);
-        apply_on_fault_policy_(name, adapter);
-        // Same rationale as use_process_inline_: this boundary swallows the fault
-        // and the inspect continues on this worker — restore the guard page (or
-        // hard-exit for respawn) before returning to the script.
-        xi::recover_seh_stack_or_die(e.code, "plugin pack door");
+    });
+    if (r.kind == PluginCallResult::Kind::Quarantined) return -3;
+    if (!r.ok()) {
         *out = XI_PACK_NULL;                       // a torn result is never handed out
         return -2;
-    } catch (...) {
-        std::fprintf(stderr, "[xinsp2] use_pack_process('%s') threw exception\n", name);
-        note_instance_crash_(name, "pack door threw an exception");
-        apply_on_fault_policy_(name, adapter);
-        *out = XI_PACK_NULL;
-        return -2;
     }
+    return 0;
 }
 
 // ---- Trigger loop state ----
@@ -379,13 +354,12 @@ xi::crash::Context& crash_ctx() { return xi::crash::ctx(); }
 // Per-worker deadlines: the parallel dispatch pool (parallelism.dispatch_threads
 // > 1) runs N inspects at once, so the watchdog tracks a SLOT per in-flight
 // inspect (each arms a free slot on entry, clears it on exit). The monitor scans
-// all slots. On a deadline breach it first asks the script to cancel cooperatively
-// (a GLOBAL flag — under N>1 this aborts every in-flight frame, which is the
-// intended "something's wedged, bail this round" signal); if the script ignores
-// that for the grace window, the process is unrecoverable (a forced thread kill
-// would leak the per-instance lock + risk heap corruption), so the backend
-// exits and the FE supervisor respawns a clean one. See docs/guides/writing-a-
-// script.md (Parallel dispatch) + internals/fe-be.md.
+// all slots. On a deadline breach the overrunning inspect gets a grace window
+// (a merely-slow frame finishes and is left alone); if the SAME inspect is
+// still overrun after the grace it is wedged, and the process is unrecoverable
+// (a forced thread kill would leak the per-instance lock + risk heap
+// corruption), so the backend exits and the FE supervisor respawns a clean one.
+// See docs/guides/writing-a-script.md (Parallel dispatch) + internals/fe-be.md.
 // Per-slot inspect deadline (steady_clock epoch-ms); 0 = free. Written by the
 // dispatch/run thread that owns the slot, read by the watchdog thread.
 // WATCHDOG_EXIT_CODE moved to service_internal.hpp.
@@ -418,44 +392,25 @@ void wd_disarm(int slot) { if (slot >= 0) g_eng.wd_deadlines[slot].store(0); }  
 // dispatch threads can each have their own current trigger.
 thread_local const xi::TriggerEvent* g_current_trigger = nullptr;   // DEFINED here (decl in header)
 
-// F4: per-thread trigger-context marker — "this thread is INSIDE, or a CHILD of,
-// a trigger-bearing inspect". THREAD-LOCAL and RELATIONAL (this replaces the old
-// A1 process-global inspect_tid, which was a single atomic holding the last
-// scope's tid — a fatally unsound heuristic under max_parallel>1: a benign
-// timer-tick worker on lane B calling current_trigger() would see lane A's tid !=
-// 0 and abort, even though B never had a trigger; and lane B's scope storing 0
-// masked a genuine off-thread misuse on lane A).
-//
-// The marker is set by CurrentTriggerScope on the inspect thread, and PROPAGATED
-// BY VALUE into the worker threads xi::async / xi::parallel_for spawn (via the
-// trigger_ctx get/set thunks, exactly like the image-pool owner). So:
-//   * inspect thread of a triggered frame  → marker=1, g_current_trigger != null
-//     (warn is never reached — the thunk returns the real trigger).
-//   * a child worker of that inspect        → marker=1 (propagated), but
-//     g_current_trigger==null (thread_local, not inherited): the script read the
-//     ambient trigger off-thread instead of snapshotting → fail loud. DETECTED.
-//   * a timer-tick / plain cmd:run worker    → marker=0 (its inspect had no
-//     CurrentTriggerScope): reading current_trigger() is the legitimate "no
-//     trigger" case → quiet, even while ANOTHER lane runs a triggered frame.
-// TRADEOFF: a hand-rolled `#pragma omp` region (NOT xi::parallel_for) that reads
-// the ambient trigger off-thread is no longer flagged — the marker only rides the
-// blessed primitives. That is the correct trade: the old heuristic "caught" it
-// only by also aborting correct programs, and TriggerSnapshot / the A4 explicit
-// entry make the off-thread ambient read unnecessary anyway.
-static thread_local int g_trigger_ctx_ = 0;
-
-// F4: bridge the marker across the ABI seam for xi::async / xi::parallel_for.
-uint32_t trigger_ctx_get_cb()      { return (uint32_t)g_trigger_ctx_; }
-void     trigger_ctx_set_cb(uint32_t v) { g_trigger_ctx_ = (int)v; }
-
-// F4: invoked from a trigger thunk's "no current trigger" branch. Fires ONLY when
-// THIS thread is inside / a child of a trigger-bearing inspect (marker set here or
-// propagated from the spawning inspect) yet the ambient trigger is null here — the
-// off-thread-read silent-bug class. When the marker is 0 (genuinely no trigger on
-// this thread's lineage: plain cmd:run / timer tick, on any lane) it returns
-// quietly so the thunk preserves its empty / XI_IMAGE_NULL semantics.
+// F4: invoked from the trigger info thunk's "no current trigger" branch. The
+// relational detection now rides the A4 explicit RunContext (g_run_ctx) instead
+// of a separate integer marker: the context is installed on the dispatch thread
+// (carrying owner_tid + had_trigger) and PROPAGATED BY VALUE onto xi::async /
+// xi::parallel_for / xi::spawn_worker workers, while g_current_trigger stays
+// thread_local and is NOT inherited. So the ambient current_trigger() is null on
+// a worker even though the context is present. Fire ONLY when this is a worker of
+// a TRIGGERED run — the context is present, its owner_tid differs from this
+// thread (⇒ a spawned worker, not the dispatch thread), and the run carried a
+// trigger (had_trigger). A dispatch thread of a triggered frame never reaches
+// here (g_current_trigger != null); a timer-tick / plain cmd:run thread has
+// had_trigger == false, so reading current_trigger() there is the legitimate "no
+// trigger" case → quiet. A hand-rolled `#pragma omp` region (NOT the blessed
+// primitives) keeps the context of the thread it runs on, so an off-thread read
+// from one is not flagged — the same documented trade as before.
 static void warn_trigger_off_thread_() {
-    if (g_trigger_ctx_ == 0) return;   // this thread's lineage has no trigger
+    if (!(g_run_ctx && g_run_ctx->had_trigger &&
+          g_run_ctx->owner_tid != std::this_thread::get_id()))
+        return;   // dispatch thread, or no triggered run in this thread's lineage
     static constexpr const char* kMsg =
         "[xinsp2] current_trigger() called off the inspect thread — read the "
         "trigger ON the inspect thread and capture into the parallel body "
@@ -473,18 +428,25 @@ static void warn_trigger_off_thread_() {
 }
 
 // J4: WRITE-path analogue of the READ guard above — is this use(sink).push()
-// running off the dispatch thread? Detected the SAME way: g_trigger_ctx_ marks
-// "this thread is inside / a child of a trigger-bearing inspect" (set by
-// CurrentTriggerScope, propagated into xi::async / xi::parallel_for workers), while
-// g_current_trigger is thread_local and NOT inherited. So on the real dispatch
-// thread of a triggered frame g_current_trigger != null (→ allowed; its g_staged IS
-// flushed after the inspect); on a timer-tick / cmd:run dispatch thread the marker
-// is 0 (→ allowed; the same thread flushes). A CHILD worker of a triggered inspect
-// has marker=1 but g_current_trigger==null → its g_staged is never drained → REJECT.
-// Same documented blind spot as the read guard: a child of a source-less (marker-0)
-// inspect is not flagged (the marker only rides the blessed primitives).
+// running off the dispatch thread? push() STAGES into the dispatch thread's
+// thread_local g_staged, which is drained ONLY on that thread (drain_/flush_
+// staged_emits_); a push from a spawned worker would stage into THAT worker's
+// never-flushed g_staged (leaked ref + dropped delivery). Staging genuinely
+// cannot be made worker-safe here, so the rejection is PRESERVED — but now driven
+// off the A4 RunContext, not the retired marker: the context carries owner_tid
+// (the dispatch thread that owns g_staged) and is propagated by value onto
+// workers, so a tid mismatch means "spawned worker" for BOTH triggered and
+// timer-tick / cmd:run dispatch threads (each installs its own owner_tid). Off a
+// run entirely (g_run_ctx == null) nothing is staged, so allow. A DETACHED SNAPSHOT
+// (a spawn_worker context — result_slot nulled) is rejected on the result_slot
+// marker FIRST (structural — independent of the owner_tid comparison). Wave-2 #5:
+// the snapshot now keeps the PARENT's owner_tid (A4 symmetry — the READ guard
+// warn_trigger_off_thread_ needs the tid mismatch to fire on a spawn_worker like
+// on async/parallel_for); this rejection never depended on the worker-tid stamp.
 static bool push_off_dispatch_thread_() {
-    return g_trigger_ctx_ != 0 && g_current_trigger == nullptr;
+    if (!g_run_ctx) return false;               // off any run: nothing staged here
+    if (!g_run_ctx->result_slot) return true;   // detached snapshot (spawn_worker): never flushed → reject
+    return g_run_ctx->owner_tid != std::this_thread::get_id();
 }
 
 // Once-per-sink-name loud rejection of an off-dispatch-thread push. Mirrors
@@ -494,6 +456,17 @@ static bool push_off_dispatch_thread_() {
 // visible programming error instead of a silent leak.
 static void warn_push_off_thread_(const char* name) {
     std::string key = name ? name : "";
+#ifdef NDEBUG
+    // E1 (burr audit): check-then-build, matching the xi_use.hpp warn-once
+    // siblings — the message string is only assembled on the FIRST (warning)
+    // pass per sink name; the steady-state repeat path does the map probe only.
+    static std::mutex mu;
+    static std::unordered_map<std::string, bool> warned;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (!warned.emplace(key, true).second) return;   // warned this sink already
+    }
+#endif
     std::string msg =
         "xi::use(\"" + key + "\").push(pack) called off the inspect/dispatch thread — "
         "push() stages into the dispatch thread's ordered-sink queue, which is never "
@@ -505,12 +478,6 @@ static void warn_push_off_thread_(const char* name) {
     std::fflush(stderr);
     std::abort();
 #else
-    static std::mutex mu;
-    static std::unordered_map<std::string, bool> warned;
-    {
-        std::lock_guard<std::mutex> lk(mu);
-        if (!warned.emplace(key, true).second) return;   // warned this sink already
-    }
     std::fprintf(stderr, "ERROR: %s\n", msg.c_str());
 #endif
 }
@@ -542,16 +509,14 @@ void release_trigger_event_(xi::TriggerEvent& ev) {   // decl in header (cross-T
 // (they touch the file-local release_trigger_event_).
 CurrentTriggerScope::CurrentTriggerScope(xi::TriggerEvent& ev) : ev_(ev) {
     g_current_trigger = &ev;
-    // F4: mark THIS thread as inside a trigger-bearing inspect. xi::async /
-    // xi::parallel_for read this marker (via trigger_ctx_get_cb) at spawn time and
-    // re-install it on their worker threads, so a child that reads current_trigger()
-    // off-thread is caught — while a timer-tick worker on another lane (marker 0)
-    // is not. Not nested (the dispatch worker runs one inspect at a time), so a
-    // plain set/clear mirrors the pre-existing g_current_trigger discipline.
-    g_trigger_ctx_ = 1;
+    // F4: the "this run carried a trigger" signal now rides the A4 RunContext
+    // (RunContextScope, installed by run_inspection_compute_ with had_trigger =
+    // g_current_trigger != null) instead of a separate marker set here — so the
+    // scopes stay decoupled and there is one carrier. g_current_trigger remains
+    // thread_local + not propagated (its off-thread nullness is what the read
+    // guard keys on).
 }
 CurrentTriggerScope::~CurrentTriggerScope() {
-    g_trigger_ctx_ = 0;
     g_current_trigger = nullptr;
     release_trigger_event_(ev_);
 }
@@ -605,6 +570,16 @@ void flush_staged_emits_(int64_t run_id) {   // decl in header
             use_push_pack_inline_(it.target.c_str(), it.rec.pack);
         release_trigger_event_(it.rec);   // drops our staged pack ref on every path
     }
+    // B4 (burr audit): hand the local's CAPACITY back to g_staged so the next
+    // frame's push() doesn't re-allocate from zero (the move-out above stripped
+    // it every frame). Every element was released in the loop, so clear() drops
+    // no live ref. Guarded on g_staged.empty(): staging during the flush can't
+    // happen today (use(...).push is script-only and a sink's pack door can't
+    // re-enter the script), but if that ever changes a re-staged item must not
+    // be swapped away. On a mid-flush throw we skip the swap — losing capacity
+    // is fine; the throw-safety the move-out bought is unchanged.
+    staged.clear();
+    if (g_staged.empty()) g_staged.swap(staged);
 }
 
 // CurrentTriggerInfoC struct moved to service_internal.hpp.
@@ -650,5 +625,32 @@ void owner_set_cb(uint32_t id) {
 const xi_host_api* script_host_api_() {
     static xi_host_api use_host = xi::ImagePool::make_host_api();
     return &use_host;
+}
+
+// ---- project-boundary reset (Wave-2 #3) --------------------------------------
+// Drop every piece of engine state that belongs to the project being replaced:
+//   * the bus sink + per-source emit-time map (source names are per-project;
+//     a stale sink can fire into a torn-down project, and the emit-time map
+//     otherwise accumulates across every open→emit→close cycle);
+//   * the script replay shadows (param_cache / instance_def_cache) and the U2
+//     kv channel. open/close/create_project do NOT unload the inspection script
+//     DLL (script lifecycle is independent of the project's plugin DLLs), so
+//     without this the next project's compile_and_load would capture the PRIOR
+//     project's xi::kv() and replay the prior project's tuned param/def values
+//     over any same-named declarations — running project B with project A's
+//     calibration and silently mis-verdicting (the documented cross-project
+//     leak class).
+// Root cause of the extraction: this block was duplicated verbatim in
+// cmd_open_project_ and cmd_close_project_, and MISSING from
+// cmd_create_project_ (which also replaces the project) — one primitive, three
+// callers, no third copy to drift.
+void reset_project_boundary_state_() {   // decl in header (cross-TU)
+    xi::TriggerBus::instance().clear_sink();
+    xi::TriggerBus::instance().reset();
+    std::lock_guard<std::mutex> lk(g_eng.script_mu);
+    g_eng.param_cache.clear();
+    g_eng.instance_def_cache.clear();
+    g_eng.persistent_kv_bytes.clear();
+    g_eng.persistent_kv_schema = 0;
 }
 

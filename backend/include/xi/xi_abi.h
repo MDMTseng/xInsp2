@@ -322,8 +322,8 @@ typedef struct xi_log_v1 {
 /*                                                                      */
 /* The Pack crosses as an OPAQUE HANDLE + accessor C functions (spans  */
 /* in/out) — NEVER as raw struct layout (doc 02 r1: raw C++ layout +    */
-/* hot-reload skew = silent corruption). The C++ TypedPack/PackSchema */
-/* sugar (xi_pack.hpp) is SDK-side over these C accessors. Handles are  */
+/* hot-reload skew = silent corruption). The C++ Pack container sugar   */
+/* (xi_pack.hpp) is SDK-side over these C accessors. Handles are        */
 /* minted only by the host's Pack allocator (doc 07 ingress rule).     */
 /* ------------------------------------------------------------------ */
 

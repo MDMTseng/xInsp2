@@ -25,7 +25,8 @@
 
 namespace xi {
 
-inline bool PluginManager::create_project(const std::string& folder, const std::string& name) {
+inline bool PluginManager::create_project(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                          const std::string& folder, const std::string& name) {
     std::lock_guard<std::mutex> lk(mu_);
     std::filesystem::create_directories(folder);
     std::filesystem::create_directories(std::filesystem::path(folder) / "instances");
@@ -63,7 +64,7 @@ inline bool PluginManager::create_project(const std::string& folder, const std::
     return true;
 }
 
-inline void PluginManager::close_project() {
+inline void PluginManager::close_project(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/) {
     std::lock_guard<std::mutex> lk(mu_);
     for (auto& [k, v] : project_.instances) {
         InstanceRegistry::instance().remove(k);
@@ -92,7 +93,25 @@ inline void PluginManager::close_project() {
     for (auto& key : project_loaded_plugins_) {
         auto it = plugins_.find(key);
         if (it != plugins_.end()) {
-            if (it->second.handle) FreeLibrary(it->second.handle);   // TODO(linux): dlclose
+            // RT5/N1/J2/J3/L1/O2 family — DLL teardown without machine-provider
+            // reconciliation. A machine autoload provider can be backed by a
+            // module this loop is about to FreeLibrary (an autoload-eligible
+            // PROJECT plugin, or a global lib plugin this project's same-named
+            // plugin shadowed in plugins_). The autoload reconciler at the end
+            // of close_project only ADDS providers — it never removes a stale
+            // machine_instances_ entry, and for a plugin erased from plugins_
+            // below it can't recreate one either — so pre-fix the provider's
+            // InstanceRegistry entry + CapRegistry registrations stayed ACTIVE
+            // with handlers pointing into the UNMAPPED module (forever, for an
+            // erased plugin; and even transiently a plugin-owned thread is
+            // outside close_project's host-dispatch drain and can call into
+            // freed code). Evict BEFORE FreeLibrary — evict_machine_provider_
+            // locked_ sweeps this owner's cap names synchronously, so no
+            // handler outlives the module. close_project is full teardown, so
+            // unload with NO reinstate is correct here; the reconciler below
+            // reinstates any provider whose global DLL is still mapped,
+            // exactly as before.
+            unload_module_locked_(key);
             plugins_.erase(it);
         }
     }
@@ -116,7 +135,7 @@ inline void PluginManager::close_project() {
 // Commit: mirror the working copy back onto the canonical project (adds +
 // overwrites + deletes removed files), so the on-disk project reflects every
 // edit made this session. No-op error if no working copy is active.
-inline bool PluginManager::commit_working_copy() {
+inline bool PluginManager::commit_working_copy(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/) {
     std::lock_guard<std::mutex> lk(mu_);
     if (canonical_path_.empty()) return false;
     // Journal the commit so an interruption (crash/power loss mid-mirror) is
@@ -151,7 +170,7 @@ inline bool PluginManager::commit_working_copy() {
 
 // Discard: blow away the working copy and re-seed it from the canonical
 // project, then reopen. Returns false if no working copy is active.
-inline bool PluginManager::reopen_fresh_working_copy() {
+inline bool PluginManager::reopen_fresh_working_copy(const QuiesceToken& quiesced /*proof the caller has quiesced dispatch*/) {
     std::string canon;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -159,7 +178,8 @@ inline bool PluginManager::reopen_fresh_working_copy() {
         canon = canonical_path_;
     }
     // close_project()/open_project() each take mu_ — don't hold it here.
-    close_project();
+    // (Both are destructive; the caller's quiesce proof threads through.)
+    close_project(quiesced);
     std::error_code ec;
     // CRASH-RECOVERY GUARD (bug #14). Discard's contract is "throw away my
     // UNCOMMITTED working-copy edits". A *pending commit* (kCommitMarker
@@ -184,10 +204,11 @@ inline bool PluginManager::reopen_fresh_working_copy() {
         std::fprintf(stderr, "[xinsp2] working copy: discard KEPT scratch — pending "
                      "commit heal failed; reopen will retry roll-forward\n");
     }
-    return open_project(canon, /*working_copy=*/true);   // re-seeds from canonical
+    return open_project(quiesced, canon, /*working_copy=*/true);   // re-seeds from canonical
 }
 
-inline bool PluginManager::open_project(const std::string& folder_arg, bool working_copy) {
+inline bool PluginManager::open_project(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                        const std::string& folder_arg, bool working_copy) {
     std::lock_guard<std::mutex> lk(mu_);
 
     // Roll forward an interrupted working-copy commit before touching
@@ -264,7 +285,15 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     for (auto& key : project_loaded_plugins_) {
         auto it = plugins_.find(key);
         if (it != plugins_.end()) {
-            if (it->second.handle) FreeLibrary(it->second.handle);   // TODO(linux): dlclose
+            // RT5/N1 family, third evict site (project-over-project reopen):
+            // this loop used to FreeLibrary with NO machine-provider evict, so
+            // a live "@auto:" adapter backed by the previous project's module
+            // kept ACTIVE CapRegistry handlers pointing into the unmapped DLL
+            // — the first capability call after the reopen crashed. Unload
+            // through the one primitive (evict-then-free, synchronous cap
+            // sweep); the autoload reconcile after this open reinstates any
+            // provider whose global DLL is still mapped.
+            unload_module_locked_(key);
             plugins_.erase(it);
         }
     }
@@ -282,6 +311,26 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     auto name_opt = extract_string(content, "name");
     if (name_opt) project_.name = *name_opt;
     auto script_opt = extract_string(content, "script");
+    // SECURITY (P1): `script` is VERBATIM from project.json and becomes the
+    // cl.exe SOURCE for the project compile — joined with operator/, an
+    // absolute value discards the project folder and a "../" chain climbs out
+    // of it, so a semi-trusted project could compile+run an out-of-tree,
+    // pre-planted source file. Refuse the open loudly (same fail-loud shape
+    // as the schema gate below: last_open_error_ + stderr + return false)
+    // rather than degrade — a project whose script points outside its own
+    // tree is hostile or broken either way. See path_is_contained
+    // (xi_pm_parse.hpp) for the guard + threat model.
+    if (script_opt &&
+        !path_is_contained(std::filesystem::path(folder), *script_opt)) {
+        last_open_error_ =
+            "project.json 'script' (\"" + *script_opt + "\") is absolute or "
+            "escapes the project folder ('..') — refusing to open: the "
+            "inspection script must live inside the project tree "
+            "(path-containment guard; an out-of-tree script would be compiled "
+            "and executed from an arbitrary machine path).";
+        std::fprintf(stderr, "[xinsp2] %s\n", last_open_error_.c_str());
+        return false;
+    }
     if (script_opt) project_.script_path = (std::filesystem::path(folder) / *script_opt).string();
     else            project_.script_path = (std::filesystem::path(folder) / "inspect.cpp").string();
 
@@ -695,7 +744,7 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         // path's check.
                         std::string err;
                         if (!plugin_abi_compatible(pi2.handle, *plugin, pi2.json_fallback, &err)) {
-                            FreeLibrary(pi2.handle);
+                            FreeLibrary(pi2.handle);   // raw is fine: just-loaded module failed its load gate — no provider registered against it
                             pi2.handle = nullptr;
                             last_open_warnings_.push_back(
                                 {inst_name, *plugin, "plugin ABI mismatch: " + err});
@@ -708,7 +757,7 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         // surfacing as the ABI gate just above (skip the instance,
                         // record the reason in last_open_warnings_).
                         if (!plugin_caps_compatible(pi2, &default_host_api(), *plugin, &err)) {
-                            FreeLibrary(pi2.handle);
+                            FreeLibrary(pi2.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
                             pi2.handle = nullptr;
                             last_open_warnings_.push_back(
                                 {inst_name, *plugin, "plugin capability gate: " + err});
@@ -727,7 +776,7 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         // and clear handle so the entry stays in a
                         // clean "not loaded" state.
                         if (!pi2.c_factory) {
-                            FreeLibrary(pi2.handle);
+                            FreeLibrary(pi2.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
                             pi2.handle = nullptr;
                             last_open_warnings_.push_back(
                                 {inst_name, *plugin,

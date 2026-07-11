@@ -43,8 +43,26 @@ static void emit_run_event_(xi::ws::Server& srv, int64_t run_id, const char* nam
 // globals/thread-locals compute snapshotted (rr_source/rr_group off the thread_local
 // trigger, the script handle). Deliberately NOT here: the EmitTurn and StagedEmitGuard,
 // whose RAII lifetimes straddle the seam and MUST stay in the driver.
+// B7 (burr audit): the per-frame script snapshot. run_inspection_compute_ used
+// to copy the WHOLE LoadedScript (out.s = g_eng.script) under script_mu every
+// frame — including the `path` std::string, which no frame path ever reads
+// (errors here report via run_id/frame_path, never the DLL path). Snapshot only
+// what a frame needs: the module-lifetime pin (shared_ptr copy = one atomic
+// bump, and it's what keeps the fn pointers below valid), the pool owner id,
+// and the three entry pointers the inspect drives.
+struct ScriptSnap {
+    std::shared_ptr<void> module_lifetime;   // keeps the script DLL mapped for this run
+    xi::ImagePoolOwnerId  owner_id = 0;
+    xi::script::LoadedScript::InspectFn   inspect    = nullptr;
+    xi::script::LoadedScript::InspectTvFn inspect_tv = nullptr;
+    xi::script::LoadedScript::ResetFn     reset      = nullptr;
+    // Same truth as LoadedScript::ok(): module_lifetime is set iff load_script
+    // succeeded (alongside handle), and one entry export must be present.
+    bool ok() const { return module_lifetime && (inspect || inspect_tv); }
+};
+
 struct RunOutcome {
-    xi::script::LoadedScript s;      // script snapshot (also used for the set_run_context clear)
+    ScriptSnap  s;                   // script snapshot (see ScriptSnap above)
     bool        inspect_ok = false;  // set exactly once by compute
     std::string run_error_what;      // run_error payload (empty on success)
     int64_t     dt_us = 0;           // inspect latency, measured once after inspect
@@ -69,7 +87,13 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
                                     RunOutcome& out) {
     {
         std::lock_guard<std::mutex> lk(g_eng.script_mu);
-        out.s = g_eng.script;
+        // B7: field-wise snapshot — no `path` string copy per frame. The
+        // module_lifetime copy pins the DLL exactly as the whole-struct copy did.
+        out.s.module_lifetime = g_eng.script.module_lifetime;
+        out.s.owner_id        = g_eng.script.owner_id;
+        out.s.inspect         = g_eng.script.inspect;
+        out.s.inspect_tv      = g_eng.script.inspect_tv;
+        out.s.reset           = g_eng.script.reset;
         // Snapshot the active-script generation under the SAME lock as the
         // script handle, so the reported generation is exactly the one that
         // owns the DLL this run will call. A swap to N+1 that happens mid-run
@@ -77,7 +101,7 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         // emit). 0 stays 0 when no script has ever loaded.
         out.rr_script_gen = g_eng.script_generation.load(std::memory_order_relaxed);
     }
-    xi::script::LoadedScript& s = out.s;
+    ScriptSnap& s = out.s;
 
     if (!s.ok()) {
         xp::LogMsg lm;
@@ -87,21 +111,11 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         return false;
     }
 
-    // Plumb the optional per-run context (frame_path) into the script
-    // DLL's globals before inspect runs. Cleared on the way out (in the
-    // emission half, success path) so a subsequent run with no frame_path
-    // arg sees an empty string, not the previous value.
-    if (s.set_run_context) s.set_run_context(frame_path.c_str());
-    // U3 (docs/new_gen/17): publish this run's arrival/run id to the script
-    // (xi::run_id()) — the host truth a pack producer stamps into its `$seq`
-    // ENTRY before seal (the host never stamps a sealed pack). Cleared with
-    // the frame_path on the way out.
-    if (s.set_run_id) s.set_run_id((long long)run_id);
-
     // Per-run Result: reset to NA before the script runs, and snapshot the
     // source/group provenance from this thread's trigger (thread_local, valid
     // for the duration of the inspect). The script sets the result via
-    // xi::result() → result_cb → g_run_result; emission reads it below in the gate.
+    // xi::result() → result_cb → the run context's result_slot (this thread's
+    // g_run_result); emission reads it below in the gate.
     g_run_result = RunResult{};
     if (g_current_trigger) {
         out.rr_source = g_current_trigger->leader_source;
@@ -109,25 +123,49 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         out.rr_trigger_hex = trigger_id_hex(g_current_trigger->id);   // additive: this run's trigger id
     }
 
+    // A4 explicit per-run context: install run_id + frame_path (+ the verdict slot
+    // and dispatch-thread identity) for the WHOLE inspect, replacing the ambient
+    // run_id/frame_path TLS the host used to push into the script. It is PROPAGATED
+    // BY VALUE onto xi::async / xi::parallel_for / xi::spawn_worker workers, so
+    // xi::run_id() / xi::current_frame_path() / xi::result() are correct on any
+    // thread (closing the spawn gap) and fail loud off a run. had_trigger records
+    // whether this frame carried a trigger (g_current_trigger set by the dispatch's
+    // CurrentTriggerScope), driving the off-thread read/push detection. The scope
+    // spans the inspect call below and unwinds when this function returns.
+    RunContextScope run_ctx((long long)run_id, frame_path, g_current_trigger != nullptr);
+
     emit_run_event_(srv, run_id, "run_started");
 
     auto t0 = std::chrono::steady_clock::now();
     // Arm the watchdog: claim a per-inspect slot holding this inspect's
     // deadline. Works for any dispatch_threads (N slots), unlike the old
-    // single-slot scheme that had to skip N>1. Cleared below regardless of
-    // throw. No thread handle is kept — a hard trip exits the process (FE
-    // respawns) rather than TerminateThread'ing a worker (which would leak the
-    // per-instance lock + risk heap corruption).
-    int wd_slot = -1;
-    int wd_ms = g_eng.watchdog_ms.load();
-    if (wd_ms > 0) {
-        // D-P1-10: deadline must use steady_clock (monotonic) — a system_clock
-        // NTP/DST jump would skip every deadline or hang the watchdog forever.
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wd_ms);
-        wd_slot = wd_arm(std::chrono::duration_cast<std::chrono::milliseconds>(
-                             deadline.time_since_epoch()).count());
-    }
-    auto disarm = [&]() { wd_disarm(wd_slot); wd_slot = -1; };
+    // single-slot scheme that had to skip N>1. No thread handle is kept — a
+    // hard trip exits the process (FE respawns) rather than TerminateThread'ing
+    // a worker (which would leak the per-instance lock + risk heap corruption).
+    // RAII (watchdog-leak family): the arm/disarm pair used to be a manual
+    // ritual — the lambda called at 4 exits — so any future early exit that
+    // forgot it leaked an ARMED slot, whose deadline permanently overruns and
+    // false hard-trips _Exit, killing the backend on a later healthy frame.
+    // Arm in ctor, disarm in dtor; disarm() is the deliberate mid-scope early
+    // disarm (success + catch paths disarm BEFORE their tail work so error
+    // reporting / SEH stack recovery never counts against the inspect
+    // deadline). Idempotent, so the dtor backstop after an early disarm is a
+    // no-op (wd_disarm already ignores slot < 0).
+    struct WdSlot {
+        int slot = -1;
+        explicit WdSlot(int wd_ms) {
+            if (wd_ms <= 0) return;
+            // D-P1-10: deadline must use steady_clock (monotonic) — a system_clock
+            // NTP/DST jump would skip every deadline or hang the watchdog forever.
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wd_ms);
+            slot = wd_arm(std::chrono::duration_cast<std::chrono::milliseconds>(
+                              deadline.time_since_epoch()).count());
+        }
+        WdSlot(const WdSlot&) = delete;
+        WdSlot& operator=(const WdSlot&) = delete;
+        void disarm() { wd_disarm(slot); slot = -1; }
+        ~WdSlot() { disarm(); }
+    } wd(g_eng.watchdog_ms.load());
     // Stamp this dispatch thread's crash breadcrumb so a fault inside
     // the inspect (the most common crash site) names the run + phase
     // for THIS thread, not whatever the last thread to touch the
@@ -154,12 +192,6 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         crash_set_phase("reset");
         if (s.reset) s.reset();
         crash_set_phase("inspect");
-        // Draw this inspect's watchdog cancel ticket (epoch) on the dispatch
-        // thread BEFORE running it. The watchdog's cooperative cancel targets
-        // only inspects whose ticket predates a trip, so a fresh frame started
-        // during the 1000ms grace (higher ticket) is not poisoned by an earlier
-        // slow frame's trip. Older scripts lack this thunk → legacy behaviour.
-        if (s.inspect_begin) s.inspect_begin();
         // A4: prefer the EXPLICIT-trigger entry when the script exports it. The
         // host builds a self-contained xi_trigger_view from the current trigger
         // (read once, HERE, on the inspect thread) and passes it in — so the
@@ -171,6 +203,11 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         if (s.inspect_tv) {
             xi_trigger_view view{};
             std::string leader;
+            // A4 explicit per-run context on the view — so a captured Trigger copy
+            // reads t.run_id() / t.frame_path() self-contained (the free functions
+            // xi::run_id()/current_frame_path() ride the installed RunContext).
+            view.run_id     = (int64_t)run_id;
+            view.frame_path = frame_path.c_str();
             if (g_current_trigger) {
                 view.is_active      = 1;
                 view.id             = g_current_trigger->id;
@@ -193,10 +230,15 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
             s.inspect(frame_hint);
         }
         crash_set_phase("done");
-        disarm();
+        wd.disarm();
+        // The watchdog's soft cooperative-cancel was retired: a wedged inspect
+        // now runs until the watchdog HARD-trips (_Exit + FE respawn), so a
+        // returning inspect always ran to completion — there is no truncated-
+        // frame verdict to suppress here. A run that overran its budget but
+        // still returned is a complete, trusted result.
         out.inspect_ok = true;
     } catch (const seh_exception& e) {
-        disarm();
+        wd.disarm();
         auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                          std::chrono::steady_clock::now() - t0).count();
         char msg[256];
@@ -223,13 +265,13 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
             std::_Exit(WATCHDOG_EXIT_CODE);
         }
     } catch (const std::exception& e) {
-        disarm();
+        wd.disarm();
         std::fprintf(stderr, "[xinsp2] inspect threw: %s\n", e.what());
         emit_error_log(srv, std::string("script exception: ") + e.what(), run_id);
         out.run_error_what = "\"what\":";
         xp::json_escape_into(out.run_error_what, std::string("script exception: ") + e.what());
     } catch (...) {
-        disarm();
+        wd.disarm();
         // Align with the named catches above: also leave a stderr breadcrumb +
         // push to the recent-errors ring, else an unknown (non-std) throw vanished
         // from both be_log and cmd:recent_errors.
@@ -301,12 +343,10 @@ static void emit_run_outcome_(xi::ws::Server& srv, int64_t run_id,
                             "\"ms\":" + std::to_string((long long)dt_ms) +
                             ",\"inspect_compute_us\":" + std::to_string((long long)out.dt_us));
         }
-        // Clear so the next run, if it doesn't carry a frame_path arg, sees an empty
-        // path instead of the stale previous one. Runs on EVERY success path
-        // (including a suppressed stop-wake) so the next run starts clean.
-        if (out.s.set_run_context) out.s.set_run_context("");
-        // U3: clear the per-run id too — xi::run_id() outside an inspect is 0.
-        if (out.s.set_run_id) out.s.set_run_id(0);
+        // No per-run TLS to clear here anymore: the A4 RunContext is scoped to
+        // run_inspection_compute_ (RunContextScope) and was already torn down when
+        // that function returned — so the next run starts clean by construction,
+        // and off-inspect reads fail loud instead of seeing a stale value.
     } else {
         // Inspect failed (crash/throw) — still emit one Result so the stream
         // has no gap. BREAKING: the numeric code is now XI_SYS_CRASHED (was 0/NA),

@@ -34,19 +34,21 @@ Entry values are stored as their **canonical max-width msgpack encoding** (int64
 generic dumper (XEX1-v3, `record_save`) the small plane *exactly as it lives in
 memory* — wire bytes equal memory bytes.
 
-### Two read paths, one container
+### One container, one read path
 
-- **`Pack` / `PackBuilder`** — the dynamic, string-keyed path (generic walkers,
-  ad-hoc producers, ingress-canonicalized foreign maps). Lookup is hybrid by
-  measurement: ≤ 24 entries → a linear memcmp scan over the contiguous table (no
-  index allocated); larger packs build an `unordered_map` once at seal.
-- **`TypedPack<Schema>` / `TypedPackBuilder`** — the offset-accessor path for
-  contract-declared keysets (the `_keys.gen.h` order from `contract/`). A
-  `PackSchema` CRTP struct resolves key → slot at **compile time**
-  (`slot_of("threshold")` is consteval), so `get_i64<kSeq>()` is
-  slot-index → pointer → decode: no hash, no scan, no string compare, and
-  declared keys are never interned. Undeclared keys still work via a small
-  dynamic side list.
+- **`Pack` / `PackBuilder`** — the dynamic, string-keyed container (generic
+  walkers, ad-hoc producers, ingress-canonicalized foreign maps). Lookup is
+  hybrid by measurement: ≤ 24 entries → a linear memcmp scan over the contiguous
+  table (no index allocated); larger packs build an `unordered_map` once at seal.
+
+> **Retired 2026-07-11 (contraction, commit `cba51fe`):** the second in-process
+> container — `TypedPack<Schema>` / `TypedPackBuilder` over a `PackSchema` CRTP
+> struct, a compile-time-offset accessor path — was deleted from `xi_pack.hpp`
+> (~443 LOC) with zero production consumers. `Pack`/`PackBuilder` is now the only
+> in-process container, leaving one container + one codec to audit. The
+> *script-side* `ScriptTypedPack<Schema>` (`xi_use.hpp`, key-based over the
+> opaque `xi_pack_v1` ABI) is unrelated and survives — see
+> [`typed-io.md`](./typed-io.md).
 
 ## Seal and identity
 

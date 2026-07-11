@@ -49,15 +49,19 @@
 //   xinsp-runner.exe C:\factory\project --frames=1000 --output=today.json
 //
 // Exit: 0 if all frames dispatched without crashing; 1 on compile/load
-// failure or any script crash. This is an EXECUTION status, not an
-// inspection-verdict roll-up — grep the per-frame "class" or summary "counts"
-// for pass/fail (see the verdict note above).
+// failure or any script crash; 2 on infra failure (bad args, missing
+// project/script, or the final report could not be written — the report is
+// written atomically and checked, so exit 0 guarantees a complete artifact).
+// This is an EXECUTION status, not an inspection-verdict roll-up — grep the
+// per-frame "class" or summary "counts" for pass/fail (see the verdict note
+// above).
 //
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 
 #include <xi/xi_abi.hpp>
+#include <xi/xi_atomic_io.hpp>   // xi::atomic_write — temp+rename report write; no torn/missing artifact behind exit 0
 #include <xi/xi_certify.hpp>     // Part III G1: --certify-plugin child mode + verdict subprocess
 #include <xi/xi_crash_dump.hpp>  // xi::crash::install() — a crashed certify still yields a minidump
 #include <xi/xi_health.hpp>      // xi::health() — canonical health/state contract (schema xi.health/1)
@@ -69,6 +73,8 @@
 #include <xi/xi_script_compiler.hpp>
 #include <xi/xi_script_loader.hpp>
 #include <xi/xi_trigger_bus.hpp>
+
+#include "xi_result_class.hpp"   // XI_SYS_* band + outcome_class_for_code + kRunResultSchema (shared with the service)
 
 #ifdef _WIN32
 #  ifndef NOMINMAX
@@ -122,12 +128,6 @@ static int use_exchange_cb(const char* name, const char* cmd,
     } catch (...) { return -1; }
 }
 
-// grab() was the legacy pull model (xi::ImageSource queue), removed — sources
-// now PUSH via emit_record and scripts read current_trigger().
-static xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
-    return XI_IMAGE_NULL;
-}
-
 // polaris2 Gate P2 — minimal runner copy of the service's use_pack_process_cb:
 // drive the target's xi.pack@1 pack door for xi::use(...).process(ScriptPack).
 // Same return codes (0 ok / -1 miss / -2 crash / -4 no door / -5 sink target,
@@ -161,38 +161,19 @@ static int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_hand
 struct RunResult { int code = 0; std::string msg; bool set = false; };
 static thread_local RunResult g_run_result;
 
-// Framework reserved codes (mirror of service_main / xi_result.hpp). Anything
-// <= kResultSystemBand is the system-fail band; XI_SYS_* are named markers.
-static constexpr int kResultSystemBand = -990000;
-static constexpr int XI_SYS_CRASHED    = -999002;  // caught inspect crash/throw
-static constexpr int XI_SYS_NO_VERDICT = -999005;  // ran, set no result
+// Framework reserved band + code→class mapping + reserved-band rejection:
+// SHARED with the live backend via xi_result_class.hpp (included above) —
+// the former hand-mirrored copy is gone, so runner and service can't drift.
+// (The runner never emits XI_SYS_DROPPED; sharing the full mapping is harmless.)
 
 static void result_cb(int code, const char* msg) {
-    // Host is the trust boundary: a user code in the reserved system band is
-    // not accepted as a real verdict — record it as NA (0), preserving the
-    // offending code in the message (matches service_main::result_cb).
-    if (code <= kResultSystemBand) {
-        g_run_result.code = 0;
-        g_run_result.msg  = "[invalid result code " + std::to_string(code) +
-                            ", reserved band] ";
-        g_run_result.msg += (msg ? msg : "");
-        g_run_result.set  = true;
-        return;
+    // Host is the trust boundary: reserved-band codes are recorded as NA (0)
+    // with the offending code preserved in the message (shared rejection core).
+    if (!reject_reserved_result_code(code, msg, g_run_result.code, g_run_result.msg)) {
+        g_run_result.code = code;
+        g_run_result.msg.assign(msg ? msg : "");
     }
-    g_run_result.code = code;
-    g_run_result.msg.assign(msg ? msg : "");
-    g_run_result.set  = true;
-}
-
-// Derive the verdict class from the signed code (pure read; mirrors
-// service_main::outcome_class_for_code, minus the "dropped" runner-N/A case).
-static const char* verdict_class_for_code(int code) {
-    if (code == XI_SYS_CRASHED)     return "crashed";
-    if (code == XI_SYS_NO_VERDICT)  return "no_verdict";
-    if (code > 0)                   return "ok";
-    if (code == 0)                  return "na";
-    if (code > kResultSystemBand)   return "ng";   // valid ng band: <0 and > -990000
-    return "na";                                   // other reserved system codes
+    g_run_result.set = true;
 }
 
 // --- process identity (mirror of service_main's run_result envelope) -----
@@ -201,8 +182,8 @@ static const char* verdict_class_for_code(int code) {
 // backend's emit_run_result path, so it must GENERATE its own identity the same
 // way the live backend does. schema/boot_id/inspection_id are formatted
 // byte-for-byte like service_main.cpp (init_process_identity_ + emit_run_result)
-// so a headless report and a live run_result agree.
-static constexpr const char* kRunResultSchema = "xi.run-outcome/1";
+// so a headless report and a live run_result agree. kRunResultSchema comes from
+// the shared xi_result_class.hpp.
 
 // Format a 128-bit value as a 32-char lowercase hex string ("hi" then "lo",
 // each zero-padded to 16). Same encoding as service_main::trigger_id_hex.
@@ -321,6 +302,16 @@ int main(int argc, char** argv) {
         print_usage();
         return args.help ? 0 : 2;
     }
+    // --frames is operator input parsed with stoi and never range-checked: a
+    // negative value would wrap in the size_t reserve arithmetic below
+    // (frames * 256 → ~1.8e19) and terminate with an uncaught
+    // std::length_error before frame 0 — no report, and an exit outside the
+    // documented contract. Reject it here as a bad arg (infra failure, exit
+    // 2), same as a missing project folder / include dir.
+    if (args.frames < 0) {
+        std::fprintf(stderr, "[runner] bad --frames=%d — must be >= 0\n", args.frames);
+        return 2;
+    }
     if (!fs::exists(args.project_dir)) {
         std::fprintf(stderr, "[runner] project folder not found: %s\n", args.project_dir.c_str());
         return 2;
@@ -373,10 +364,12 @@ int main(int argc, char** argv) {
     // --certify-plugin mode) before arming it. A DLL that crashes certification
     // is skipped, surfaced via pm.certify_warnings(), and never loaded here.
     pm.set_certify_exe(get_exe_path());
-    int n = pm.scan_plugins(plugins_dir);
+    // QuiesceToken: the headless runner has no dispatch pool at all — nothing
+    // to quiesce (see xi_quiesce_token.hpp).
+    int n = pm.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), plugins_dir);
     std::fprintf(stderr, "[runner] scanned %d plugins from %s\n", n, plugins_dir.c_str());
     for (auto& d : args.extra_plugins) {
-        int extra = pm.scan_plugins(d);
+        int extra = pm.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), d);
         std::fprintf(stderr, "[runner] scanned %d extra plugins from %s\n", extra, d.c_str());
     }
 
@@ -386,7 +379,7 @@ int main(int argc, char** argv) {
     auto host_api = xi::ImagePool::make_host_api();
 
     // Restore instances (plugins + configs) from project.json.
-    if (!pm.open_project(args.project_dir)) {
+    if (!pm.open_project(xi::QuiesceToken::assert_no_dispatch(), args.project_dir)) {
         std::fprintf(stderr, "[runner] open_project failed for %s (missing project.json?)\n",
                      args.project_dir.c_str());
         return 2;
@@ -433,11 +426,12 @@ int main(int argc, char** argv) {
     }
     if (script.set_use_callbacks) {
         // THE CUT: process_fn slot is nullptr (the Record process bridge is gone);
-        // the pack door is wired via set_use_pack_callback below. grab_fn is the
-        // legacy stub; both params are retained in the ABI signature.
+        // the pack door is wired via set_use_pack_callback below. grab_fn is
+        // nullptr too (SDK discards it); both params are retained in the ABI
+        // signature.
         script.set_use_callbacks(
             nullptr, (void*)use_exchange_cb,
-            (void*)use_grab_cb, (void*)&host_api);
+            nullptr, (void*)&host_api);
     }
     // polaris2 Gate P2: pack-door chaining (xi::use(name).process(pack)).
     // Optional symbol — older scripts don't export it.
@@ -459,7 +453,16 @@ int main(int argc, char** argv) {
     std::string proj_json;
     xi::proto::json_escape_into(proj_json, args.project_dir);
     std::string body;
-    body.reserve(args.frames * 256);
+    // The reserve is a size HINT derived from operator input — cap the
+    // arithmetic so a huge (but valid) --frames can't make reserve() throw
+    // std::length_error or grab gigabytes up front. Past the cap the string
+    // simply grows on demand. (args.frames >= 0 is guaranteed by the arg
+    // check at startup.)
+    constexpr int kReserveFramesCap = 1 << 20;   // 1M frames → 256 MB hint max
+    const size_t reserve_frames = (args.frames < kReserveFramesCap)
+                                      ? (size_t)args.frames
+                                      : (size_t)kReserveFramesCap;
+    body.reserve(reserve_frames * 256);
     body += "{\"project\":";
     body += proj_json;
     // Identity envelope (additive; mirrors the live backend's run_result).
@@ -474,7 +477,7 @@ int main(int argc, char** argv) {
     body += ",\"frames\":[";
 
     int crashed = 0;
-    // Additive per-class verdict tally (see verdict_class_for_code).
+    // Additive per-class verdict tally (see outcome_class_for_code).
     int c_ok = 0, c_ng = 0, c_na = 0, c_no_verdict = 0, c_crashed = 0;
     // Emit one frame object:
     //   {"frame":i,"run_id":i,"inspection_id":"<station>/<boot>/<i>",
@@ -542,7 +545,7 @@ int main(int argc, char** argv) {
         // value-tracking is the `expose` plugin's concern; result()/state live on
         // their own paths.
         int code = g_run_result.set ? g_run_result.code : XI_SYS_NO_VERDICT;
-        const char* cls = verdict_class_for_code(code);
+        const char* cls = outcome_class_for_code(code);
         if      (std::strcmp(cls, "ok") == 0)         ++c_ok;
         else if (std::strcmp(cls, "ng") == 0)         ++c_ng;
         else if (std::strcmp(cls, "no_verdict") == 0) ++c_no_verdict;
@@ -581,12 +584,20 @@ int main(int argc, char** argv) {
     }
     body += "}}";
 
-    std::ofstream report(args.output);
-    report << body;
-    report.close();
-
-    std::fprintf(stderr, "[runner] wrote %s — %d frames in %.0fms (%d crashed)\n",
-                 args.output.c_str(), args.frames, ms, crashed);
+    // Atomic + checked: a bad --output path or disk-full mid-write must not
+    // leave a missing/torn report behind an exit-0 "wrote" line (CI/MES reads
+    // exit 0 = success). atomic_write stages to <output>.tmp and renames, so
+    // consumers never observe a partial file; on failure the report is the
+    // runner's whole artifact, so it exits 2 (infra failure, like the other
+    // setup/load failures above).
+    const bool report_ok = xi::atomic_write(args.output, body);
+    if (report_ok) {
+        std::fprintf(stderr, "[runner] wrote %s — %d frames in %.0fms (%d crashed)\n",
+                     args.output.c_str(), args.frames, ms, crashed);
+    } else {
+        std::fprintf(stderr, "[runner] ERROR: failed to write report %s (bad path or disk full?) — %d frames in %.0fms (%d crashed)\n",
+                     args.output.c_str(), args.frames, ms, crashed);
+    }
 
     xi::script::unload_script(script);
     // Skip global dtors: plugin-DLL ordering during C++ static teardown is
@@ -595,7 +606,7 @@ int main(int argc, char** argv) {
     // process. Short-lived headless utility — no long-running state to flush.
     std::fflush(stderr);
     std::fflush(stdout);
-    int code = crashed > 0 ? 1 : 0;
+    int code = !report_ok ? 2 : (crashed > 0 ? 1 : 0);
     // Skip C++ static dtors (see comment above): _Exit terminates without running
     // them, on both platforms (the Win32 ExitProcess equivalent).
     std::_Exit(code);

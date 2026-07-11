@@ -1,5 +1,5 @@
 //
-// test_owner_cancel_stress.cpp — high-stress race nets for two §28 Tier-2/3 GAPs
+// test_owner_cancel_stress.cpp — high-stress race net for a §28 Tier-2/3 GAP
 // that had only functional (non-stress) coverage:
 //
 //   * C1/C2/C3 image-pool OWNER PROPAGATION across xi::async / xi::parallel_for.
@@ -8,12 +8,10 @@
 //     per-owner accounting + the OwnerScope install/restore on omp/async workers
 //     are exercised under real contention (not one image, one thread).
 //
-//   * WATCHDOG epoch-cancel (xi_async.hpp begin_inspect/arm_cancel/clear_cancel/
-//     cancellation_requested) — previously a GAP. Two nets: a cross-thread
-//     epoch-semantics assertion (in-flight inspects get cancelled, inspects that
-//     start after the trip are spared) and a high-contention arm/clear-vs-
-//     begin/poll loop that must never corrupt the monotonic ticket counter or
-//     hang.
+// (The watchdog epoch-cancel nets that used to live here were removed with the
+// cooperative-cancel layer itself — begin_inspect/arm_cancel/clear_cancel and the
+// monotonic ticket counter no longer exist; a wedged inspect is handled by the
+// watchdog's HARD trip, which is integration-level.)
 //
 // The status coalesce map (§28 Tier-3) is intentionally NOT covered here: it's a
 // `static` mutex-guarded std::map inside service_main.cpp (set_status_internal),
@@ -25,7 +23,7 @@
 // XINSP2_STRESS_SCALE variant for the systematic-ish net.
 //
 
-#include <xi/xi_async.hpp>       // async, begin_inspect/arm_cancel/clear_cancel, owner thunks
+#include <xi/xi_async.hpp>       // async, owner thunks
 #include <xi/xi_parallel.hpp>    // xi::parallel_for
 #include <xi/xi_image_pool.hpp>  // ImagePool + make_host_api + OwnerGuard
 
@@ -80,7 +78,6 @@ static void wire_owner_thunks() {
 static void test_owner_propagation_stress() {
     SECTION("C1/C2/C3: many concurrent owner epochs — worker images attributed + swept");
     wire_owner_thunks();
-    xi::clear_cancel();                 // parallel_for early-outs on a stale cancel
     const xi_host_api& host = host_api();
     auto& pool = xi::ImagePool::instance();
 
@@ -101,7 +98,6 @@ static void test_owner_propagation_stress() {
                 std::vector<xi_image_handle> asy(ASYNC_IMGS, 0);
                 {
                     xi::ImagePool::OwnerGuard g(P);   // this thread runs under P
-                    xi::clear_cancel();
                     // Images created on omp worker threads must inherit P via the
                     // per-worker OwnerScope re-install inside parallel_for.
                     xi::parallel_for(PAR_IMGS, [&](int i) {
@@ -132,116 +128,11 @@ static void test_owner_propagation_stress() {
     CHECK(pool.stats().handle_count == 0);
 }
 
-// ===========================================================================
-// Watchdog epoch-cancel: cross-thread semantics (in-flight targeted, late spared)
-// ===========================================================================
-
-static void test_watchdog_epoch_semantics() {
-    SECTION("watchdog: in-flight inspects cancelled, post-trip inspects spared");
-    const int REPS     = 40 * stress_scale();
-    const int INFLIGHT = 8;
-
-    for (int rep = 0; rep < REPS; ++rep) {
-        xi::clear_cancel();
-
-        std::atomic<int>  ready{0};
-        std::atomic<bool> go{false};
-        std::atomic<int>  inflight_saw_cancel{0};
-
-        std::vector<std::thread> pool;
-        for (int i = 0; i < INFLIGHT; ++i) {
-            pool.emplace_back([&] {
-                xi::begin_inspect();               // in-flight ticket (< cutoff)
-                ready.fetch_add(1, std::memory_order_release);
-                while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
-                // Cancel is now armed with a cutoff above our ticket → we're targeted.
-                if (xi::cancellation_requested())
-                    inflight_saw_cancel.fetch_add(1, std::memory_order_relaxed);
-            });
-        }
-        while (ready.load(std::memory_order_acquire) < INFLIGHT) std::this_thread::yield();
-
-        xi::arm_cancel();                          // cutoff = high-water > all tickets
-        go.store(true, std::memory_order_release);
-        for (auto& t : pool) t.join();
-        CHECK(inflight_saw_cancel.load() == INFLIGHT);   // every in-flight inspect hit
-
-        // Inspects that DRAW their ticket after the trip must not be cancelled by it.
-        std::atomic<int> late_saw{0};
-        std::vector<std::thread> late;
-        for (int i = 0; i < INFLIGHT; ++i) {
-            late.emplace_back([&] {
-                xi::begin_inspect();               // ticket >= cutoff
-                if (xi::cancellation_requested())
-                    late_saw.fetch_add(1, std::memory_order_relaxed);
-            });
-        }
-        for (auto& t : late) t.join();
-        CHECK(late_saw.load() == 0);               // fresh inspects spared
-
-        xi::clear_cancel();
-    }
-}
-
-// ===========================================================================
-// Watchdog epoch-cancel: high-contention arm/clear vs begin_inspect/poll
-// ===========================================================================
-
-static void test_watchdog_arm_clear_contention() {
-    SECTION("watchdog: concurrent arm/clear vs begin/poll — ticket counter intact, no hang");
-    xi::clear_cancel();
-
-    const uint64_t initial = xi::cancel_ticket_counter().load(std::memory_order_relaxed);
-    const int INSPECTORS = 6;
-    const int ITERS      = 20'000 * stress_scale();
-    std::atomic<bool>      stop{false};
-    std::atomic<long long> total_begins{0};
-
-    // Inspectors: draw a ticket and poll cancellation a few times, forever.
-    std::vector<std::thread> inspectors;
-    for (int t = 0; t < INSPECTORS; ++t) {
-        inspectors.emplace_back([&] {
-            long long begins = 0;
-            while (!stop.load(std::memory_order_acquire)) {
-                xi::begin_inspect();
-                ++begins;
-                // Poll the flag under whatever the watchdog is doing concurrently.
-                for (int k = 0; k < 4; ++k) (void)xi::cancellation_requested();
-            }
-            total_begins.fetch_add(begins, std::memory_order_relaxed);
-        });
-    }
-
-    // Watchdog: arm and clear in a tight loop, racing the inspectors' polls.
-    std::thread watchdog([&] {
-        for (int i = 0; i < ITERS; ++i) {
-            xi::arm_cancel();
-            std::this_thread::yield();
-            xi::clear_cancel();
-        }
-    });
-    watchdog.join();
-    stop.store(true, std::memory_order_release);
-    for (auto& t : inspectors) t.join();
-
-    xi::clear_cancel();
-    // The counter is the single source of truth for ticket identity. Under all
-    // that contention, begin_inspect's fetch_add must have neither lost nor
-    // duplicated a tick: final - initial == the number of begins we counted.
-    const uint64_t final = xi::cancel_ticket_counter().load(std::memory_order_relaxed);
-    CHECK((long long)(final - initial) == total_begins.load());
-    CHECK(total_begins.load() > 0);
-    std::printf("  %lld inspect tickets drawn under %d-way contention\n",
-                total_begins.load(), INSPECTORS);
-}
-
 int main() {
     std::fprintf(stderr, "=== test_owner_cancel_stress (scale=%d) ===\n", stress_scale());
     auto t0 = std::chrono::steady_clock::now();
 
     test_owner_propagation_stress();
-    test_watchdog_epoch_semantics();
-    test_watchdog_arm_clear_contention();
 
     auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();

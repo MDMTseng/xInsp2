@@ -81,16 +81,24 @@ namespace parse_detail {
 
 // Consume ONE complete msgpack value (header + full body) at the reader cursor.
 // Used to measure a frame value's canonical byte span [start,end).
-inline mp::Status skip_value(mp::Reader& r) {
+//
+// SELF-CONTAINED depth guard: this walk recurses per nesting level, so it
+// carries its OWN bound (mirroring the reader's mp::kDefaultMaxDepth = 64)
+// instead of relying on ingress::canonicalize_entry having already rejected
+// depth bombs upstream. That coupling was implicit — a refactor that calls
+// skip_value before ingress, or raises the ingress max_depth, must not turn a
+// hostile deeply-nested .xex1 into a stack-overflow DoS here.
+inline mp::Status skip_value(mp::Reader& r, int depth = 0) {
+    if (depth >= mp::kDefaultMaxDepth) return mp::Status::DepthExceeded;
     mp::Element e;
     mp::Status s = r.next(e);
     if (s != mp::Status::Ok) return s;
     if (e.kind == mp::Kind::Array) {
-        for (uint32_t i = 0; i < e.len; ++i) { s = skip_value(r); if (s != mp::Status::Ok) return s; }
+        for (uint32_t i = 0; i < e.len; ++i) { s = skip_value(r, depth + 1); if (s != mp::Status::Ok) return s; }
     } else if (e.kind == mp::Kind::Map) {
         for (uint32_t i = 0; i < e.len; ++i) {
-            s = skip_value(r); if (s != mp::Status::Ok) return s;  // key
-            s = skip_value(r); if (s != mp::Status::Ok) return s;  // value
+            s = skip_value(r, depth + 1); if (s != mp::Status::Ok) return s;  // key
+            s = skip_value(r, depth + 1); if (s != mp::Status::Ok) return s;  // value
         }
     }
     return mp::Status::Ok;
@@ -120,6 +128,15 @@ inline bool as_image(const uint8_t* p, size_t n,
     }
     return hw && hh && hc && hpx;
 }
+
+// The host ImagePool caps a single image at 1 GiB (ImagePool::create,
+// xi_image_pool.hpp: `pixels > (int64_t(1) << 30)` -> handle 0). Mirror that
+// bound here — this plugin-safe header deliberately includes no host pool
+// header, so the value is restated; KEEP IN SYNC. Without this check a 1-4 GiB
+// image entry passes the px_len (uint32) validation, then create() returns the
+// null handle and the frame silently rebuilds with a null-view image (data
+// loss). Refuse it at parse time instead, loud, like every other bad entry.
+constexpr uint64_t kImagePoolMaxBytes = uint64_t(1) << 30;
 
 }  // namespace parse_detail
 
@@ -235,6 +252,18 @@ inline ParsedFrame parse_frame_v3(const uint8_t* data, size_t size) {
                         if (pe.w <= 0 || pe.h <= 0 || pe.c <= 0) break;
                         const uint64_t need = (uint64_t)pe.w * (uint64_t)pe.h * (uint64_t)pe.c;
                         if (need != (uint64_t)pe.px_len) break;
+                        // Align with the host ImagePool's per-image cap (see
+                        // kImagePoolMaxBytes above): an entry bigger than the
+                        // pool will ever allocate must fail HERE, explicitly,
+                        // not decode to a null-view image downstream. Distinct
+                        // message (this is an oversize refusal, not a
+                        // tag/value contradiction).
+                        if (need > parse_detail::kImagePoolMaxBytes) {
+                            out.error = "entry '" + pe.key +
+                                        "' image exceeds the 1 GiB ImagePool cap (" +
+                                        std::to_string(need) + " bytes)";
+                            return out;
+                        }
                         pe.px_off = (size_t)(px - body.data());
                         agree = true;
                         break;

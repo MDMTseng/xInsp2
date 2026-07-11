@@ -748,9 +748,26 @@ private:
         // header) held the WS server's poll thread hostage. The
         // server is single-threaded so this DoS'd the entire backend.
         // Apply a per-recv timeout via SO_RCVTIMEO + cap total
-        // handshake duration at 5 s. Closes audit P0-D5.
-        const int kHandshakeRecvTimeoutMs = 2000;
-        const int kHandshakeTotalBudgetMs = 5000;
+        // handshake duration. Closes audit P0-D5.
+        //
+        // P1 (remote-mode DoS hardening): this whole read runs on the SOLE
+        // poll thread BEFORE the credential check below — the auth header
+        // can't be evaluated until the full HTTP header has arrived, so an
+        // UNAUTHENTICATED peer that connects and then dribbles a partial
+        // header (or sends nothing) pins the poll thread for the entire
+        // budget. While it's pinned srv.poll() never returns, the serving
+        // loop's write_heartbeat() (service_main.cpp) doesn't advance, and
+        // the FE (--heartbeat-stale-ms, default 15000) force-respawns the
+        // backend. The original 5 s budget let one unauth socket every ~5 s
+        // starve the heartbeat chronically. The pre-auth budget therefore
+        // MUST stay well under (<<) the FE heartbeat staleness threshold:
+        // a real local/LAN client delivers its whole handshake header in a
+        // single round-trip, so 500 ms total is generous for legitimate
+        // peers while bounding the worst-case pre-auth stall (budget + one
+        // in-flight recv timeout ~= 750 ms) far below the 15 s respawn
+        // window. Do NOT raise these without re-checking that invariant.
+        const int kHandshakeRecvTimeoutMs      = 250;  // per-recv SO_RCVTIMEO
+        const int kHandshakeTotalBudgetMs      = 500;  // total pre-auth read budget; MUST be << FE heartbeat-stale-ms (15000)
         {
 #ifdef _WIN32
             DWORD recv_to = (DWORD)kHandshakeRecvTimeoutMs;

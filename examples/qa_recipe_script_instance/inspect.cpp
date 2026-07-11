@@ -16,7 +16,10 @@ class Scaler : public xi::InstanceBase {
 public:
     explicit Scaler(std::string n) : name_(std::move(n)) {}
     const std::string& name() const override { return name_; }
-    std::string plugin_name() const override { return "Scaler"; }
+    const std::string& plugin_name() const override {
+        static const std::string kName = "Scaler";
+        return kName;
+    }
 
     std::string get_def() const override {
         return "{\"factor\":" + std::to_string(factor_) + "}";

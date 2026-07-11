@@ -44,6 +44,8 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <future>   // replay_timed owner-ledger handoff (see start_timed_)
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -112,10 +114,13 @@ public:
 
         if (c == keys::kReplayTimed) {
             // Paced replay of the buffered entries on a background thread, so the
-            // exchange returns immediately. `speed` scales the recorded gaps
+            // exchange returns quickly. `speed` scales the recorded gaps
             // (>1 faster, default 1.0). `n` optionally limits to the last n. The
             // snapshot RETAINS each pack ref (the worker outlives the lock and may
-            // race a clear/evict) — the worker releases them on exit.
+            // race a clear/evict) — but that ref is only a BRIDGE: start_timed_
+            // hands ownership to the worker via its own owner-neutral refs and
+            // releases the bridge refs back on THIS thread, so the owner-tagged
+            // retain/release stay symmetric (see start_timed_ for why).
             double speed = p[keys::kSpeed].as_double(1.0); if (speed <= 0.0) speed = 1.0;
             int    k     = p[keys::kN].as_int(-1);
             std::vector<Entry> snap;
@@ -214,8 +219,19 @@ private:
     // --- ring helpers (caller holds mu_) ------------------------------------
 
     // Copy an entry for a replay snapshot, retaining an INDEPENDENT pack ref so
-    // the snapshot survives a concurrent clear/evict of the ring's own ref. The
-    // caller (emit_snapshot_ / the timed worker) releases it after emitting.
+    // the snapshot survives a concurrent clear/evict of the ring's own ref.
+    //
+    // OWNER-LEDGER CONTRACT: fi->retain here runs on the exchange thread, inside
+    // the adapter's ImagePool::OwnerGuard, so the ref is TAGGED to this cache
+    // instance's ledger bucket (retain_as(pack, cache_owner)). It must therefore
+    // be released on a thread with the SAME owner context, or the bucket is
+    // never decremented (release_as(pack, 0) is a documented ledger no-op) and
+    // teardown's release_all_for over-sweeps — a data-plane UAF. The synchronous
+    // paths (emit_snapshot_ for replay/replay_last/replay_all, and the dtor)
+    // release on this same guarded thread, so they are symmetric as-is. The
+    // replay_timed worker CANNOT release these refs (its current_owner() is 0);
+    // start_timed_ instead swaps them for the worker's own owner-neutral refs
+    // and releases these bridge refs back on the exchange thread.
     Entry snapshot_locked_(const Entry& e) {
         Entry s = e;
         if (s.is_pack()) { if (const xi_pack_v1* fi = pack_iface()) fi->retain(s.pack); }
@@ -280,13 +296,48 @@ private:
         stop_replay_();                       // cancel a prior replay first
         if (snap.empty()) return;
         replaying_.store(true);
+
+        // OWNER-LEDGER SYMMETRY (P0 UAF fix). The snapshot refs were retained on
+        // the EXCHANGE thread inside the adapter's OwnerGuard, so they are tagged
+        // to this instance's PackRegistry ledger bucket. The worker thread has NO
+        // owner context (current_owner() == 0), so if it released those refs the
+        // ledger decrement would be a no-op — the bucket would inflate by +1 per
+        // timed-replayed entry, forever, and teardown's release_all_for(cache)
+        // would then over-reclaim rc (including live untagged dispatch-event
+        // refs) and free a pack under a live reader. The xi_pack_v1 vtable
+        // exposes no untagged retain and the SDK no way to set owner context on
+        // a plugin thread, so we make BOTH pairs symmetric via a handoff:
+        //   1. the tagged snapshot refs act only as a BRIDGE keeping the packs
+        //      alive across the thread start (a clear/evict may race it);
+        //   2. the worker FIRST takes its own refs — fi->retain on the ownerless
+        //      worker thread is retain_as(pack, 0): rc-only, ledger untouched,
+        //      exactly a framework-transient ref — then signals;
+        //   3. we then release the bridge refs HERE, on the same guarded
+        //      exchange thread that took them, decrementing the same bucket.
+        // Worker refs: retained owner-0, released owner-0 (ledger no-op both
+        // ends). Bridge refs: retained tagged, released tagged, same thread.
+        std::vector<xi_pack_handle> bridge;
+        for (const auto& e : snap) if (e.is_pack()) bridge.push_back(e.pack);
+        auto owned = std::make_shared<std::promise<void>>();
+        std::future<void> owned_f = owned->get_future();
+
         // Blessed worker: xi::spawn_worker installs the per-thread SEH translator
         // + top-level catch so a fault mid-replay is contained to this thread
         // rather than taking down the whole backend (a raw std::thread would not).
         // ONE loop over the variant entry — records + packs interleave and replay
-        // in capture order; the snapshot's retained pack refs are released on exit
-        // (every path, including an early stop) so nothing leaks.
-        replay_thread_ = xi::spawn_worker(name() + "-replay", [this, snap = std::move(snap), speed]() mutable {
+        // in capture order; the worker's own (owner-neutral) pack refs are
+        // released on exit (every path, including an early stop) so nothing leaks.
+        replay_thread_ = xi::spawn_worker(name() + "-replay", [this, snap = std::move(snap), speed, owned]() mutable {
+            // Take this thread's OWN refs before anything else: current_owner()
+            // is 0 here, so these are untagged (rc-only) — symmetric with the
+            // untagged releases below. Signal the exchange thread afterwards so
+            // it can drop its tagged bridge refs; the bridge keeps every pack
+            // alive until this point, so no handle can die under us.
+            {
+                const xi_pack_v1* fi = pack_iface();
+                if (fi) for (auto& e : snap) if (e.is_pack()) fi->retain(e.pack);
+                owned->set_value();
+            }
             for (size_t i = 0; i < snap.size(); ++i) {
                 if (replay_stop_.load()) break;
                 if (i > 0) {
@@ -303,10 +354,21 @@ private:
                 }
                 emit_entry_(snap[i]);
             }
+            // Release the refs THIS thread retained above: owner 0 on retain,
+            // owner 0 on release — the ledger is untouched on both ends, only
+            // rc moves. (Never release an exchange-thread-tagged ref here.)
             const xi_pack_v1* fi = pack_iface();
             if (fi) for (auto& e : snap) if (e.is_pack()) fi->release(e.pack);
             replaying_.store(false);
         });
+
+        // Handoff complete? (A broken promise — worker faulted before signaling
+        // — also readies the future; the SEH containment in spawn_worker owns
+        // that path.) Then drop the tagged bridge refs on THIS thread, inside
+        // the same OwnerGuard that tagged them in snapshot_locked_: retain and
+        // release hit the same ledger bucket, symmetric by construction.
+        owned_f.wait();
+        release_packs_(bridge);
     }
 
     mutable std::mutex     mu_;

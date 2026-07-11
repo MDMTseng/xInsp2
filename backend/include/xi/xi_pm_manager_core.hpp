@@ -34,6 +34,7 @@
 #include "xi_instance.hpp"
 #include "xi_config_validate.hpp" // validate_config_against_manifest (opt-in diagnostic, extracted leaf)
 #include "xi_pm_json.hpp"      // pm_json_escape (extracted leaf)
+#include "xi_quiesce_token.hpp" // QuiesceToken — proof-of-quiesce capability for destructive methods
 #include <cctype>
 #include <cassert>            // door_matches_fields freeze-guard (default_host_api)
 #include "xi_pm_parse.hpp"     // parse_manifest / extract_string / detail_find_key
@@ -85,8 +86,9 @@ public:
         // this order at runtime; this is the static-destruction / never-closed-project
         // BACKSTOP (controlled_shutdown_teardown_ now calls close_project for the
         // normal path, but an exit that skips it must still not invert the order).
-        // The adapter's ImagePool sweep is itself guarded by g_image_pool_alive for
-        // the case the pool singleton was already torn down before us.
+        // The adapter's ImagePool sweep is safe even this late: the pool
+        // singleton is intentionally leaked (ImagePool::instance), so it can
+        // never have been torn down before us.
         project_.instances.clear();
         inst_state_.clear();
         // V3: machine-autoloaded providers are NOT in project_.instances (they
@@ -109,8 +111,18 @@ public:
         }
     }
 
+    // DESTRUCTIVE-METHOD CONVENTION: every method that mutates/frees adapters,
+    // instances, or plugin DLLs (which dispatch workers could still be calling
+    // into) takes a `const QuiesceToken&` as its FIRST parameter — proof the
+    // caller has quiesced dispatch. Only DispatchPoolGuard (via
+    // quiesce_dispatch_for_lifecycle_op_) or an explicit
+    // QuiesceToken::assert_no_dispatch() can mint one — forgetting the quiesce
+    // is a compile error. See xi_quiesce_token.hpp.
+
     // ---- plugin discovery / certification / registration (xi_pm_discovery.hpp) ----
-    int  scan_plugins(const std::string& plugins_dir);
+    // DESTRUCTIVE: the "moved" branch FreeLibrary's a plugin DLL a live adapter
+    // may still hold (RT5/J2).
+    int  scan_plugins(const QuiesceToken& quiesced, const std::string& plugins_dir);
     void set_certify_exe(const std::string& exe);
     std::vector<OpenWarning> certify_warnings();
     bool unquarantine_plugin(const std::string& name_or_folder);
@@ -131,8 +143,14 @@ public:
     bool plugin_location(const std::string& name, std::string& folder, std::string& dll);
 
     // ---- project management + working copy (xi_pm_project.hpp) ----
-    bool create_project(const std::string& folder, const std::string& name);
-    void close_project();
+    // DESTRUCTIVE: clears project_.instances + their registry entries (adapter
+    // dtors run) — the same teardown surface as close_project, so it takes the
+    // same proof-of-quiesce token.
+    bool create_project(const QuiesceToken& quiesced,
+                        const std::string& folder, const std::string& name);
+    // DESTRUCTIVE: destroys every instance adapter + FreeLibrary's the
+    // project's plugin DLLs (P0-AB-3).
+    void close_project(const QuiesceToken& quiesced);
     // Constants + the filesystem mechanics (seed/mirror/exclude/gitignore) live
     // in xi_working_copy.hpp; these aliases keep the references terse. The
     // stateful transactional methods (open/commit/discard) stay members.
@@ -141,17 +159,28 @@ public:
     // The canonical project dir when a working copy is active; empty otherwise.
     const std::string& canonical_path() const { return canonical_path_; }
     bool has_working_copy() const { return !canonical_path_.empty(); }
-    bool commit_working_copy();
-    bool reopen_fresh_working_copy();
-    bool open_project(const std::string& folder_arg, bool working_copy = false);
+    // DESTRUCTIVE: the commit mirrors (add/overwrite/delete) the scratch that
+    // continuous workers read/write.
+    bool commit_working_copy(const QuiesceToken& quiesced);
+    // DESTRUCTIVE: close + reopen (both destructive; token threads through).
+    bool reopen_fresh_working_copy(const QuiesceToken& quiesced);
+    // DESTRUCTIVE: tears down the previous project's instances and
+    // FreeLibrary's its plugin DLLs before loading the new one (P0-AB-3).
+    bool open_project(const QuiesceToken& quiesced,
+                      const std::string& folder_arg, bool working_copy = false);
 
     // ---- instance CRUD / lifecycle state / persistence (xi_pm_instances.hpp) ----
     static bool is_valid_instance_name(const std::string& n);
-    InstanceInfo* create_instance(const std::string& instance_name,
+    // DESTRUCTIVE: can EVICT a live machine-autoload provider of the same
+    // plugin (adapter dtor + cap/ref/pack owner sweeps) — RT5/J3.
+    InstanceInfo* create_instance(const QuiesceToken& quiesced,
+                                  const std::string& instance_name,
                                   const std::string& plugin_name,
                                   std::string* err = nullptr);
     bool save_instance(const std::string& instance_name);
-    bool remove_instance(const std::string& instance_name, bool delete_folder);
+    // DESTRUCTIVE: destroys a DLL-backed runtime adapter (finding 5).
+    bool remove_instance(const QuiesceToken& quiesced,
+                         const std::string& instance_name, bool delete_folder);
     // Result of rename_instance. The caller MUST distinguish Rejected (no mutation
     // happened — the old instance is untouched) from NotPersisted (the runtime +
     // on-disk folder were renamed to new_name, only the config save failed): on
@@ -160,7 +189,10 @@ public:
     // save-failed warning, NOT "rename failed" — reporting failure while the
     // runtime moved would desync name-keyed state.
     enum class RenameResult { Rejected, Ok, NotPersisted };
-    RenameResult rename_instance(const std::string& old_name, const std::string& new_name);
+    // DESTRUCTIVE: destroys the OLD adapter in place to rebuild it under the
+    // new name (L1 — the last un-quiesced live-adapter teardown).
+    RenameResult rename_instance(const QuiesceToken& quiesced,
+                                 const std::string& old_name, const std::string& new_name);
 
     ProjectInfo& project() { return project_; }
 
@@ -212,8 +244,12 @@ public:
     // (the analogue of an operator re-committing a project instance's config to
     // clear a quarantine). Evicts the current machine adapter for `plugin_name`
     // and re-autoloads it. Returns true if a provider is live afterwards.
+    // DESTRUCTIVE: evicts a live "@auto:" adapter (dtor + cap/owner sweeps) that
+    // dispatch workers could be mid-call into — hence the QuiesceToken (same
+    // convention as every other destructive method above).
     // (definition in xi_pm_load.hpp)
-    bool reload_machine_provider(const std::string& plugin_name);
+    bool reload_machine_provider(const QuiesceToken& quiesced,
+                                 const std::string& plugin_name);
     // Test/inspection: names of the plugins currently machine-provided.
     std::vector<std::string> machine_provider_plugins();
 
@@ -360,6 +396,18 @@ private:
     // instance of that plugin runs its factory, so the project instance registers
     // the slot cleanly (project precedence, no double-register).
     void evict_machine_provider_locked_(const std::string& plugin_name);
+    // THE one spelling of "unload this plugin's module": evict the machine
+    // provider, THEN FreeLibrary + null handle/factory. Root cause (RT5/N1
+    // family): a FreeLibrary without the evict leaves the "@auto:" provider's
+    // InstanceRegistry/CapRegistry handlers pointing into the unmapped DLL;
+    // sites kept re-spelling the pair (and one forgot the evict entirely).
+    // (defined in xi_pm_load.hpp)
+    void unload_module_locked_(const std::string& plugin_name);
+    // Targeted Leg-B reinstate: bring the machine autoload provider for `key`
+    // back up on pi's (re)loaded module. Same eligibility gates as the global
+    // reconciler but for THIS plugin only. (defined in xi_pm_load.hpp)
+    bool reinstate_machine_provider_locked_(PluginInfo& pi, const std::string& key,
+                                            const char* lane);
     // True if some project instance currently uses `plugin_name`.
     bool project_provides_plugin_locked_(const std::string& plugin_name) const;
 
@@ -390,19 +438,27 @@ public:
         std::vector<std::string> reattached_instances;
         std::string              error;
     };
-    RecompileResult recompile_project_plugin(const std::string& plugin_name);
+    // DESTRUCTIVE: resets each instance adapter then FreeLibrary's the old DLL
+    // (P0-AB-4).
+    RecompileResult recompile_project_plugin(const QuiesceToken& quiesced,
+                                             const std::string& plugin_name);
 
     struct PluginRebuildReport {
         // status: "rebuilt" | "unchanged" | "failed"
         struct Item { std::string name, status, detail; };
         std::vector<Item> items;
     };
-    PluginRebuildReport rebuild_cmake_plugins(const std::string& cmake_exe,
+    // DESTRUCTIVE: unload → cmake build → reload per changed plugin.
+    PluginRebuildReport rebuild_cmake_plugins(const QuiesceToken& quiesced,
+                                              const std::string& cmake_exe,
                                               const std::string& config,
                                               const std::vector<std::string>& only = {});
 
     using ExportResult = xi::PluginExportResult;
-    ExportResult export_project_plugin(const std::string& plugin_name,
+    // DESTRUCTIVE-adjacent: recompiles in Release while workers could be
+    // mid-call into the same plugin's instances (quiesced like its siblings).
+    ExportResult export_project_plugin(const QuiesceToken& quiesced,
+                                        const std::string& plugin_name,
                                         const std::string& dest_root);
 
 private:

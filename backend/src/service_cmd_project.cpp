@@ -25,9 +25,9 @@ void cmd_list_params_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pars
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             if (g_eng.script.ok() && g_eng.script.list_params) {
                 std::vector<char> buf(64 * 1024);
-                int n = g_eng.script.list_params(buf.data(), (int)buf.size());
-                if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);  // widen: -INT_MIN is UB
-                             n = g_eng.script.list_params(buf.data(), (int)buf.size()); }
+                // list_params has no -1 error return — every negative is -needed.
+                int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
+                    [&](char* b, int len) { return g_eng.script.list_params(b, len); });
                 if (n > 0) params_json.assign(buf.data(), (size_t)n);
             }
         }
@@ -86,14 +86,16 @@ void cmd_list_instances_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             if (g_eng.script.ok()) {
                 std::vector<char> buf(64 * 1024);
+                // list_instances / list_params have no -1 error return — every
+                // negative is -needed (grow + retry).
                 if (g_eng.script.list_instances) {
-                    int n = g_eng.script.list_instances(buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_eng.script.list_instances(buf.data(), (int)buf.size()); }
+                    int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
+                        [&](char* b, int len) { return g_eng.script.list_instances(b, len); });
                     if (n > 0) inst_json.assign(buf.data(), (size_t)n);
                 }
                 if (g_eng.script.list_params) {
-                    int n = g_eng.script.list_params(buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_eng.script.list_params(buf.data(), (int)buf.size()); }
+                    int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
+                        [&](char* b, int len) { return g_eng.script.list_params(b, len); });
                     if (n > 0) params_json.assign(buf.data(), (size_t)n);
                 }
             }
@@ -151,27 +153,47 @@ void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         // Try backend's InstanceRegistry first (plugin-manager instances)
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
-            // set_def enters plugin code (C-ABI) — guard like exchange_instance so a
-            // throwing/faulting plugin returns a clean error instead of terminating.
-            try {
-                if (inst->set_def(def_str)) {
+            // set_def enters plugin code (C-ABI) — Wave-2 #1: it had the SEH
+            // catch + stack recovery but no quarantine gate / crash bookkeeping;
+            // guarded_plugin_call adds note_instance_crash_ + the on-fault
+            // policy so a set_def-only crash-loop trips health/reinit/refuse.
+            // NOT quarantine-gated: set_def's success path runs
+            // set_inst_state(Active), the DOCUMENTED operator re-enable for an
+            // on_fault=refuse quarantine (the quarantine error message names
+            // set_instance_def) — gating it would make quarantine
+            // unrecoverable via its own remedy.
+            auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+            bool ok = false;
+            auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
+                                         "set_def()", /*gate_quarantined=*/false, [&] {
+                ok = inst->set_def(def_str);
+            });
+            switch (r.kind) {
+            case PluginCallResult::Kind::Ok:
+                if (ok) {
                     set_inst_state(*iname, InstState::Active);
                     send_rsp_ok(srv, id);
                 } else {
                     set_inst_state(*iname, InstState::Faulted, "set_def returned false");
                     send_rsp_err(srv, id, "set_def returned false");
                 }
-            } catch (const seh_exception& e) {
+                break;
+            case PluginCallResult::Kind::Quarantined:   // unreachable (ungated)
+                break;
+            case PluginCallResult::Kind::Crashed: {
                 char msg[256];
                 std::snprintf(msg, sizeof(msg), "set_def '%s' crashed: 0x%08X (%s)",
-                             iname->c_str(), e.code, e.what());
+                             iname->c_str(), r.seh_code, r.what.c_str());
                 set_inst_state(*iname, InstState::Faulted, msg);
                 send_rsp_err(srv, id, msg);
-                xi::recover_seh_stack_or_die(e.code, "cmd set_instance_def");
-            } catch (const std::exception& e) {
-                std::string em = std::string("set_def error: ") + e.what();
+                break;
+            }
+            case PluginCallResult::Kind::Threw: {
+                std::string em = "set_def error: " + r.what;
                 set_inst_state(*iname, InstState::Faulted, em);
                 send_rsp_err(srv, id, em);
+                break;
+            }
             }
         } else {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
@@ -213,29 +235,44 @@ void cmd_get_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         // Backend's InstanceRegistry first (plugin-manager instances).
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
-            // get_def enters plugin code (C-ABI) — guard like exchange_instance.
-            try {
-                std::string def = inst->get_def();
+            // get_def enters plugin code (C-ABI) — Wave-2 #1: gains the crash
+            // bookkeeping + on-fault policy it lacked. NOT quarantine-gated:
+            // reading the faulted config is how an operator inspects and
+            // repairs a quarantined instance (the re-enable flow's read half).
+            auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+            std::string def;
+            auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
+                                         "get_def()", /*gate_quarantined=*/false, [&] {
+                def = inst->get_def();
+            });
+            switch (r.kind) {
+            case PluginCallResult::Kind::Ok:
                 send_rsp_ok(srv, id, def.empty() ? "{}" : def);
-            } catch (const seh_exception& e) {
+                break;
+            case PluginCallResult::Kind::Quarantined:   // unreachable (ungated)
+                break;
+            case PluginCallResult::Kind::Crashed: {
                 char msg[256];
                 std::snprintf(msg, sizeof(msg), "get_def '%s' crashed: 0x%08X (%s)",
-                             iname->c_str(), e.code, e.what());
+                             iname->c_str(), r.seh_code, r.what.c_str());
                 send_rsp_err(srv, id, msg);
-                xi::recover_seh_stack_or_die(e.code, "cmd get_instance_def");
-            } catch (const std::exception& e) {
-                send_rsp_err(srv, id, std::string("get_def error: ") + e.what());
+                break;
+            }
+            case PluginCallResult::Kind::Threw:
+                send_rsp_err(srv, id, "get_def error: " + r.what);
+                break;
             }
         } else {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             if (g_eng.script.ok() && g_eng.script.get_instance_def) {
                 try {
                     std::vector<char> buf(256 * 1024);
-                    int n = g_eng.script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
-                    if (n < 0 && n != -1) {   // -needed → grow + retry (-1 = not found)
-                        buf.resize((size_t)(-(int64_t)n) + 1024);
-                        n = g_eng.script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
-                    }
+                    // -1 = instance not found (terminal); other negatives = -needed
+                    // (this site always had the correct fork — now the helper's).
+                    int n = script_grow_retry(buf, /*minus_one_is_terminal=*/true,
+                        [&](char* b, int len) {
+                            return g_eng.script.get_instance_def(iname->c_str(), b, len);
+                        });
                     if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "instance not found: " + *iname);
                 } catch (const seh_exception& e) {
@@ -276,7 +313,7 @@ void cmd_create_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // the culprit so a factory fault is attributed to this plugin.
         stamp_culprit_(iname->c_str(), *plugin);
         std::string create_err;
-        auto* ii = g_eng.plugin_mgr.create_instance(*iname, *plugin, &create_err);
+        auto* ii = g_eng.plugin_mgr.create_instance(_create_guard.token(), *iname, *plugin, &create_err);
         if (ii) {
             // create_instance records the Created state internally (atomic with the
             // instance add) — no separate set_inst_state needed.
@@ -302,7 +339,7 @@ void cmd_remove_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // remaining instances comes back on scope exit. Closes the ledger
         // mis-attribution UAF window and narrows the cap-plane transient.
         auto _rm_guard = quiesce_dispatch_for_lifecycle_op_("remove_instance", &srv);
-        if (g_eng.plugin_mgr.remove_instance(*iname, delete_folder)) {
+        if (g_eng.plugin_mgr.remove_instance(_rm_guard.token(), *iname, delete_folder)) {
             // remove_instance drops the lifecycle state internally (atomic with the
             // unregister) — no separate drop_inst_state needed. Health contract:
             // drop any runtime-fault overlay for the removed instance so it no
@@ -327,7 +364,7 @@ void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // Quiesce dispatch first, exactly like every sibling lifecycle op.
         auto _rn_guard = quiesce_dispatch_for_lifecycle_op_("rename_instance", &srv);
         using RR = xi::PluginManager::RenameResult;
-        RR rr = g_eng.plugin_mgr.rename_instance(*old_name, *new_name);
+        RR rr = g_eng.plugin_mgr.rename_instance(_rn_guard.token(), *old_name, *new_name);
         if (rr == RR::Rejected) {
             send_rsp_err(srv, id, "rename failed — name in use or instance missing");
         } else {

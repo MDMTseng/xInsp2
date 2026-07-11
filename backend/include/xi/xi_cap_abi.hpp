@@ -53,6 +53,7 @@
 #include "xi_instance.hpp"    // InstanceRegistry (owner -> live adapter)
 #include "xi_seh.hpp"         // seh_exception + recover_seh_stack_or_die
 #include "xi_clock.hpp"       // R2: mono_us() for cap-call latency metering
+#include "xi_json_escape.hpp" // the ONE JSON string-escape primitive (std-only leaf)
 
 #include <atomic>
 #include <cstdint>
@@ -68,11 +69,6 @@
 
 namespace xi {
 
-// Mirrors g_pack_registry_alive: readable after the Meyers singleton is gone at
-// process exit, so late teardown sweeps (a static-destruction adapter dtor)
-// skip the registry instead of touching a destroyed object.
-inline std::atomic<bool> g_cap_registry_alive{false};
-
 // ===================================================================
 // CapRegistry — capability name -> providing instance's handler.
 // ===================================================================
@@ -84,12 +80,15 @@ public:
         ImagePoolOwnerId  owner   = 0;      // the providing instance's identity
     };
 
+    // INTENTIONALLY LEAKED (mirrors ImagePool/PackRegistry::instance):
+    // process-lifetime state, never destroyed — so late teardown sweeps (a
+    // static-destruction adapter dtor) can touch the registry unconditionally,
+    // with no destroyed-singleton window and no registry-liveness guard flag.
+    // The OS reclaims the memory at exit.
     static CapRegistry& instance() {
-        static CapRegistry r;
-        g_cap_registry_alive.store(true, std::memory_order_release);
-        return r;
+        static CapRegistry* r = new CapRegistry();
+        return *r;
     }
-    ~CapRegistry() { g_cap_registry_alive.store(false, std::memory_order_release); }
 
     // Caller has already validated args + lifecycle context (f_cap_register).
     // Same-owner re-registration OVERWRITES (the reinit path: the fresh factory
@@ -301,13 +300,8 @@ public:
         for (const auto& [name, s] : stats_) {
             if (!first) out += ",";
             first = false;
-            out += "\"";
-            for (char ch : name) {   // minimal JSON-string escape (names are dotted ids)
-                if (ch == '"' || ch == '\\') { out += '\\'; out += ch; }
-                else if ((unsigned char)ch < 0x20) { char b[8]; std::snprintf(b, sizeof(b), "\\u%04x", ch); out += b; }
-                else out += ch;
-            }
-            out += "\":{\"calls\":"    + std::to_string(s.calls)
+            json_escape_into(out, name);   // the ONE escape primitive (quotes included)
+            out += ":{\"calls\":"          + std::to_string(s.calls)
                  + ",\"errors\":"      + std::to_string(s.errors)
                  + ",\"total_us\":"    + std::to_string(s.total_us)
                  + ",\"max_us\":"      + std::to_string(s.max_us) + "}";
@@ -376,6 +370,17 @@ inline int32_t f_cap_call_impl(const char* name, xi_pack_handle in, xi_pack_hand
     if (e.owner != adapter->owner_id() || !e.handler) return XI_CAP_ESHAPE;
     try {
         *out = e.handler(e.self, in);
+        // Ownership handoff (xi_pack_abi.hpp): the handler ran under
+        // OwnerGuard(e.owner), so its sealed OUTPUT pack carries the PROVIDER's
+        // creator tag — but the seal ref is handed to the CALLER, who owns it.
+        // Left tagged, the provider's teardown sweep (adapter dtor →
+        // sweep_packs_for → release_all_for) would reclaim the handed-off ref
+        // and free the consumer's live pack (wrong answer / data loss). Clear
+        // the creator tag while the provider pin is still held — rc unchanged
+        // (PackRegistry::untag). Slot bridge (no-op until install_pack_abi —
+        // same layering as sweep_packs_for).
+        if (*out != XI_PACK_NULL)
+            ImagePool::untag_pack_ref(*out, e.owner);
         return XI_CAP_OK;
     } catch (const seh_exception& ex) {
         std::fprintf(stderr, "[xinsp2] capability '%s' handler crashed: 0x%08X (%s)\n",
@@ -435,9 +440,9 @@ inline int32_t f_cap_unregister(const char* name, void* /*self*/) {
 // The owner-sweep trampoline published into ImagePool::cap_sweep_slot, so the
 // teardown paths that already sweep leaked image handles + pack refs (adapter
 // dtor) and the reinit rebuild drop this owner's registrations through the
-// same layering bridge. Guarded for static destruction.
+// same layering bridge. Safe even during static destruction: the registry
+// singleton is intentionally leaked.
 inline int f_cap_sweep_for(ImagePoolOwnerId owner) {
-    if (!g_cap_registry_alive.load(std::memory_order_acquire)) return 0;
     return CapRegistry::instance().unregister_all_for(owner);
 }
 

@@ -343,6 +343,80 @@ static bool quarantine_plugin(const std::string& folder, const std::string& dll)
     return (bool)f;
 }
 
+// ---- G2.2 crash-attribution ambiguity guard (basename-collision fix) ---------
+// ROOT CAUSE: crash attribution matches the crash's faulting module against the
+// culprit plugin's DLL by BASENAME — but under the standard build convention
+// many plugins share the SAME basename ("plugin_vN.dll"; real collisions exist
+// across examples/circle_counting: png_frame_source\build\plugin_v2.dll vs
+// region_counter\build\plugin_v2.dll), and crash::blame_module
+// (xi_crash_dump.hpp) reports only "<basename>+0x<offset>", no path. g_culprit
+// is a single process-global last-writer stamp, so with >=2 same-basename
+// plugins loaded a crash in plugin A can carry plugin B's folder. Acting on
+// that quarantines an INNOCENT plugin (disabled on the next respawn) AND — via
+// resp.reset() — forgives the whole-line respawn cap, extending the crash loop
+// by another full respawn_max cycle per misblame.
+// FULL FIX direction: record + match the FULL module path end-to-end
+// (blame_module keeps GetModuleFileNameA's absolute path, the crash report
+// stores it, and xi_crash_report.hpp already prefers a full-path match when the
+// report carries one). Until then, the SAFE behavior on a basename-only report
+// is: if >=2 plugin folders visible to this supervisor ship a DLL with the
+// faulting basename, the attribution is AMBIGUOUS — do not feed the per-plugin
+// fault budget, do not quarantine, and do NOT reset the respawn tracker
+// (quarantining the wrong plugin and forgiving the cap are both worse than
+// leaving the death unattributed).
+//
+// Counts DISTINCT candidate folders holding a DLL named `dll` under the roots
+// this FE knows the BE scans: each --plugins-dir, plus <project>/plugins (and
+// its .xinsp_work working copy). Compiled project plugins keep their DLL in a
+// build\ subfolder (folder_path = <plugin>/build — see xi_pm_load.hpp), so both
+// the subfolder itself and its build\ child are checked. The culprit's own
+// folder is force-counted even when it lies under a root the FE cannot see
+// (e.g. project.json plugin_dirs), so an unseen sibling can only make the guard
+// MORE cautious, never less. Deliberately an over-approximation (a stale
+// same-named DLL on disk counts even if not currently loaded): the FE has no
+// registry of what the BE actually loaded, and over-caution degrades to
+// "unattributed" — never to a wrong quarantine.
+static int count_plugin_folders_with_dll(const FeConfig& c,
+                                         const std::string& dll,
+                                         const std::string& culprit_folder) {
+    if (dll.empty()) return 0;
+    std::vector<std::string> found;   // normalized folders that contain `dll`
+    auto add = [&found](const fs::path& folder) {
+        std::string key = folder.lexically_normal().string();
+        for (auto& ch : key) {                      // case/separator-insensitive dedupe
+            if (ch >= 'A' && ch <= 'Z') ch = (char)(ch + 32);
+            if (ch == '\\') ch = '/';
+        }
+        if (std::find(found.begin(), found.end(), key) == found.end())
+            found.push_back(key);
+    };
+    std::vector<std::string> roots = c.plugins_dirs;
+    if (!c.project.empty()) {
+        roots.push_back((fs::path(c.project) / "plugins").string());
+        if (c.working_copy)
+            roots.push_back((fs::path(c.project) / ".xinsp_work" / "plugins").string());
+    }
+    std::error_code ec;
+    for (const auto& root : roots) {
+        fs::directory_iterator it(root, ec), end;
+        for (; !ec && it != end; it.increment(ec)) {
+            if (!it->is_directory(ec)) continue;
+            // Key by the PLUGIN folder either way, so a plugin with the DLL both
+            // in its root and in build\ still counts once.
+            if (fs::exists(it->path() / dll, ec) ||
+                fs::exists(it->path() / "build" / dll, ec))
+                add(it->path());
+        }
+    }
+    if (!culprit_folder.empty() && fs::exists(fs::path(culprit_folder) / dll, ec)) {
+        // Culprit folder_path for a compiled plugin is <plugin>/build — key by
+        // the plugin folder to match the scan above.
+        fs::path cf(culprit_folder);
+        add(cf.filename() == "build" ? cf.parent_path() : cf);
+    }
+    return (int)found.size();
+}
+
 #ifdef _WIN32
 // ----------------------------------------------------------------------------
 // Win32 supervisor
@@ -768,17 +842,48 @@ static int run_supervisor(const FeConfig& c) {
         // (Invariant §20.2). A death NOT attributable to a plugin (script/core
         // crash) flows through the normal whole-BE cap unchanged.
         bool quarantined_this_death = false;
-        if (!ev.culprit_plugin.empty() && plugin_faults.note_fault(ev.culprit_plugin, ev.ts_ms)) {
-            bool wrote = quarantine_plugin(ev.culprit_folder, ev.culprit_dll);
-            quarantined_this_death = true;
-            std::fprintf(stderr, "[xinsp-fe] plugin '%s' attributed %d crash(es) -> "
-                         "QUARANTINED%s; respawning with it disabled (line stays up)\n",
-                         ev.culprit_plugin.c_str(), plugin_faults.count(ev.culprit_plugin),
-                         wrote ? "" : " (cache write failed — gate may not apply)");
-            st.reason = "PluginQuarantined:" + ev.culprit_plugin;
-            // Forgive the whole-line cap: the next BE comes up without this plugin,
-            // so its prior deaths must not count toward latching the entire line.
-            resp.reset();
+        if (!ev.culprit_plugin.empty()) {
+            // Ambiguity guard — see count_plugin_folders_with_dll above. The crash
+            // report's faulting module today carries only a DLL BASENAME; when >=2
+            // plugin folders ship a DLL with that basename (plugin_vN.dll
+            // collision) the culprit stamp cannot single out the real offender, so
+            // acting on it risks quarantining an innocent plugin and forgiving the
+            // respawn cap. A report that carries a full module path was already
+            // full-path-matched in xi_crash_report.hpp and is confident as-is.
+            bool basename_only =
+                ev.faulting_module.find('\\') == std::string::npos &&
+                ev.faulting_module.find('/')  == std::string::npos;
+            int same_name = basename_only
+                ? count_plugin_folders_with_dll(c, ev.culprit_dll, ev.culprit_folder)
+                : 1;
+            if (basename_only && same_name >= 2) {
+                // UNATTRIBUTED crash: log loudly and let the death flow through the
+                // normal whole-BE respawn cap below — no note_fault (would feed the
+                // possibly-wrong plugin's budget), no quarantine, and NO resp.reset()
+                // (the respawn budget keeps ticking).
+                std::fprintf(stderr, "[xinsp-fe] crash in module '%s' left UNATTRIBUTED: "
+                             "%d plugin folders ship a DLL named '%s' (basename collision "
+                             "under the plugin_vN.dll build convention) — culprit stamp "
+                             "'%s' (%s) cannot be trusted, so NOT quarantining it and NOT "
+                             "resetting the respawn budget. Full fix: record + match the "
+                             "full module path end-to-end.\n",
+                             ev.faulting_module.c_str(), same_name, ev.culprit_dll.c_str(),
+                             ev.culprit_plugin.c_str(), ev.culprit_folder.c_str());
+            } else if (plugin_faults.note_fault(ev.culprit_plugin, ev.ts_ms)) {
+                bool wrote = quarantine_plugin(ev.culprit_folder, ev.culprit_dll);
+                quarantined_this_death = true;
+                std::fprintf(stderr, "[xinsp-fe] plugin '%s' attributed %d crash(es) -> "
+                             "QUARANTINED%s; respawning with it disabled (line stays up)\n",
+                             ev.culprit_plugin.c_str(), plugin_faults.count(ev.culprit_plugin),
+                             wrote ? "" : " (cache write failed — gate may not apply)");
+                st.reason = "PluginQuarantined:" + ev.culprit_plugin;
+                // Forgive the whole-line cap ONLY on this CONFIDENT single-plugin
+                // attribution (full-path match, or a basename unique among the
+                // plugin folders the FE can see): the next BE comes up without this
+                // plugin, so its prior deaths must not count toward latching the
+                // entire line. Never on an ambiguous basename match — see above.
+                resp.reset();
+            }
         }
 
         // ---- respawn unless too many CONSECUTIVE failures (xi::RespawnTracker) ----

@@ -190,7 +190,8 @@ static void test_create_project_stamps_schema() {
     SECTION("save_project_locked stamps schema (via create_project)");
     fs::path root = scratch("create");
     xi::PluginManager pm;
-    CHECK(pm.create_project(root.string(), "MadeHere"));
+    // assert_no_dispatch: bare PluginManager under test, no dispatch pool exists.
+    CHECK(pm.create_project(xi::QuiesceToken::assert_no_dispatch(), root.string(), "MadeHere"));
     std::string pj = read_file(root / "project.json");
     CHECK(!pj.empty());
     yyjson_doc* d = yyjson_read(pj.data(), pj.size(), 0);
@@ -217,7 +218,8 @@ static void test_loader_gate() {
         fs::path root = scratch("legacy");
         write_project_json(root, R"({"name":"legacy"})");
         xi::PluginManager pm;
-        CHECK(pm.open_project(root.string(), /*working_copy=*/false));
+        // QuiesceToken: bare PluginManager, single-threaded test — no dispatch pool.
+        CHECK(pm.open_project(xi::QuiesceToken::assert_no_dispatch(), root.string(), /*working_copy=*/false));
         CHECK(pm.open_error().empty());
         std::error_code ec; fs::remove_all(root, ec);
     }
@@ -227,7 +229,7 @@ static void test_loader_gate() {
         fs::path root = scratch("current");
         write_project_json(root, R"({"schema":"xi.project/1","name":"cur"})");
         xi::PluginManager pm;
-        CHECK(pm.open_project(root.string(), false));
+        CHECK(pm.open_project(xi::QuiesceToken::assert_no_dispatch(), root.string(), false));
         CHECK(pm.open_error().empty());
         std::error_code ec; fs::remove_all(root, ec);
     }
@@ -237,7 +239,7 @@ static void test_loader_gate() {
         fs::path root = scratch("future");
         write_project_json(root, R"({"schema":"xi.project/2","name":"fut"})");
         xi::PluginManager pm;
-        CHECK(!pm.open_project(root.string(), false));   // hard refusal
+        CHECK(!pm.open_project(xi::QuiesceToken::assert_no_dispatch(), root.string(), false));   // hard refusal
         std::string oe = pm.open_error();
         CHECK(oe.find("xi.project/2") != std::string::npos);   // the file's version
         CHECK(oe.find("xi.project/1") != std::string::npos);   // the backend's version
@@ -249,7 +251,7 @@ static void test_loader_gate() {
         fs::path root = scratch("foreign");
         write_project_json(root, R"({"schema":"acme.project/1","name":"x"})");
         xi::PluginManager pm;
-        CHECK(!pm.open_project(root.string(), false));
+        CHECK(!pm.open_project(xi::QuiesceToken::assert_no_dispatch(), root.string(), false));
         CHECK(pm.open_error().find("acme.project/1") != std::string::npos);
         std::error_code ec; fs::remove_all(root, ec);
     }
@@ -261,9 +263,9 @@ static void test_loader_gate() {
         fs::path good = scratch("stale_good");
         write_project_json(good, R"({"schema":"xi.project/1","name":"ok"})");
         xi::PluginManager pm;
-        CHECK(!pm.open_project(bad.string(), false));
+        CHECK(!pm.open_project(xi::QuiesceToken::assert_no_dispatch(), bad.string(), false));
         CHECK(!pm.open_error().empty());
-        CHECK(pm.open_project(good.string(), false));
+        CHECK(pm.open_project(xi::QuiesceToken::assert_no_dispatch(), good.string(), false));
         CHECK(pm.open_error().empty());   // cleared on the good open
         std::error_code ec; fs::remove_all(bad, ec); fs::remove_all(good, ec);
     }
@@ -298,7 +300,7 @@ static void test_phantom_instance_warns() {
       f << R"({"plugin":"mock_camera"})"; }
 
     xi::PluginManager pm;
-    CHECK(pm.open_project(root.string(), /*working_copy=*/false));   // load succeeds (warnings, not errors)
+    CHECK(pm.open_project(xi::QuiesceToken::assert_no_dispatch(), root.string(), /*working_copy=*/false));   // load succeeds (warnings, not errors)
     auto ws = pm.open_warnings();
 
     bool phantom_warned = false;

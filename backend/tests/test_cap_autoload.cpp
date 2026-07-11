@@ -127,7 +127,9 @@ int main() {
     {
         xi::PluginManager pm;
         pm.set_autoload_enabled(true);   // deployment opt-in (service: --autoload-lib)
-        int scanned = pm.scan_plugins(plugdir.string());
+        // QuiesceToken: bare PluginManager in a single-threaded test — no
+        // dispatch pool exists (see xi_quiesce_token.hpp).
+        int scanned = pm.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), plugdir.string());
         CHECK(scanned == 1, "scan_plugins discovers the autoload lib plugin");
 
         // ---- 1. autoload at boot: capability live with NO project ------------
@@ -148,9 +150,11 @@ int main() {
 
         // ---- 2. project precedence: a project instance displaces the machine
         //         provider (no double-register), and removing it reinstates it --
-        CHECK(pm.create_project(projdir.string(), "p"), "create a project");
+        // assert_no_dispatch: bare PluginManager under test, no dispatch pool exists.
+        CHECK(pm.create_project(xi::QuiesceToken::assert_no_dispatch(), projdir.string(), "p"),
+              "create a project");
         std::string err;
-        auto* ii = pm.create_instance("codec", "autolib", &err);
+        auto* ii = pm.create_instance(xi::QuiesceToken::assert_no_dispatch(), "codec", "autolib", &err);
         CHECK(ii != nullptr,
               ("project instance of the autoload plugin is allowed: " + err).c_str());
         CHECK(!has(pm.machine_provider_plugins(), "autolib"),
@@ -161,7 +165,7 @@ int main() {
         CHECK(call_echo(7, &echoed) == XI_CAP_OK && echoed == 8,
               "the project instance now serves the call");
 
-        CHECK(pm.remove_instance("codec", /*delete_folder=*/true),
+        CHECK(pm.remove_instance(xi::QuiesceToken::assert_no_dispatch(), "codec", /*delete_folder=*/true),
               "remove the project instance");
         CHECK(has(pm.machine_provider_plugins(), "autolib"),
               "machine provider reinstated once the project instance is gone");
@@ -171,11 +175,11 @@ int main() {
         // ---- 3. close_project reinstates a displaced machine provider --------
         // Re-declare a project instance, then close: the machine provider (whose
         // global DLL is still mapped) must step back in.
-        ii = pm.create_instance("codec2", "autolib", &err);
+        ii = pm.create_instance(xi::QuiesceToken::assert_no_dispatch(), "codec2", "autolib", &err);
         CHECK(ii != nullptr, "second project instance created");
         CHECK(!has(pm.machine_provider_plugins(), "autolib"),
               "machine provider evicted again by the second project instance");
-        pm.close_project();
+        pm.close_project(xi::QuiesceToken::assert_no_dispatch());
         CHECK(has(pm.machine_provider_plugins(), "autolib"),
               "close_project reinstates the machine provider");
         echoed = -1;
@@ -187,7 +191,8 @@ int main() {
               "a crashing handler is charged to the lib instance (-2)");
         CHECK(call_echo(1, nullptr) == XI_CAP_EQUARANTINED,
               "on_fault=refuse quarantines it; the next call fails fast (-3)");
-        CHECK(pm.reload_machine_provider("autolib"),
+        // assert_no_dispatch: bare PluginManager under test, no dispatch pool exists.
+        CHECK(pm.reload_machine_provider(xi::QuiesceToken::assert_no_dispatch(), "autolib"),
               "machine-scoped recovery: reload the provider from a fresh factory");
         echoed = -1;
         CHECK(call_echo(5, &echoed) == XI_CAP_OK && echoed == 6,

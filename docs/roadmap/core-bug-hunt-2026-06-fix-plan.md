@@ -268,6 +268,9 @@ set — they share the close/open/recompile/reattach code and a partial fix invi
 # Cluster E — dispatch / watchdog / trigger-bus
 
 ## [12] Watchdog cooperative-cancel flag stays set for the full 1000ms grace → poisons fresh inspects (conf 0.71)
+> **[2026-07-11] Superseded by `93de38b`:** the cooperative-cancel layer (incl.
+> the epoch fix that closed this item) was retired outright — one-phase
+> watchdog, token-only `cancellation_requested()`. Kept for history.
 - **Root cause:** the global cancel flag is set, held for the entire 1000ms grace, then cleared;
   but the dispatch pool keeps starting NEW frames during the grace and `cancellation_requested()`
   reads the global with no per-inspect reset → every heavy frame dispatched in that ~1s window

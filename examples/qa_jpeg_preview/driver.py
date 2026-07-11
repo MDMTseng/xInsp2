@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import time
@@ -169,6 +170,12 @@ def phase1(fails: list[str]) -> None:
 
 
 def phase2(fails: list[str]) -> None:
+    # The path-containment guard (red-team fix: open_project refuses a
+    # project.json `script` that escapes the project folder) forbids the old
+    # `"script": "../inspect.cpp"` layout. Keep ONE source of truth for the
+    # script by copying it into no_codec/ at run time instead of committing a
+    # duplicate that would drift.
+    shutil.copyfile(INSPECT, ROOT / "no_codec" / "inspect.cpp")
     port = free_port()
     proc = spawn(port)
     try:

@@ -1367,7 +1367,7 @@ extension, or `xinsp-fe.exe` on a line — see
 | `--host=ADDR` | 127.0.0.1 | bind address (`0.0.0.0` for remote; pair with `--auth`) |
 | `--auth=SECRET` | — | require `Bearer SECRET` in the WS handshake |
 | `--plugins-dir=DIR` | — | extra plugin folder (repeatable) |
-| `--watchdog=MS` | 0 (off) | terminate an inspect that exceeds MS ms |
+| `--watchdog=MS` | 0 (off) | per-inspect wall-clock budget: an inspect still wedged after MS ms + the grace window hard-exits the backend (`_Exit`) for the supervisor to respawn; a frame that returns late is a normal verdict |
 | `--project=DIR` | — | **headless autostart**: `open_project` this folder at boot |
 | `--script=PATH` | project.json's `script` | script to `compile_and_load` for `--project` |
 | `--autostart-fps=N` | 0 (off) | with `--project`, `start` continuous mode at N fps; **N<0 = trigger-only** (start, no timer) |

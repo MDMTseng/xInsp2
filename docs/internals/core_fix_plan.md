@@ -36,6 +36,25 @@ tracks only what is **still open**.
   - **OQ-7b** — opt-in static cross-plugin Record field contract (`c5fe591`).
   - **A4** — explicit-trigger entry `xi_inspect_entry_tv` + `XI_INSPECT_ENTRY(t, frame)`
     (`7e4c48d`; legacy `xi_inspect_entry(int)` still supported).
+- **2026-07-11 contraction (this branch):**
+  - **A4 finished** (`a293cfe`) — per-run identity (run_id / frame_path / verdict
+    routing) moved off ambient thread_local onto ONE explicit host-side
+    `RunContext` (RAII `RunContextScope`), propagated by `xi::async` /
+    `xi::parallel_for` (pointer; they join) and `xi::spawn_worker` (worker-owned
+    by-value snapshot, `result_slot = nullptr`). Retires the F4 relational marker
+    (`g_trigger_ctx_` / `TriggerCtxScope` / trigger_ctx thunks), the
+    silent-result guard (a worker verdict now reaches the run), and U3's
+    `g_run_id_` TLS + `xi_script_set_run_id` thunk; J4's `-6` push rejection is
+    preserved, re-expressed structurally. Off-run reads fail loud (Debug abort /
+    Release warn-once + sentinel). Frozen ABI untouched; `xi_trigger_view`
+    gained `run_id`/`frame_path`.
+  - **Cooperative-cancel layer retired** (`93de38b`) — the ticket-epoch
+    soft-cancel (incl. the G3 TicketScope and the C1 verdict-safety machinery)
+    is gone; the watchdog is one phase (overrun → grace → hard `_Exit`+respawn)
+    and `cancellation_requested()` is token-only (per-task `CancelToken`,
+    `Future::cancel()`).
+  - **TypedPack deleted** (`cba51fe`) — `Pack`/`PackBuilder` is the only
+    in-process container (script-side `ScriptTypedPack` unaffected).
 
 ---
 

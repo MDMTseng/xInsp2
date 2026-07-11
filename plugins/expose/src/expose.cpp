@@ -342,7 +342,7 @@ private:
             auto keyv = in.key_at(i);
             if (!keyv) continue;
             std::string key(*keyv);
-            if (key == xi::pack_contract::kChannel || key == xi::pack_contract::kSeq) continue;
+            if (xi::pack_contract::is_lifted(key)) continue;  // $channel/$seq ride the frame header
             switch (in.tag_at(i)) {
                 case XI_PACK_TAG_I64:
                     vals.set(key.c_str(), (int64_t)in.i64_or(key.c_str(), 0)); break;

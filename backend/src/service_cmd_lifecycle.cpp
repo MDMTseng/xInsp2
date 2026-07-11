@@ -48,34 +48,21 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             return;
         }
 
-        // Stop continuous mode before reloading — the worker thread holds
-        // function pointers into the DLL we're about to unload. Remember whether
-        // the run was active so we can re-arm it after the reload — without this,
-        // scripts that get hot-reloaded mid-run would silently halt and the caller
-        // would have to know to re-issue cmd:start.
-        bool was_continuous = false;
-        int  prior_continuous_fps = 10;
-        if (g_eng.continuous.load()) {
-            was_continuous = true;
-            prior_continuous_fps = g_eng.continuous_fps.load();
-            stop_dispatch_pool_();
-            std::fprintf(stderr, "[xinsp2] stopped continuous mode for reload (will resume)\n");
-        }
-
-        // Resume continuous exactly as it was before the reload. MUST be called on
-        // every exit path — a bare `return` on a compile error (a typo in the
-        // script, the common case) or a load failure would otherwise leave the
-        // stream stopped and force the client to re-issue cmd:start to recover.
-        auto resume_continuous_if_needed = [&]() {
-            if (!was_continuous) return;
-            bool trig_only = prior_continuous_fps <= 0;
-            int fps = trig_only ? 0 : prior_continuous_fps;
-            g_eng.continuous_fps = fps;
-            g_eng.continuous = true;
-            int interval_ms = trig_only ? 0 : std::max(1, 1000 / std::max(fps, 1));
-            spawn_group_pool_(&srv, interval_ms);
-            std::fprintf(stderr, "[xinsp2] continuous mode resumed\n");
-        };
+        // Quiesce dispatch for the script-DLL swap via the structural guard —
+        // the same primitive every other lifecycle handler holds. Root cause
+        // (quiesce-ritual family, RT5/O2 kin): this handler used to hand-roll
+        // stop_dispatch_pool_() + a resume lambda called at each of 4 exits; a
+        // throw between stop and resume (or a 5th exit added later) left the
+        // production stream permanently stopped. The guard's DESTRUCTOR resumes
+        // continuous mode at the prior fps on EVERY exit, exceptions included.
+        // Deliberate deltas vs. the old ritual (both safe-side): the guard also
+        // (a) pauses detached one-shot launches + clears the bus sink for the
+        // whole compile window — a source-emit one-shot during the ~4 s compile
+        // is DROPPED instead of racing the swap (matching open/close/recompile)
+        // — and (b) drains in-flight runs up front (the swap block below still
+        // takes run_mu+script_mu itself, unchanged). The dtor unpauses,
+        // re-installs the sink it removed, and respawns continuous mode.
+        auto reload_guard = quiesce_dispatch_for_lifecycle_op_("compile_and_load", &srv);
 
         // AOT / no-toolchain bundle: a `.dll` path is loaded DIRECTLY (no cl.exe).
         // Resolve relative to the project folder. Otherwise compile the .cpp.
@@ -110,11 +97,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 set_status_internal("@compile", "degraded: prebuilt DLL refused (out-of-tree)");
                 xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError,
                                         std::filesystem::path(*src).filename().string());
-                // This return is past stop_dispatch_pool_() — like the compile/load
-                // failure paths it must re-arm continuous mode or the stream stays
-                // dead until the client re-issues cmd:start.
-                resume_continuous_if_needed();
-                return;
+                return;   // reload_guard's dtor re-arms continuous mode
             }
             res.ok = true;
             res.dll_path = canon_dll.string();
@@ -192,13 +175,11 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         };
 
         if (!res.ok) {
-            std::string data = "{\"diagnostics\":" + build_diag_json() + "}";
-            xp::Rsp r;
-            r.id = id;
-            r.ok = false;
-            r.error = "compile failed";
-            r.data_json = data;
-            srv.send_text(r.to_json());
+            // Wave-2 #2: the data-carrying send_rsp_err overload owns the
+            // recent-errors push — this site used to hand-roll the Rsp and
+            // FORGOT it, so a failed compile never showed in cmd:recent_errors.
+            send_rsp_err(srv, id, "compile failed",
+                         "{\"diagnostics\":" + build_diag_json() + "}");
             xp::LogMsg lm;
             lm.level = "error";
             lm.msg = res.build_log;
@@ -209,8 +190,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             set_status_internal("@compile", "degraded: compile failed");
             xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError,
                                     std::filesystem::path(*src).filename().string());
-            resume_continuous_if_needed();   // keep streaming the last-good script
-            return;
+            return;   // reload_guard's dtor keeps streaming the last-good script
         }
 
         {
@@ -231,8 +211,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 set_status_internal("@compile", "degraded: script load failed");  // P1-4
                 xi::health().set_script(xi::CompHealth::Failed, xi::kReasonCompileError,
                                         std::filesystem::path(*src).filename().string());
-                resume_continuous_if_needed();   // old g_eng.script untouched, keep it streaming
-                return;
+                return;   // reload_guard's dtor resumes — old g_eng.script untouched, keeps streaming
             }
             // U2 (docs/new_gen/16): capture the kv channel from the OLD DLL
             // before swapping it out — canonical-mp bytes, explicit lengths
@@ -240,14 +219,22 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             // restore into the new DLL can detect a shape mismatch.
             if (g_eng.script.ok() && g_eng.script.get_kv) {
                 std::vector<uint8_t> kbuf(256 * 1024);
-                int kn = g_eng.script.get_kv(kbuf.data(), (int)kbuf.size());
-                if (kn < 0) { kbuf.resize((size_t)(-(int64_t)kn) + 1024);
-                              kn = g_eng.script.get_kv(kbuf.data(), (int)kbuf.size()); }
+                // kv_get has no -1 error return (0 = empty store; -N = need N).
+                int kn = script_grow_retry(kbuf, /*minus_one_is_terminal=*/false,
+                    [&](uint8_t* b, int len) { return g_eng.script.get_kv(b, len); });
                 if (kn > 0) g_eng.persistent_kv_bytes.assign((const char*)kbuf.data(), (size_t)kn);
                 else        g_eng.persistent_kv_bytes.clear();
                 g_eng.persistent_kv_schema = g_eng.script.kv_schema_version
                                            ? g_eng.script.kv_schema_version()
                                            : 0;
+            } else {
+                // No kv channel on the OLD script (or no old script at all):
+                // disarm any snapshot captured in an earlier era. Without this,
+                // a script that stopped exporting get_kv leaves the previous
+                // capture armed, and a LATER set_kv-bearing DLL silently
+                // resurrects a weeks-old store.
+                g_eng.persistent_kv_bytes.clear();
+                g_eng.persistent_kv_schema = 0;
             }
             // Swap: move-assign drops the old module's last ref — its deleter
             // does the owner-sweep + FreeLibrary once any in-flight inspect that
@@ -277,7 +264,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 g_eng.script.set_use_callbacks(
                     nullptr,   // THE CUT: the Record use()->process bridge is gone
                     (void*)use_exchange_cb,
-                    (void*)use_grab_cb,
+                    nullptr,   // grab_fn slot retained in the ABI; SDK discards it
                     (void*)script_host_api_());
             }
             // polaris2 Gate P2: pack-door process callback, so scripts can
@@ -319,15 +306,20 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             if (g_eng.script.set_owner_callbacks) {
                 g_eng.script.set_owner_callbacks((void*)owner_get_cb, (void*)owner_set_cb);
             }
-            // F4: trigger-context marker get/set thunks. Lets xi::async /
-            // xi::parallel_for carry the inspect thread's "inside a trigger" flag
-            // onto worker threads, so an off-thread current_trigger() read from a
-            // triggered inspect's child is caught relationally (never false-firing
-            // on an unrelated lane's timer-tick worker). Optional symbol — older
-            // scripts don't export it and off-thread detection degrades to a no-op.
-            if (g_eng.script.set_trigger_ctx_callbacks) {
-                g_eng.script.set_trigger_ctx_callbacks(
-                    (void*)trigger_ctx_get_cb, (void*)trigger_ctx_set_cb);
+            // A4: explicit per-run context thunks. Lets xi::async /
+            // xi::parallel_for / xi::spawn_worker carry the run's context (run_id +
+            // frame_path + verdict slot + dispatch-thread identity) onto worker
+            // threads, so xi::run_id() / xi::current_frame_path() / xi::result() are
+            // correct on a worker (the spawn-gap closure) and off-thread reads/pushes
+            // fail loud. Replaces the retired trigger-ctx marker + set_run_id /
+            // set_run_context setters. Optional symbol — older scripts don't export
+            // it and per-run accessors return the 0/"" sentinel with no propagation.
+            if (g_eng.script.set_run_ctx_callbacks) {
+                g_eng.script.set_run_ctx_callbacks(
+                    (void*)run_ctx_get_cb, (void*)run_ctx_set_cb,
+                    (void*)run_ctx_run_id_cb, (void*)run_ctx_frame_path_cb,
+                    (void*)run_ctx_snapshot_cb, (void*)run_ctx_install_worker_cb,
+                    (void*)run_ctx_free_cb);
             }
             // Result callback. Scripts without xi_result.hpp leave this null
             // and xi::result() is a no-op (run_result then defaults to NA).
@@ -398,8 +390,18 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 int new_kv_schema = g_eng.script.kv_schema_version
                                   ? g_eng.script.kv_schema_version()
                                   : 0;
+                // Downgrade hole: a new script that LOST its XI_KV_SCHEMA decl
+                // (new_kv_schema == 0) while the captured store WAS versioned
+                // must also drop — we can't distinguish "never versioned" from
+                // "version decl lost", so the safe choice is drop rather than
+                // blind-restoring a versioned store into an unversioned script.
+                // 0 → 0 (never versioned on either side) keeps the blind
+                // best-effort restore.
+                bool kv_downgrade = (g_eng.persistent_kv_schema != 0 &&
+                                     new_kv_schema == 0);
                 bool kv_drop = (new_kv_schema != 0 &&
-                                g_eng.persistent_kv_schema != new_kv_schema);
+                                g_eng.persistent_kv_schema != new_kv_schema)
+                             || kv_downgrade;
                 if (kv_drop) {
                     std::string kv_migrated;
                     if (xi::script::migrate_kv(g_eng.script, g_eng.persistent_kv_bytes,
@@ -449,11 +451,27 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                                    + std::to_string(g_eng.persistent_kv_schema)
                                    + ",\"new_schema\":"
                                    + std::to_string(new_kv_schema)
-                                   + "}}";
+                                   + ",\"reason\":\""
+                                   + (kv_downgrade ? "schema_downgrade" : "schema_mismatch")
+                                   + "\"}}";
                     srv.send_text(ev);
                     g_eng.persistent_kv_bytes.clear();
                     }
                 } else {
+                    // A refused/faulted restore loses the whole cross-frame
+                    // store while compile_and_load still reports success —
+                    // surface it as the same state_dropped event the schema
+                    // drop path emits, so a headless controller can detect
+                    // the loss (stderr alone is invisible over WS).
+                    auto kv_restore_dropped = [&](const char* reason) {
+                        std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
+                                         "\"data\":{\"store\":\"kv\",\"old_schema\":"
+                                       + std::to_string(g_eng.persistent_kv_schema)
+                                       + ",\"new_schema\":"
+                                       + std::to_string(new_kv_schema)
+                                       + ",\"reason\":\"" + reason + "\"}}";
+                        srv.send_text(ev);
+                    };
                     try {
                         if (g_eng.script.set_kv((const uint8_t*)g_eng.persistent_kv_bytes.data(),
                                                 (int)g_eng.persistent_kv_bytes.size()) == 0) {
@@ -462,15 +480,18 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                         } else {
                             std::fprintf(stderr,
                                 "[xinsp2] replay kv_set (restore) refused the bytes — skipped\n");
+                            kv_restore_dropped("restore_refused");
                         }
                     } catch (const seh_exception& e) {
                         std::fprintf(stderr,
                             "[xinsp2] replay kv_set (restore) crashed: 0x%08X (%s) — skipped\n",
                             e.code, e.what());
                         xi::recover_seh_stack_or_die(e.code, "replay kv_set (restore)");
+                        kv_restore_dropped("restore_faulted");
                     } catch (const std::exception& e) {
                         std::fprintf(stderr,
                             "[xinsp2] replay kv_set (restore) threw: %s — skipped\n", e.what());
+                        kv_restore_dropped("restore_faulted");
                     }
                 }
             }
@@ -484,18 +505,14 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             srv.send_text(lm.to_json());
         }
 
-        // Re-arm continuous mode if it was running before the reload,
-        // at the same fps the original cmd:start asked for. The 4 s
-        // cl.exe gap inside the reload is unavoidable; what we don't
-        // want is the run staying dead afterwards and forcing the
-        // caller to know they need to re-issue cmd:start.
         // Install the trigger sink so a source's emit_trigger runs an inspect
         // even when NOT continuous (single-shot) — issue/replay works without
-        // cmd:start. Continuous mode (below) just adds the free-running timer.
+        // cmd:start. Needed explicitly here (not just via the guard's dtor):
+        // on the FIRST-ever compile no sink existed before the quiesce, so the
+        // guard has nothing to restore. Continuous mode (re-armed by the
+        // guard's dtor at the prior fps, trigger-only preserved) just adds the
+        // free-running timer.
         install_trigger_sink_(&srv);
-        // Preserve trigger-only mode across the reload (prior_continuous_fps == 0
-        // means no timer — sources drive it). Same path as the error returns above.
-        resume_continuous_if_needed();
 
         // P1-4: the swap succeeded — clear any prior degraded marker. The
         // "@compile" entry's seq/ts_ms double as a running-def generation+recency
@@ -510,7 +527,7 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         std::string data = "{\"dll\":";
         xp::json_escape_into(data, res.dll_path);
         data += ",\"diagnostics\":" + build_diag_json();
-        if (was_continuous) data += ",\"resumed_continuous\":true";
+        if (reload_guard.was_continuous) data += ",\"resumed_continuous\":true";
         data += "}";
         send_rsp_ok(srv, id, data);
 }
@@ -528,12 +545,20 @@ void cmd_save_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             if (g_eng.script.ok()) {
                 std::vector<char> buf(64 * 1024);
+                // Wave-2 #4: these two copies LACKED the grow-retry half of the
+                // buffer protocol entirely — a params/instances list over 64 KiB
+                // returned -needed, the result was silently dropped, and
+                // save_project wrote a project.json WITHOUT them (silent data
+                // loss on save). The shared helper supplies the retry. No -1
+                // error return here.
                 if (g_eng.script.list_params) {
-                    int n = g_eng.script.list_params(buf.data(), (int)buf.size());
+                    int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
+                        [&](char* b, int len) { return g_eng.script.list_params(b, len); });
                     if (n > 0) params_json.assign(buf.data(), (size_t)n);
                 }
                 if (g_eng.script.list_instances) {
-                    int n = g_eng.script.list_instances(buf.data(), (int)buf.size());
+                    int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
+                        [&](char* b, int len) { return g_eng.script.list_instances(b, len); });
                     if (n > 0) inst_json.assign(buf.data(), (size_t)n);
                 }
             }
@@ -572,7 +597,7 @@ void cmd_commit_working_copy_(xi::ws::Server& srv, int64_t id, const xp::ParsedC
             // scratch we're about to commit is itself stale, so don't claim success.
             send_rsp_err(srv, id, "failed to persist instance '" + save_fail +
                          "' before commit (disk full / read-only?)");
-        } else if (g_eng.plugin_mgr.commit_working_copy()) {
+        } else if (g_eng.plugin_mgr.commit_working_copy(_wc_commit_guard.token())) {
             send_rsp_ok(srv, id, "{\"committed\":true,\"canonical\":" +
                         ([]{ std::string s; xp::json_escape_into(s, g_eng.plugin_mgr.canonical_path()); return s; }()) + "}");
         } else {
@@ -588,7 +613,7 @@ void cmd_discard_working_copy_(xi::ws::Server& srv, int64_t id, const xp::Parsed
             return;
         }
         auto _wc_discard_guard = quiesce_dispatch_for_lifecycle_op_("discard_working_copy", &srv);  // resumes at block end
-        if (g_eng.plugin_mgr.reopen_fresh_working_copy()) {
+        if (g_eng.plugin_mgr.reopen_fresh_working_copy(_wc_discard_guard.token())) {
             send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "discard failed");
@@ -610,10 +635,7 @@ void cmd_load_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         // so status is "rejected" (and ok:false). Carry the status field so a generic
         // client sees the same shape it does on partial.
         auto send_rejected = [&](const std::string& err) {
-            xp::Rsp r; r.id = id; r.ok = false; r.error = err;
-            r.data_json = "{\"status\":\"rejected\"}";
-            srv.send_text(r.to_json());
-            push_recent_error("rsp", err, id);
+            send_rsp_err(srv, id, err, "{\"status\":\"rejected\"}");
         };
         auto path = xp::get_string_field(parsed->args_json, "path");
         if (!path) { send_rejected("missing path"); return; }
@@ -744,11 +766,9 @@ void cmd_load_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         }
         data += "]}";
         if (partial) {
-            xp::Rsp r; r.id = id; r.ok = false;
-            r.error = "project loaded only partially — see param_warnings/instance_warnings";
-            r.data_json = data;
-            srv.send_text(r.to_json());
-            push_recent_error("rsp", r.error, id);
+            send_rsp_err(srv, id,
+                "project loaded only partially — see param_warnings/instance_warnings",
+                data);
         } else {
             send_rsp_ok(srv, id, data);
         }
@@ -758,7 +778,23 @@ void cmd_create_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         auto pname  = xp::get_string_field(parsed->args_json, "name");
         if (!folder || !pname) { send_rsp_err(srv, id, "missing folder or name"); return; }
-        if (g_eng.plugin_mgr.create_project(*folder, *pname)) {
+        // Quiesce like open/close_project: create_project clears the previous
+        // project's instances + registry entries (adapter dtors run) — before
+        // this guard, a dispatch worker mid-inspect into one of those adapters
+        // raced the teardown (the quiesce-hole kin of P0-AB-3). skip_resume:
+        // whatever stream was running belonged to the project being replaced.
+        auto create_guard = quiesce_dispatch_for_lifecycle_op_("create_project", &srv);
+        // Wave-2 #3: create_project REPLACES the project just like open/close,
+        // but never cleared the project-boundary state — the old project's bus
+        // per-source map, param_cache / instance_def_cache replay shadows and
+        // captured xi::kv() survived into the fresh project, so its first
+        // compile_and_load replayed the REPLACED project's tuned values /
+        // carried state (the documented cross-project leak class). Same reset,
+        // same point in the sequence as open_project (before the PM swap).
+        reset_project_boundary_state_();
+        const bool created = g_eng.plugin_mgr.create_project(create_guard.token(), *folder, *pname);
+        create_guard.skip_resume();   // fresh empty project — nothing to stream; the launch pause is still released by the guard's destructor
+        if (created) {
             send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "failed to create project");
@@ -783,36 +819,22 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         // durable. Default false = legacy in-place behaviour.
         bool working_copy = parsed->args_json.find("\"working_copy\":true") != std::string::npos
                           || parsed->args_json.find("\"working_copy\": true") != std::string::npos;
-        // O2 (round-10 red-team): hold the launch-pause across open_project()'s teardown of the
-        // OLD project (it FreeLibrary's the old plugin DLLs) — do NOT dismiss() here, or a
-        // straggler source-emit one-shot could launch (paused_==0) into an unmapped old DLL
-        // (use-after-unload). Dismiss AFTER open_project() returns; the new project drives its
-        // own autostart, so we still skip the guard's continuous-resume.
+        // O2 (round-10 red-team): the launch-pause must be HELD across open_project()'s
+        // teardown of the OLD project (it FreeLibrary's the old plugin DLLs) — releasing
+        // it early let a straggler source-emit one-shot launch (paused_==0) into an
+        // unmapped old DLL (use-after-unload). skip_resume() below only skips the
+        // continuous-resume (the new project drives its own autostart); the pause is
+        // released by the guard's destructor at scope end — an early release is no
+        // longer expressible.
         auto open_guard = quiesce_dispatch_for_lifecycle_op_("open_project", &srv);
-        // Drop stale bus state from any previously-open project (the old sink +
-        // the per-source emit-time map, whose source names belong to the project
-        // we're replacing) before tearing it down + opening the new one.
-        xi::TriggerBus::instance().clear_sink();
-        xi::TriggerBus::instance().reset();
-        // Reset the script replay shadows on the PROJECT boundary, mirroring
-        // unload_script's clear. open_project does NOT unload the inspection
-        // script DLL (script lifecycle is independent of the project's plugin
-        // DLLs), so without this the next project's compile_and_load would
-        // (a) capture the PRIOR project's xi::kv() into g_eng.persistent_kv_*
-        // from the still-live old g_eng.script, then (b) replay the prior project's
-        // g_eng.param_cache values over any same-named Param the new project
-        // declares (e.g. "thresh") — running project B's inspections with
-        // project A's tuned values / carried state and silently mis-verdicting.
-        // A fresh project starts from its own file-scope defaults.
-        {
-            std::lock_guard<std::mutex> lk(g_eng.script_mu);
-            g_eng.param_cache.clear();
-            g_eng.instance_def_cache.clear();   // sibling replay shadow — same project boundary
-            g_eng.persistent_kv_bytes.clear();  // U2: kv channel — same no-leak boundary
-            g_eng.persistent_kv_schema = 0;
-        }
-        const bool opened = g_eng.plugin_mgr.open_project(*folder, working_copy);
-        open_guard.dismiss();   // old project torn down + DLLs unloaded — release the launch pause (skip resume: new project autostarts)
+        // Wave-2 #3: drop everything owned by the project being replaced — the
+        // stale bus sink + per-source emit-time map AND the script replay
+        // shadows / kv channel (see reset_project_boundary_state_ for the full
+        // cross-project-leak rationale) — before tearing it down + opening the
+        // new one. A fresh project starts from its own file-scope defaults.
+        reset_project_boundary_state_();
+        const bool opened = g_eng.plugin_mgr.open_project(open_guard.token(), *folder, working_copy);
+        open_guard.skip_resume();   // skip the continuous-resume at scope end (new project autostarts); the launch pause is released by the guard's DESTRUCTOR, never early (O2)
         if (opened) {
             // F5: advisory single-writer stamp. If another LIVE backend already
             // owns this canonical, warn — two writers to one project clobber each
@@ -900,42 +922,31 @@ void cmd_close_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
             if (s == xi::SysState::Running || s == xi::SysState::Degraded)
                 xi::health().set_state(xi::SysState::Draining);
         }
-        // O2 (round-10 red-team): keep the detached-launch pause HELD across the teardown
-        // below — do NOT dismiss() here. dismiss() unpauses g_eng.inflight, and
-        // close_project() FreeLibrary's the plugin DLLs; a source-emit thread that already
-        // snapshotted the bus sink (before the quiesce's clear_sink) could otherwise launch a
-        // detached one-shot — inflight.launch would see paused_==0 — that runs concurrently
-        // with the unload and calls into an unmapped DLL (use-after-unload). Dismiss AFTER
-        // close_project(): that still skips the continuous-resume (no project to stream), it
-        // just releases the pause once the DLLs are gone.
+        // O2 (round-10 red-team): the detached-launch pause stays HELD across the teardown
+        // below. close_project() FreeLibrary's the plugin DLLs; a source-emit thread that
+        // already snapshotted the bus sink (before the quiesce's clear_sink) could otherwise
+        // launch a detached one-shot — inflight.launch would see paused_==0 — that runs
+        // concurrently with the unload and calls into an unmapped DLL (use-after-unload).
+        // skip_resume() after close_project() only skips the continuous-resume (no project
+        // to stream); the pause itself is released by the guard's destructor at scope end —
+        // the old dismiss()'s early unpause is no longer expressible.
         auto close_guard = quiesce_dispatch_for_lifecycle_op_("close_project", &srv);
-        // Drop the bus's captured sink (it points at `srv`) BEFORE the plugin
-        // DLLs are unloaded — otherwise the stale sink can fire into a torn-down
-        // project. reset() also prunes the per-source emit-time map, whose source
-        // names belong to the project being closed (otherwise they accumulate
-        // across every open→emit→close cycle).
-        xi::TriggerBus::instance().clear_sink();
-        xi::TriggerBus::instance().reset();
-        g_eng.plugin_mgr.close_project();
-        close_guard.dismiss();   // teardown done, DLLs unloaded — release the launch pause (skip resume: no project)
+        // Wave-2 #3: drop the bus's captured sink (it points at `srv`) BEFORE
+        // the plugin DLLs are unloaded — otherwise the stale sink can fire into
+        // a torn-down project — and clear the script replay shadows + kv, which
+        // belong to the project being closed (see reset_project_boundary_state_
+        // for the cross-project-leak rationale).
+        reset_project_boundary_state_();
+        g_eng.plugin_mgr.close_project(close_guard.token());
+        close_guard.skip_resume();   // skip the continuous-resume at scope end (no project to stream); the launch pause is released by the guard's DESTRUCTOR, never early (O2)
         clear_inst_state();   // instances are gone — drop host-tracked state
         // Health contract: no project → `boot`. The instances (and their runtime-
         // fault overlay) are gone; the script survives a close (its DLL is not
         // unloaded here), so its health component is left intact.
         xi::health().clear_all_instance_degraded();
         xi::health().set_state(xi::SysState::Boot);
-        // Reset the script replay shadows on the PROJECT boundary, mirroring
-        // unload_script's clear. Closing a project doesn't unload the script
-        // DLL, but the operator-tuned param cache + persisted xi::kv() belong
-        // to the project just closed — leaving them in place would leak A's
-        // values/state into whatever project is opened next (see open_project).
-        {
-            std::lock_guard<std::mutex> lk(g_eng.script_mu);
-            g_eng.param_cache.clear();
-            g_eng.instance_def_cache.clear();   // sibling replay shadow — same project boundary
-            g_eng.persistent_kv_bytes.clear();  // U2: kv channel — same no-leak boundary
-            g_eng.persistent_kv_schema = 0;
-        }
+        // (script replay shadows + kv already cleared by
+        // reset_project_boundary_state_ above — one primitive, no second copy.)
         send_rsp_ok(srv, id, "{\"closed\":true}");
 }
 

@@ -224,7 +224,11 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
     std::unique_lock<std::mutex> lk(lane->mu);
     // Re-check after taking the lane lock: a concurrent stop may have flipped
     // g_eng.continuous + drained; don't push a now-orphaned event (would leak).
-    if (!g_eng.continuous.load()) return false;
+    // lane->stopped is the AUTHORITATIVE per-lane check (lane-ABA guard): a
+    // stop→resume cycle re-arms the global flag while g_eng.lanes holds NEW lane
+    // objects, so a producer that resolved THIS (old) lane before the stop would
+    // pass a global-only re-check and deposit into a dead, worker-less lane.
+    if (lane->stopped || !g_eng.continuous.load()) return false;
     // ---- queue_depth:0 RENDEZVOUS (synchronous handoff; opt-in) ----------------
     // DANGER — like overflow:block, rendezvous is ONLY safe for a back-pressure-
     // TOLERANT source on a DEDICATED thread it can freely stall. NEVER a lane a
@@ -241,9 +245,9 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         // returns before any drop_oldest front()-on-empty path could run.
         // 1) Wait for the handoff slot to be free (or stop).
         lane->cv_not_full.wait(lk, [&] {
-            return lane->q.empty() || !g_eng.continuous.load();
+            return lane->q.empty() || lane->stopped || !g_eng.continuous.load();
         });
-        if (!g_eng.continuous.load()) {                      // stop → drop (guard releases ev)
+        if (lane->stopped || !g_eng.continuous.load()) {     // stop → drop (guard releases ev)
             // RB3 (doc 25): a producer parked here at stop drops an in-hand frame.
             // Count it (frames-in vs verdicts+drops-out stays balanced) but do NOT
             // emit an XI_SYS_DROPPED wire marker: this is teardown (unlike F2's
@@ -266,7 +270,7 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         // 3) Block until OUR event is TAKEN (taken_count advanced) or stop. On stop
         //    the event is already in q; stop_group_pool_ drains it (no leak, no hang).
         lane->cv_not_full.wait(lk, [&] {
-            return lane->taken_count != t0 || !g_eng.continuous.load();
+            return lane->taken_count != t0 || lane->stopped || !g_eng.continuous.load();
         });
         return true;   // handed off (or stop-woken after deposit — teardown drains q)
     }
@@ -289,9 +293,9 @@ static bool enqueue_to_lane_(xi::TriggerEvent ev) {
         // TO DROP rather than hang. cv.wait releases lane->mu while parked so the
         // worker can drain and free a slot; it re-acquires lk before returning.
         lane->cv_not_full.wait(lk, [&] {
-            return (int)lane->q.size() < depth || !g_eng.continuous.load();
+            return (int)lane->q.size() < depth || lane->stopped || !g_eng.continuous.load();
         });
-        if (!g_eng.continuous.load()) {   // stop-wake → drop (guard releases ev)
+        if (lane->stopped || !g_eng.continuous.load()) {   // stop-wake → drop (guard releases ev)
             ++g_eng.dropped_lifetime;     // RB3 (doc 25): count the teardown drop (no wire marker — see depth-0 note)
             return false;
         }
@@ -447,13 +451,13 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
                         // the lane for the duration of the jump. next_allowed_us
                         // holds steady-us (reset to 0 at lane start).
                         int64_t iv = (int64_t)lane->cfg.min_interval_ms * 1000;
-                        int64_t now = xi::steady_now_us(), prev = lane->next_allowed_us.load(std::memory_order_relaxed), slot;
+                        int64_t now = xi::mono_us(), prev = lane->next_allowed_us.load(std::memory_order_relaxed), slot;
                         do { slot = prev > now ? prev : now; }
                         while (!lane->next_allowed_us.compare_exchange_weak(prev, slot + iv, std::memory_order_acq_rel));
-                        for (int64_t w = slot - xi::steady_now_us(); w > 0 && g_eng.continuous.load(); w = slot - xi::steady_now_us())
+                        for (int64_t w = slot - xi::mono_us(); w > 0 && g_eng.continuous.load(); w = slot - xi::mono_us())
                             std::this_thread::sleep_for(std::chrono::microseconds(w > 20000 ? 20000 : w));
                     }
-                    ev.dequeued_at_us = xi::now_us();
+                    ev.dequeued_at_us = xi::wall_us();
                     lane->running.fetch_add(1);
                     int frame_seq = (int)rid;
                     // THE CUT: "is this a real trigger?" is now keyed on pack payload
@@ -500,7 +504,12 @@ void stop_group_pool_() {
     // block-wait predicate keys off g_eng.continuous (already false here), so a parked
     // producer returns-and-drops instead of hanging teardown (its join below / the
     // source-instance destroy later would otherwise deadlock on a stuck emit thread).
-    for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); lp->cv_not_full.notify_all(); }
+    // Mark each lane DEAD (lp->stopped, under its mu, in the SAME critical section
+    // as the notify so a woken waiter is guaranteed to see it) — the global flag
+    // alone is not enough: a later resume re-arms g_eng.continuous, and a producer
+    // still holding one of THESE (old) shared_ptrs must not deposit/park on a lane
+    // that no longer has workers (lane-ABA).
+    for (auto& lp : lanes) { std::lock_guard<std::mutex> lk(lp->mu); lp->stopped = true; lp->cv.notify_all(); lp->cv_not_full.notify_all(); }
     for (auto& lp : lanes) for (auto& t : lp->workers) if (t.joinable()) t.join();
     // Workers are gone + g_eng.continuous is false → drain leftover queued events and
     // release their image handles before the lanes are dropped (release-before-
@@ -525,8 +534,11 @@ void stop_dispatch_pool_() {
         for (auto& lp : lanes) {
             // cv → workers; cv_not_full → any parked overflow:block producer (so it
             // observes continuous=false and returns-and-drops, not hang); gate.cv →
-            // anyone parked in a per-lane EmitTurn (ordered mode).
-            { std::lock_guard<std::mutex> lk(lp->mu); lp->cv.notify_all(); lp->cv_not_full.notify_all(); }
+            // anyone parked in a per-lane EmitTurn (ordered mode). Also mark the
+            // lane DEAD (lp->stopped, under mu, same critical section as the
+            // notify) so a producer holding a stale shared_ptr can't be fooled by
+            // a subsequent resume re-arming the global flag (lane-ABA).
+            { std::lock_guard<std::mutex> lk(lp->mu); lp->stopped = true; lp->cv.notify_all(); lp->cv_not_full.notify_all(); }
             { std::lock_guard<std::mutex> lk(lp->gate.mu); lp->gate.cv.notify_all(); }
         }
     }
@@ -638,7 +650,12 @@ void controlled_shutdown_teardown_() {
     // close_project, leaving ~PluginManager to do it at static destruction — after
     // FreeLibrary (destroy_fn into unmapped code) and after ImagePool was torn down
     // (release_all_for on a destroyed singleton). Idempotent: no-op if already closed.
-    g_eng.plugin_mgr.close_project();
+    // QuiesceToken: NOT a missing-guard site — this function IS the quiesce
+    // (begin_shutdown + clear_sink + stop_dispatch_pool_ + inflight drain +
+    // run_mu above are a terminal SUPERSET of quiesce_dispatch_for_lifecycle_
+    // op_, with no resume by design). Assert that explicitly instead of
+    // constructing a resume-shaped guard inside teardown.
+    g_eng.plugin_mgr.close_project(xi::QuiesceToken::assert_no_dispatch());
     g_eng.srv_for_bp = nullptr;                            // last: every emitter is quiesced now
     g_eng.teardown_done.store(true);                       // T2: unblock a waiting console handler
 }
@@ -728,11 +745,17 @@ void install_trigger_sink_(xi::ws::Server* srv) {
 // handler remembering to respawn — five handlers (recompile/rebuild/commit/discard/
 // export) used to quiesce and never resume, silently stopping the live stream on a
 // hot-recompile. An op that legitimately should NOT resume (the stream ends or is
-// replaced: unload_script / close_project / open_project) calls dismiss().
+// replaced: unload_script / close_project / open_project / a partial commit_group)
+// calls skip_resume(), which only clears the resume-continuous + restore-sink
+// flags — the launch PAUSE is always released in the destructor, never early
+// (the O2 fix, structurally; see DispatchPoolGuard::skip_resume).
+// QuiesceToken: the guard also carries the proof-of-quiesce capability
+// (guard.token()) that every destructive PluginManager method now REQUIRES —
+// an op that forgets this guard no longer compiles (xi_quiesce_token.hpp).
 // MOVE-ONLY: quiesce_dispatch_for_lifecycle_op_ returns one by value; a moved-from
 // guard won't resume. CALLERS MUST HOLD IT (`auto g = quiesce_...`) for the op's
 // duration — a discarded temporary would resume immediately, before the op runs.
-// DispatchPoolGuard struct (incl. its inline resume()/dismiss()) moved to
+// DispatchPoolGuard struct (incl. its inline resume()/skip_resume()) moved to
 // service_internal.hpp so lifecycle-op cmd handlers in other TUs can hold it.
 DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
                                                             xi::ws::Server* srv) {
@@ -744,8 +767,9 @@ DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
     // handler thread — so without this a source emitting mid-op could launch an
     // inspect that calls into a DLL being unloaded (use-after-unload). clear_sink stops
     // future fires; pause()+drain() is the Dekker handshake that also catches an emit
-    // already past the sink read but not yet counted. The guard reverses both (resume
-    // re-installs the sink + unpauses; dismiss unpauses without re-installing).
+    // already past the sink read but not yet counted. The guard reverses both in its
+    // DESTRUCTOR (resume unpauses + re-installs the sink; after skip_resume() it
+    // still unpauses at scope end but skips the sink re-install + continuous respawn).
     g_eng.inflight.pause();
     g.paused_launches_ = true;
     g.restore_sink_    = xi::TriggerBus::instance().has_sink();   // only restore if one existed

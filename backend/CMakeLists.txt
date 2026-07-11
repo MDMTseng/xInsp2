@@ -333,7 +333,7 @@ add_test(NAME golden_plugin COMMAND test_golden_plugin)
 # [ABI v12 THE CUT: OQ-7 static cross-plugin Record field contract removed. The
 #  xi_plugin_record_schema export + xi_record_schema.hpp were deleted with the
 #  Record data plane; schema_fixture_plugin.cpp and test_record_schema.cpp are
-#  gone. The pack plane carries its own schema (contract codegen / PackSchema),
+#  gone. The pack plane carries its own schema (contract codegen key arrays),
 #  covered by the pack tests.]
 
 # B2 — a plugin operator that throws must not unwind across the extern "C" ABI
@@ -671,8 +671,8 @@ else()
 endif()
 add_test(NAME parallel_safety COMMAND test_parallel_safety)
 
-# High-stress race nets for the owner-propagation + watchdog epoch-cancel GAPs
-# (§28 Tier-2/3). Same /openmp requirement as parallel_safety so parallel_for
+# High-stress race nets for the owner-propagation GAPs (§28 Tier-2/3).
+# Same /openmp requirement as parallel_safety so parallel_for
 # hits the real threaded owner-reinstall path. The _heavy variant scales the
 # contention; run under -DXINSP2_SANITIZE=address for the UAF/corruption subset.
 add_executable(test_owner_cancel_stress tests/test_owner_cancel_stress.cpp)
@@ -1219,6 +1219,23 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_retired_terms.py)
     set_tests_properties(retired_terms PROPERTIES LABELS "docs")
+    # doc_debt: the manual companion to the two derived guards — docs/DOC_DEBT.md
+    # is the ledger where a code change that invalidates a doc page records one
+    # `- [ ]` line instead of fixing it in-branch; this fails while any unchecked
+    # item remains (and on malformed checkbox lines), so recorded debt cannot
+    # ride a green gate to merge. Same pure-stdlib Python, same "docs" label.
+    add_test(NAME doc_debt
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_doc_debt.py)
+    set_tests_properties(doc_debt PROPERTIES LABELS "docs")
+    # doc_links: the code→doc backlink checker — `// @doc <relpath>[#anchor]`
+    # comments in backend/include/xi + backend/src name the doc page teaching
+    # that region; this fails if a referenced page no longer exists (anchors not
+    # validated yet; zero markers passes — adoption is organic).
+    add_test(NAME doc_links
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_doc_links.py)
+    set_tests_properties(doc_links PROPERTIES LABELS "docs")
     # contract_schema: the contract-first spike gate. Validates every schema under
     # contract/schemas/ against the constrained-subset meta-schema (way A) and
     # every wire fixture (protocol/fixtures + contract/examples) against its mapped

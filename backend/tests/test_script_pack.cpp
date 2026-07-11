@@ -56,14 +56,12 @@ static int g_failures = 0;
 // xi_use.hpp declares these extern (the script DLL defines them static via
 // xi_script_support.hpp). This host-role test owns the storage; only
 // g_use_host_api_ is exercised here.
-void* g_use_process_fn_    = nullptr;
 void* g_use_exchange_fn_   = nullptr;
 void* g_use_host_api_      = nullptr;
 void* g_trigger_info_fn_   = nullptr;
 void* g_trigger_image_fn_  = nullptr;
 void* g_trigger_sources_fn_ = nullptr;
 void* g_trigger_leader_fn_  = nullptr;
-void* g_trigger_meta_fn_    = nullptr;
 
 static int pool_live() { return xi::ImagePool::instance().cumulative().live_now; }
 

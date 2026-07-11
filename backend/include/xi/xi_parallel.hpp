@@ -21,7 +21,10 @@
 //     region joins.
 //   * Cooperative cancellation — polls xi::cancellation_requested() and SKIPs
 //     the remaining iterations (OpenMP forbids breaking out of a for-region), so
-//     a watchdog-cancelled inspect drains the loop quickly.
+//     a task whose per-task xi::async cancel token is flipped (Future::cancel()
+//     or a dropped, unconsumed Future) drains the loop quickly and returns
+//     normally. (The watchdog's soft epoch-cancel was retired — a wedged inspect
+//     now runs until the watchdog's HARD trip; see service_main.cpp.)
 //   * Owner attribution (C3) — reads the inspect-thread image-pool owner ONCE
 //     before the region and re-installs it per worker (detail::OwnerScope),
 //     exactly as it installs the SEH translator, so parallel-created pool images
@@ -72,19 +75,18 @@ void parallel_for(int n, F&& body) {
     // region — re-installed per worker inside (0 when the owner thunk is unwired).
     const uint32_t parent_owner = detail::owner_get();
 
-    // F4: capture the trigger-context marker ONCE on the inspect thread — re-installed
-    // per worker so a current_trigger() read from a parallel body is caught as an
-    // off-thread misuse (the ambient trigger lives on the inspect thread only; the
-    // body must capture xi::trigger_snapshot() by value). 0 when the thunk is unwired.
-    const uint32_t parent_trigger_ctx = detail::trigger_ctx_get();
+    // A4: capture the per-run context ONCE on the inspect thread — re-installed per
+    // worker so xi::run_id() / xi::current_frame_path() / xi::result() called from a
+    // parallel body resolve to the run (the spawn-gap closure), and an off-thread
+    // ambient current_trigger() read is still caught host-side. null when unwired.
+    const void* const parent_run_ctx = detail::run_ctx_get();
 
-    // G3: capture the inspect cancel-ticket + token ONCE on THIS (inspect) thread,
-    // before the region. Without re-installing them per worker, OMP workers keep
-    // ticket 0, which cancellation_requested() treats as "cancel me" the instant a
-    // watchdog cancel is armed — so a watchdog-SPARED fresh frame (ticket >= cutoff)
-    // has its worker `omp for` chunk silently skipped yet still returns inspect_ok,
-    // a wrong verdict in the ~1s cancel window. Mirrors xi::async's Scope.
-    const uint64_t parent_ticket = current_inspect_ticket_ref();
+    // Capture the per-task cancel token ONCE on THIS (inspect/calling) thread,
+    // before the region, and re-install it per worker so a token-based
+    // cooperative cancel (Future::cancel() / dropped Future, when parallel_for
+    // runs inside an xi::async task) is visible to cancellation_requested() on
+    // the OMP workers. Mirrors xi::async's Scope. (The retired watchdog
+    // epoch-ticket is gone; ticket 0 no longer means "cancel me".)
     CancelToken* const parent_cancel_token = current_cancel_token_ref();
 #ifdef _OPENMP
     #pragma omp parallel
@@ -92,28 +94,22 @@ void parallel_for(int n, F&& body) {
         xi::crash::reserve_fault_stack();               // 128 KB dump headroom (mirrors lane path)
         xi::install_seh_translator();                   // per-OMP-thread (B1)
         detail::OwnerScope owner_scope(parent_owner);   // per-worker owner (C3)
-        detail::TriggerCtxScope trigger_ctx_scope(parent_trigger_ctx);   // per-worker trigger ctx (F4)
-        // G3: re-install the parent inspect ticket + cancel token on this worker so
-        // it is not mistaken for ticket 0 (= unconditionally cancellable).
-        struct TicketScope {
-            uint64_t     prev_ticket;
+        detail::RunCtxScope run_ctx_scope(parent_run_ctx);   // per-worker run context (A4)
+        // Re-install the parent's cancel token on this worker so a token-based
+        // cooperative cancel reaches cancellation_requested() here too.
+        struct CancelTokenScope {
             CancelToken* prev_tok;
-            TicketScope(uint64_t t, CancelToken* k)
-                : prev_ticket(current_inspect_ticket_ref()),
-                  prev_tok(current_cancel_token_ref()) {
-                current_inspect_ticket_ref() = t;
-                current_cancel_token_ref()   = k;
+            explicit CancelTokenScope(CancelToken* k)
+                : prev_tok(current_cancel_token_ref()) {
+                current_cancel_token_ref() = k;
             }
-            ~TicketScope() {
-                current_inspect_ticket_ref() = prev_ticket;
-                current_cancel_token_ref()   = prev_tok;
-            }
-        } ticket_scope(parent_ticket, parent_cancel_token);
+            ~CancelTokenScope() { current_cancel_token_ref() = prev_tok; }
+        } cancel_token_scope(parent_cancel_token);
         #pragma omp for
         for (int i = 0; i < n; ++i) {
-            // Drain fast once anyone has faulted; honour a cooperative cancel.
+            // Drain fast once anyone has faulted; honour a cooperative token cancel.
             if (faulted.load(std::memory_order_relaxed)) continue;
-            if (xi::cancellation_requested())            continue;
+            if (xi::cancellation_requested()) continue;
             try {
                 body(i);
             } catch (const xi::seh_exception& e) {
@@ -141,7 +137,7 @@ void parallel_for(int n, F&& body) {
     // without /openmp behaves identically (just single-threaded).
     for (int i = 0; i < n; ++i) {
         if (faulted.load(std::memory_order_relaxed)) break;
-        if (xi::cancellation_requested())            break;
+        if (xi::cancellation_requested()) break;
         try {
             body(i);
         } catch (const xi::seh_exception& e) {
@@ -161,6 +157,10 @@ void parallel_for(int n, F&& body) {
         if (cpp_eptr) std::rethrow_exception(cpp_eptr);
         throw xi::seh_exception(seh_code.load(std::memory_order_relaxed));
     }
+    // A token-based cooperative cancel just drains the loop early and returns
+    // normally (the old Future-token semantics). There is no watchdog-truncated
+    // verdict to suppress here anymore — a wedged inspect is handled by the
+    // watchdog's HARD trip (_Exit), which kills the process outright.
 }
 
 } // namespace xi

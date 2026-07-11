@@ -394,7 +394,8 @@ Precise wording so the baselines aren't over-read:
   clash).
 - **Per-worker watchdog** — `examples/qa_watchdog/` proves the inspect watchdog
   now fires under `dispatch_threads > 1` (it tracks a deadline slot per worker,
-  not one global slot) and that a hard trip (script ignores cooperative cancel)
+  not one global slot) and that a hard trip (inspect still wedged after the
+  grace window — the cooperative soft-cancel phase is retired)
   makes the backend **exit** with `0x5744` for the FE to respawn — rather than
   `TerminateThread` a worker (which would leak the per-instance lock). The N=1
   path + WS contract is covered by `vscode-extension/test/runWatchdog.mjs`.

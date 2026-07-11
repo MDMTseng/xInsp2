@@ -57,7 +57,7 @@ public:
     virtual ~InstanceBase() = default;
 
     virtual const std::string& name()        const = 0;
-    virtual std::string        plugin_name() const = 0;
+    virtual const std::string& plugin_name() const = 0;
 
     // JSON serialization for project.json persistence.
     virtual std::string get_def() const                 { return "{}"; }

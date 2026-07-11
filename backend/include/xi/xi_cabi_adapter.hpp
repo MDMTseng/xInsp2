@@ -319,9 +319,8 @@ public:
         // still provides, so a lib plugin that forgot to unregister on destroy
         // can never leave a dangling handler/self in the registry. Runs AFTER
         // destroy_fn_ (a well-behaved plugin's own unregister has already
-        // emptied its bucket) and BEFORE the pool-alive early-return below:
-        // the cap registry is pool-independent and self-guards its own static
-        // teardown (g_cap_registry_alive inside the published sweeper).
+        // emptied its bucket). Safe during static destruction: the cap
+        // registry singleton is intentionally leaked (xi_cap_abi.hpp).
         int cswept = ImagePool::sweep_caps_for(owner_id_);
         if (cswept > 0) {
             std::fprintf(stderr,
@@ -330,13 +329,13 @@ public:
         }
         // Sweep any image handles the plugin allocated and forgot to
         // release. Without this, plugin crashes / careless authors leak
-        // ImagePool entries forever. GUARD g_image_pool_alive: if this adapter is
-        // destroyed during STATIC destruction (a never-closed project reaching
-        // ~PluginManager) the ImagePool Meyers singleton may already be gone —
-        // ImagePool::instance() would return (and re-flag alive on) a destroyed
-        // object and release_all_for would iterate freed slots. Skip the sweep then;
-        // the process is exiting and the OS reclaims the pool memory anyway.
-        if (!g_image_pool_alive.load(std::memory_order_acquire)) return;
+        // ImagePool entries forever. Safe even when this adapter is destroyed
+        // during STATIC destruction (a never-closed project reaching
+        // ~PluginManager): the ImagePool singleton is intentionally leaked, so
+        // it is always alive here. Note this means the pack sweep below also
+        // ALWAYS runs — a caller-owned pack a plugin produced is protected by
+        // the ownership handoff (run_pack_door / the cap funnel retag its
+        // output ref untagged), so the sweep reclaims only genuine leaks.
         int swept = ImagePool::instance().release_all_for(owner_id_);
         if (swept > 0) {
             std::fprintf(stderr,
@@ -363,7 +362,7 @@ public:
     void adopt_owner_id(ImagePoolOwnerId id) { owner_id_ = id; }
 
     const std::string& name() const override { return name_; }
-    std::string plugin_name() const override { return plugin_name_; }
+    const std::string& plugin_name() const override { return plugin_name_; }
 
     // OwnerGuard wraps every plugin entry-point call so any image
     // handles the plugin allocates via host_api->image_create get
@@ -405,7 +404,18 @@ public:
 #endif
         ImagePool::OwnerGuard g(owner_id_);
         CallScope cs(this);
-        std::vector<char> buf(64 * 1024);
+        // B6 (burr audit): per-thread scratch instead of a fresh 64 KiB vector
+        // per call — steady-state exchange() calls stop allocating (grow-only,
+        // never shrunk). RE-ENTRANCY VERDICT: safe. exchange() is entered only
+        // host-side (WS cmd_exchange_instance_, the script's use_exchange_cb,
+        // project save/load) — xi_host_api publishes NO door through which a
+        // plugin's exchange handler could re-enter another instance's
+        // exchange() on the same thread (the cap funnel invokes provider
+        // handlers directly, never via the adapter), so the scratch cannot be
+        // clobbered under our own stack frame. If such a door is ever added,
+        // this needs a TLS depth counter falling back to a local vector.
+        thread_local std::vector<char> buf;
+        if (buf.size() < 64 * 1024) buf.resize(64 * 1024);
         int n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size());
         // ABI: callee returns -(exact content size). Alloc n+1: content + the trailing NUL the export writes.
         if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }
@@ -430,7 +440,19 @@ public:
         ImagePool::OwnerGuard og(owner_id_);
         CallScope cs(this);
         DataPlaneMark dp;   // capability plane: no registration from inside a door
-        return frame_proc_->process(inst_, in);
+        xi_pack_handle out = frame_proc_->process(inst_, in);
+        // Ownership handoff — the same fix as the capability funnel
+        // (xi_pack_abi.hpp): the door sealed its output under
+        // OwnerGuard(owner_id_), stamping THIS producing instance as creator,
+        // but the seal ref is handed to the CALLER, who owns it. Left tagged,
+        // this instance's teardown sweep (dtor → sweep_packs_for) would reclaim
+        // the handed-off ref and free the caller's live pack. Clear the creator
+        // tag while the OwnerGuard/CallScope pin is still held — rc unchanged
+        // (PackRegistry::untag). Every door caller (use_pack_process_cb, the
+        // runner, tests) routes through here, so this is the one central spot.
+        if (out != XI_PACK_NULL)
+            ImagePool::untag_pack_ref(out, owner_id_);
+        return out;
     }
 
     // Frame-perfect config swap (ABI v7). prepare loads the new config's heavy

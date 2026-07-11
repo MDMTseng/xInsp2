@@ -161,7 +161,7 @@ the port itself; it's a record so we know what to expect.
 
 | Mechanism | Why hard |
 |---|---|
-| ~~`TerminateThread` watchdog~~ **(RESOLVED — was never ported because it never needed it)** | The watchdog design already evolved off `TerminateThread`: Phase 1 arms the script's cooperative-cancel epoch (`set_global_cancel`), Phase 2 (script ignored the grace) `std::_Exit`s the whole process for the FE to respawn — a forced thread-kill was rejected as unsafe (leaks the per-instance lock, risks heap corruption). Both phases are plain `std::thread`/atomics/`_Exit`, so the watchdog is portable as-is and passes `examples/qa_watchdog` on Linux. No cooperative-checkpoint-API or `SIGUSR`-longjmp work is needed. |
+| ~~`TerminateThread` watchdog~~ **(RESOLVED — ports as-is; validated on Linux)** | **Update 2026-07-11 (`93de38b`): the cooperative-cancel layer was retired.** The watchdog no longer kills threads or soft-cancels — it is one phase: overrun → grace → hard `std::_Exit(WATCHDOG_EXIT_CODE)` + FE respawn. `_Exit` is POSIX, so the mechanism ports as-is; the only Linux work is the supervisor-respawn side (`fe_main.cpp` row above, now done). Validated on Linux via `examples/qa_watchdog` (a g++-JIT'd runaway script hard-trips and the FE respawns). The old sketches (cooperative-checkpoint API, `SIGUSR`+longjmp) are obsolete. |
 | Plugin DLL versioning (`stem_vN.dll` per `xi_script_compiler.hpp`) | Exists only because Windows holds a load lock on the previous DLL until unload completes. Linux `dlclose` has no such lock, so this whole hack can be deleted on the Linux build. Make sure to keep it conditional, not retroactively rip it out from Windows. |
 
 ## Outside the backend
