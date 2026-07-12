@@ -67,10 +67,10 @@ void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // a source's emit_record would, with no source plugin needed.
         std::string meta_json;
         {
-            std::string m; const char* after = nullptr;
+            std::string m;
             if (xp::detail::find_key(parsed->args_json.data(),
                                      parsed->args_json.data() + parsed->args_json.size(),
-                                     "meta", m, after)) {
+                                     "meta", m)) {
                 meta_json = std::move(m);
             }
         }
@@ -287,10 +287,9 @@ void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         std::string cmd_str;
-        const char* after;
         if (xp::detail::find_key(parsed->args_json.data(),
                                   parsed->args_json.data() + parsed->args_json.size(),
-                                  "cmd", cmd_str, after)) {
+                                  "cmd", cmd_str)) {
         } else {
             cmd_str = "{}";
         }
@@ -363,10 +362,9 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         std::string def_str;
-        const char* after;
         if (!xp::detail::find_key(parsed->args_json.data(),
                                   parsed->args_json.data() + parsed->args_json.size(),
-                                  "def", def_str, after)) {
+                                  "def", def_str)) {
             def_str = "{}";
         }
         auto folder = xp::get_string_field(parsed->args_json, "folder");

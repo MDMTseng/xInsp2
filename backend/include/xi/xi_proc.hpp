@@ -24,6 +24,22 @@
 #include <string>
 #include <vector>
 
+namespace xi {
+namespace proc {
+
+// Round-3 W2 #7: the ONE command-line argument quoter. Root cause: the cl.exe
+// command assembly hand-pasted `"\"" + s + "\""` at ~20 sites while the POSIX
+// compile branch and xi_cmake_build.hpp each carried their own identical q()
+// lambda — three spellings of one job, ready to drift. Plain wrap-in-quotes
+// with NO escaping, deliberately: every caller already rejects embedded `"`
+// and shell metacharacters before assembly (is_safe_path / the cmake-build
+// metachar guard), and Windows paths cannot contain `"`. Platform-neutral
+// (lives outside the _WIN32 spawn section below).
+inline std::string quote_arg(const std::string& s) { return "\"" + s + "\""; }
+
+} // namespace proc
+} // namespace xi
+
 #ifdef _WIN32
 
 #ifndef WIN32_LEAN_AND_MEAN

@@ -54,10 +54,9 @@ void cmd_set_param_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed
         // / "quoted string"), exact and un-reformatted; the param's set_from_json
         // validates it (rc -2 if it rejects). A missing value isn't a missing param.
         std::string val;
-        const char* after = nullptr;
         if (!xp::detail::find_key(parsed->args_json.data(),
                                   parsed->args_json.data() + parsed->args_json.size(),
-                                  "value", val, after)) {
+                                  "value", val)) {
             send_rsp_err(srv, id, "set_param: missing 'value' for '" + *pname + "'");
             return;
         }
@@ -142,10 +141,9 @@ void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         auto _def_guard = quiesce_dispatch_for_lifecycle_op_("set_instance_def", &srv);
         // Extract the def object as a raw JSON substring
         std::string def_str;
-        const char* after;
         if (xp::detail::find_key(parsed->args_json.data(),
                                   parsed->args_json.data() + parsed->args_json.size(),
-                                  "def", def_str, after)) {
+                                  "def", def_str)) {
             // def_str is the raw JSON value
         } else {
             def_str = "{}";

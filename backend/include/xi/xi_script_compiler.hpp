@@ -574,7 +574,7 @@ inline const std::vector<char>* vcvars_env_block(const std::string& vcvars) {
         return it->second.size() > 1 ? &it->second : nullptr;
 
     std::vector<char> block;
-    std::string cmd = "cmd /C \"\"" + vcvars + "\" >nul 2>nul && set\"";
+    std::string cmd = "cmd /C \"" + xi::proc::quote_arg(vcvars) + " >nul 2>nul && set\"";
     if (FILE* pipe = _popen(cmd.c_str(), "r")) {
         char line[32768];
         bool have_vslang = false;
@@ -659,11 +659,12 @@ inline PchResult ensure_pch(const std::string& output_dir, const std::string& fl
             return { pch.string(), obj.string() };
     }
     { std::ofstream o(stub); o << "#include <" << through << ">\n"; }
+    const auto q = &xi::proc::quote_arg;   // round-3 W2 #7: the shared quoter
     std::string cmd = "cmd /C \"";
-    if (!env) cmd += "\"" + vcvars + "\" >nul 2>nul && set VSLANG=1033 && ";
-    cmd += "cl.exe " + flags + " /c /Yc\"" + through + "\" /Fp\"" + pch.string()
-         + "\" /Fo\"" + obj.string() + "\" \"" + stub.string() + "\""
-         + " > \"" + plog.string() + "\" 2>&1\"";
+    if (!env) cmd += q(vcvars) + " >nul 2>nul && set VSLANG=1033 && ";
+    cmd += "cl.exe " + flags + " /c /Yc" + q(through) + " /Fp" + q(pch.string())
+         + " /Fo" + q(obj.string()) + " " + q(stub.string())
+         + " > " + q(plog.string()) + " 2>&1\"";
     // Round-3 #6: no more std::system fallback — env == nullptr spawns bounded
     // with the parent env inherited (the cmd line routes vcvars inline).
     int rc = run_with_env(cmd, env);
@@ -760,7 +761,7 @@ inline CompileResult compile_posix_build_(const CompileRequest& req) {
       : (req.mode == CompileMode::Script && req.fast) ? "-O0 -g"
       :                                                 "-O2 -g";
 
-    auto q = [](const std::string& s){ return "\"" + s + "\""; };
+    const auto q = &xi::proc::quote_arg;   // round-3 W2 #7: the shared quoter
     // -fpermissive: the script/plugin support headers declare the per-module
     // globals (g_use_host_api_ etc.) `extern` in xi_io/xi_use then DEFINE them
     // `static` in xi_script_support (each module needs its own copy). MSVC accepts
@@ -956,10 +957,11 @@ inline CompileResult compile(const CompileRequest& req) {
 #else
     const std::vector<char>* cl_env = nullptr;
 #endif
+    const auto q = &xi::proc::quote_arg;   // round-3 W2 #7: the shared quoter
     std::string cmd;
     cmd += "cmd /C \"";
     if (!cl_env) {
-        cmd += "\"" + vcvars + "\"";
+        cmd += q(vcvars);
         cmd += " >nul 2>nul && ";
         // Force English diagnostics regardless of system locale (cl localizes to
         // the OS UI language → mojibake / unparseable on non-en hosts). VSLANG=1033
@@ -1001,18 +1003,19 @@ inline CompileResult compile(const CompileRequest& req) {
     // on the consume compile below (NOT in front — keeps the PCH from re-keying
     // per cap value). TODO(linux): emit -fopenmp for gcc/clang instead.
     if (req.openmp_max_threads != 0) front += " /openmp";
-    front += " /I\"" + req.include_dir + "\"";
+    front += " /I" + q(req.include_dir);
     // vendor dir (stb, etc.) — sibling of include/
     auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";
-    if (std::filesystem::exists(vendor_dir)) front += " /I\"" + vendor_dir.string() + "\"";
-    // yyjson lives in vendor/yyjson/ — xi_record.hpp does #include "yyjson.h"
+    if (std::filesystem::exists(vendor_dir)) front += " /I" + q(vendor_dir.string());
+    // yyjson lives in vendor/yyjson/ — xi_json.hpp (and a script's own direct
+    // #include "yyjson.h") needs it on the include path.
     auto yyjson_inc = vendor_dir / "yyjson";
-    if (std::filesystem::exists(yyjson_inc)) front += " /I\"" + yyjson_inc.string() + "\"";
-    for (auto& d : req.include_dirs) front += " /I\"" + d + "\"";   // project extra includes
-    front += " /I\"" + req.opencv_dir + "\\include\"";
+    if (std::filesystem::exists(yyjson_inc)) front += " /I" + q(yyjson_inc.string());
+    for (auto& d : req.include_dirs) front += " /I" + q(d);   // project extra includes
+    front += " /I" + q(req.opencv_dir + "\\include");
     if (!req.turbojpeg_root.empty()) {
         front += " /D XINSP2_HAS_TURBOJPEG=1";
-        front += " /I\"" + req.turbojpeg_root + "\\include\"";
+        front += " /I" + q(req.turbojpeg_root + "\\include");
     }
 
     // Precompiled header for the OpenCV umbrella — the dominant parse cost. Best-
@@ -1025,7 +1028,7 @@ inline CompileResult compile(const CompileRequest& req) {
         if (!p.pch.empty()) {
             // /FI the umbrella FIRST (the /Yu boundary); xi headers re-include it
             // harmlessly (include-guarded). Then the script support header.
-            front += " /FIopencv2/opencv.hpp /Yu\"opencv2/opencv.hpp\" /Fp\"" + p.pch + "\"";
+            front += " /FIopencv2/opencv.hpp /Yu" + q("opencv2/opencv.hpp") + " /Fp" + q(p.pch);
             pch_obj = p.obj;
         }
     }
@@ -1040,14 +1043,14 @@ inline CompileResult compile(const CompileRequest& req) {
     // load (omp_set_num_threads). Post-PCH so the PCH isn't keyed per cap value.
     if (req.openmp_max_threads > 0)
         cmd += " /D XI_OMP_MAX_THREADS=" + std::to_string(req.openmp_max_threads);
-    cmd += " /Fo\"" + req.output_dir + "\\\\\"";
-    cmd += " /Fe\"" + out_dll.string() + "\"";
-    cmd += " \"" + req.source_path + "\"";
+    cmd += " /Fo" + q(req.output_dir + "\\\\");
+    cmd += " /Fe" + q(out_dll.string());
+    cmd += " " + q(req.source_path);
     // Additional source files
     for (auto& s : req.extra_sources) {
-        cmd += " \"" + s + "\"";
+        cmd += " " + q(s);
     }
-    cmd += " /link /IMPLIB:\"" + (std::filesystem::path(req.output_dir) / (versioned_stem + ".lib")).string() + "\"";
+    cmd += " /link /IMPLIB:" + q((std::filesystem::path(req.output_dir) / (versioned_stem + ".lib")).string());
     // Emit a versioned program PDB matched to this DLL so crash
     // minidumps resolve script frames to file:line. /DEBUG makes the
     // linker write the debug directory into the DLL pointing at this
@@ -1055,15 +1058,28 @@ inline CompileResult compile(const CompileRequest& req) {
     // paired with the live DLL; no shared vc*.pdb contention.
     // PluginDev/PluginExport already carry /Zi; adding /DEBUG here is
     // harmless for them and required for the Script (/Z7) path.
-    cmd += " /DEBUG /PDB:\"" + (std::filesystem::path(req.output_dir)
-                               / (versioned_stem + ".pdb")).string() + "\"";
-    // Link against pre-built yyjson.lib (the Record DOM/codec, via xi_record.hpp).
-    auto yyjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "yyjson.lib";
-    if (std::filesystem::exists(yyjson_lib)) {
-        cmd += " \"" + yyjson_lib.string() + "\"";
+    cmd += " /DEBUG /PDB:" + q((std::filesystem::path(req.output_dir)
+                               / (versioned_stem + ".pdb")).string());
+    // Link against the pre-built yyjson.lib from the backend's own build tree.
+    // yyjson backs xi_json.hpp (the JSON/config/manifest layer) and any direct
+    // #include "yyjson.h" in a script — NOT the long-deleted xi_record.hpp this
+    // comment used to cite; the dependency outlived THE CUT. Round-3 W2 #10:
+    // the path was hardcoded to build/Release/, so a Debug-only build tree
+    // silently linked nothing and every yyjson_* symbol failed at script link
+    // time. Ninja Multi-Config emits one lib per config subdir — probe Release
+    // first (the shipped/dev-default config), then Debug.
+    {
+        auto build_dir = std::filesystem::path(req.include_dir).parent_path() / "build";
+        for (const char* cfg : { "Release", "Debug" }) {
+            auto yyjson_lib = build_dir / cfg / "yyjson.lib";
+            if (std::filesystem::exists(yyjson_lib)) {
+                cmd += " " + q(yyjson_lib.string());
+                break;
+            }
+        }
     }
     // The PCH's own object (from /Yc) must be linked when consuming via /Yu.
-    if (!pch_obj.empty()) cmd += " \"" + pch_obj + "\"";
+    if (!pch_obj.empty()) cmd += " " + q(pch_obj);
     // Accelerator import libs — match the /D defines added above.
     if (!req.opencv_dir.empty()) {
         // Pre-built OpenCV ships opencv_world<ver>.lib at x64/vc16/lib.
@@ -1076,7 +1092,7 @@ inline CompileResult compile(const CompileRequest& req) {
                 if (n.rfind("opencv_world", 0) == 0 && n.size() > 4 &&
                     n.substr(n.size() - 4) == ".lib" &&
                     n.find('d') != n.size() - 5 /*skip *_d.lib debug*/) {
-                    cmd += " \"" + f.path().string() + "\"";
+                    cmd += " " + q(f.path().string());
                     break;
                 }
             }
@@ -1085,19 +1101,19 @@ inline CompileResult compile(const CompileRequest& req) {
     }
     if (!req.turbojpeg_root.empty()) {
         auto tj = std::filesystem::path(req.turbojpeg_root) / "lib" / "turbojpeg.lib";
-        if (std::filesystem::exists(tj)) cmd += " \"" + tj.string() + "\"";
+        if (std::filesystem::exists(tj)) cmd += " " + q(tj.string());
     }
     if (!req.ipp_root.empty()) {
         for (auto& n : { "ippcore.lib", "ippi.lib", "ippcv.lib", "ippcc.lib" }) {
             auto p = std::filesystem::path(req.ipp_root) / "lib" / n;
-            if (std::filesystem::exists(p)) cmd += " \"" + p.string() + "\"";
+            if (std::filesystem::exists(p)) cmd += " " + q(p.string());
         }
     }
     // User-declared import libs (project.json "link_libs"). Already resolved to
     // absolute paths by the caller. Lets a script/plugin link an external SDK
     // without a full-path #pragma comment(lib) in the source.
-    for (auto& l : req.link_libs) cmd += " \"" + l + "\"";
-    cmd += " > \"" + log_path.string() + "\" 2>&1";
+    for (auto& l : req.link_libs) cmd += " " + q(l);
+    cmd += " > " + q(log_path.string()) + " 2>&1";
     cmd += "\"";
 
 #ifdef _WIN32

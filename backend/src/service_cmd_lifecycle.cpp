@@ -42,6 +42,111 @@ void cmd_shutdown_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed)
         g_eng.should_exit = true;
 }
 
+// U2 (docs/new_gen/16): restore the captured kv channel into the freshly-swapped
+// script DLL — drop when the schema versions disagree (and the new side declared
+// one), consult the opt-in kv_change migrate hook first, all under the shared
+// guarded_script_call SEH/exception guard (round-3 W2 #6 extraction: this block
+// plus its two hand-rolled catch ladders lived inline in cmd_compile_and_load_).
+// Events use the state_migrated/state_dropped names with a "store":"kv"
+// discriminator. Caller holds g_eng.run_mu + g_eng.script_mu (the swap block);
+// no-op when the new DLL has no kv channel or nothing was captured.
+static void restore_kv_into_new_script_(xi::ws::Server& srv) {
+    if (!g_eng.script.set_kv || g_eng.persistent_kv_bytes.empty()) return;
+    int new_kv_schema = g_eng.script.kv_schema_version
+                      ? g_eng.script.kv_schema_version()
+                      : 0;
+    // Downgrade hole: a new script that LOST its XI_KV_SCHEMA decl
+    // (new_kv_schema == 0) while the captured store WAS versioned
+    // must also drop — we can't distinguish "never versioned" from
+    // "version decl lost", so the safe choice is drop rather than
+    // blind-restoring a versioned store into an unversioned script.
+    // 0 → 0 (never versioned on either side) keeps the blind
+    // best-effort restore.
+    bool kv_downgrade = (g_eng.persistent_kv_schema != 0 && new_kv_schema == 0);
+    bool kv_drop = (new_kv_schema != 0 &&
+                    g_eng.persistent_kv_schema != new_kv_schema)
+                 || kv_downgrade;
+    if (kv_drop) {
+        std::string kv_migrated;
+        if (xi::script::migrate_kv(g_eng.script, g_eng.persistent_kv_bytes,
+                                   g_eng.persistent_kv_schema, new_kv_schema,
+                                   kv_migrated)) {
+            auto oc = guarded_script_call(
+                "replay kv_set (migrated)", "replay kv_set (migrated)",
+                [&] { return g_eng.script.set_kv((const uint8_t*)kv_migrated.data(),
+                                                 (int)kv_migrated.size()); });
+            if (oc == ScriptCallOutcome::Refused)
+                std::fprintf(stderr,
+                    "[xinsp2] replay kv_set (migrated) refused the bytes — skipped\n");
+            if (oc != ScriptCallOutcome::Ok) {
+                g_eng.persistent_kv_bytes.clear();
+            } else {
+                g_eng.persistent_kv_bytes = kv_migrated;
+                std::fprintf(stderr,
+                    "[xinsp2] kv schema changed (v%d → v%d) — migrated prior store "
+                    "(%zu bytes) via kv_change hook\n",
+                    g_eng.persistent_kv_schema, new_kv_schema, kv_migrated.size());
+                std::string ev = "{\"type\":\"event\",\"name\":\"state_migrated\","
+                                 "\"data\":{\"store\":\"kv\",\"old_schema\":"
+                               + std::to_string(g_eng.persistent_kv_schema)
+                               + ",\"new_schema\":"
+                               + std::to_string(new_kv_schema)
+                               + "}}";
+                srv.send_text(ev);
+                g_eng.persistent_kv_schema = new_kv_schema;
+            }
+        } else {
+            std::fprintf(stderr,
+                "[xinsp2] kv schema changed (v%d → v%d) — dropping prior store\n",
+                g_eng.persistent_kv_schema, new_kv_schema);
+            std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
+                             "\"data\":{\"store\":\"kv\",\"old_schema\":"
+                           + std::to_string(g_eng.persistent_kv_schema)
+                           + ",\"new_schema\":"
+                           + std::to_string(new_kv_schema)
+                           + ",\"reason\":\""
+                           + (kv_downgrade ? "schema_downgrade" : "schema_mismatch")
+                           + "\"}}";
+            srv.send_text(ev);
+            g_eng.persistent_kv_bytes.clear();
+        }
+    } else {
+        // A refused/faulted restore loses the whole cross-frame
+        // store while compile_and_load still reports success —
+        // surface it as the same state_dropped event the schema
+        // drop path emits, so a headless controller can detect
+        // the loss (stderr alone is invisible over WS).
+        auto kv_restore_dropped = [&](const char* reason) {
+            std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
+                             "\"data\":{\"store\":\"kv\",\"old_schema\":"
+                           + std::to_string(g_eng.persistent_kv_schema)
+                           + ",\"new_schema\":"
+                           + std::to_string(new_kv_schema)
+                           + ",\"reason\":\"" + reason + "\"}}";
+            srv.send_text(ev);
+        };
+        auto oc = guarded_script_call(
+            "replay kv_set (restore)", "replay kv_set (restore)",
+            [&] { return g_eng.script.set_kv((const uint8_t*)g_eng.persistent_kv_bytes.data(),
+                                             (int)g_eng.persistent_kv_bytes.size()); });
+        switch (oc) {
+        case ScriptCallOutcome::Ok:
+            std::fprintf(stderr, "[xinsp2] kv restored (%zu bytes, schema v%d)\n",
+                         g_eng.persistent_kv_bytes.size(), new_kv_schema);
+            break;
+        case ScriptCallOutcome::Refused:
+            std::fprintf(stderr,
+                "[xinsp2] replay kv_set (restore) refused the bytes — skipped\n");
+            kv_restore_dropped("restore_refused");
+            break;
+        case ScriptCallOutcome::Crashed:
+        case ScriptCallOutcome::Threw:
+            kv_restore_dropped("restore_faulted");
+            break;
+        }
+    }
+}
+
 void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto src = xp::get_string_field(parsed->args_json, "path");
         if (!src) {
@@ -395,19 +500,13 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                     // code while we hold g_eng.run_mu + g_eng.script_mu. A plugin that throws
                     // (or faults, via the SEH translator) on an old/incompatible cached
                     // def must NOT terminate the backend mid-swap — log + skip it and
-                    // keep replaying the rest. Do NOT touch the held locks in the catch.
-                    try {
-                        g_eng.script.set_instance_def(iname.c_str(), def.c_str());
-                    } catch (const seh_exception& e) {
-                        std::fprintf(stderr,
-                            "[xinsp2] replay set_instance_def '%s' crashed: 0x%08X (%s) — skipped\n",
-                            iname.c_str(), e.code, e.what());
-                        xi::recover_seh_stack_or_die(e.code, "replay set_instance_def");
-                    } catch (const std::exception& e) {
-                        std::fprintf(stderr,
-                            "[xinsp2] replay set_instance_def '%s' threw: %s — skipped\n",
-                            iname.c_str(), e.what());
-                    }
+                    // keep replaying the rest (guarded_script_call never touches the
+                    // held locks in its catch arms). Best-effort like the param replay:
+                    // a nonzero rc (unknown/renamed def) quietly no-ops.
+                    guarded_script_call(
+                        "replay set_instance_def '" + iname + "'",
+                        "replay set_instance_def",
+                        [&] { return g_eng.script.set_instance_def(iname.c_str(), def.c_str()); });
                 }
                 if (!g_eng.instance_def_cache.empty()) {
                     std::fprintf(stderr,
@@ -417,119 +516,8 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             }
 
             // U2 (docs/new_gen/16): restore the kv channel into the new DLL —
-            // drop when the schema versions disagree (and the new side declared
-            // one), consult the opt-in kv_change migrate hook first, all under
-            // the same SEH/exception guards. Events use the state_migrated/
-            // state_dropped names with a "store":"kv" discriminator.
-            if (g_eng.script.set_kv && !g_eng.persistent_kv_bytes.empty()) {
-                int new_kv_schema = g_eng.script.kv_schema_version
-                                  ? g_eng.script.kv_schema_version()
-                                  : 0;
-                // Downgrade hole: a new script that LOST its XI_KV_SCHEMA decl
-                // (new_kv_schema == 0) while the captured store WAS versioned
-                // must also drop — we can't distinguish "never versioned" from
-                // "version decl lost", so the safe choice is drop rather than
-                // blind-restoring a versioned store into an unversioned script.
-                // 0 → 0 (never versioned on either side) keeps the blind
-                // best-effort restore.
-                bool kv_downgrade = (g_eng.persistent_kv_schema != 0 &&
-                                     new_kv_schema == 0);
-                bool kv_drop = (new_kv_schema != 0 &&
-                                g_eng.persistent_kv_schema != new_kv_schema)
-                             || kv_downgrade;
-                if (kv_drop) {
-                    std::string kv_migrated;
-                    if (xi::script::migrate_kv(g_eng.script, g_eng.persistent_kv_bytes,
-                                               g_eng.persistent_kv_schema, new_kv_schema,
-                                               kv_migrated)) {
-                        bool kv_ok = true;
-                        try {
-                            if (g_eng.script.set_kv((const uint8_t*)kv_migrated.data(),
-                                                    (int)kv_migrated.size()) != 0) {
-                                kv_ok = false;
-                                std::fprintf(stderr,
-                                    "[xinsp2] replay kv_set (migrated) refused the bytes — skipped\n");
-                            }
-                        } catch (const seh_exception& e) {
-                            kv_ok = false;
-                            std::fprintf(stderr,
-                                "[xinsp2] replay kv_set (migrated) crashed: 0x%08X (%s) — skipped\n",
-                                e.code, e.what());
-                            xi::recover_seh_stack_or_die(e.code, "replay kv_set (migrated)");
-                        } catch (const std::exception& e) {
-                            kv_ok = false;
-                            std::fprintf(stderr,
-                                "[xinsp2] replay kv_set (migrated) threw: %s — skipped\n", e.what());
-                        }
-                        if (!kv_ok) { g_eng.persistent_kv_bytes.clear(); }
-                        else {
-                        g_eng.persistent_kv_bytes = kv_migrated;
-                        std::fprintf(stderr,
-                            "[xinsp2] kv schema changed (v%d → v%d) — migrated prior store "
-                            "(%zu bytes) via kv_change hook\n",
-                            g_eng.persistent_kv_schema, new_kv_schema, kv_migrated.size());
-                        std::string ev = "{\"type\":\"event\",\"name\":\"state_migrated\","
-                                         "\"data\":{\"store\":\"kv\",\"old_schema\":"
-                                       + std::to_string(g_eng.persistent_kv_schema)
-                                       + ",\"new_schema\":"
-                                       + std::to_string(new_kv_schema)
-                                       + "}}";
-                        srv.send_text(ev);
-                        g_eng.persistent_kv_schema = new_kv_schema;
-                        }
-                    } else {
-                    std::fprintf(stderr,
-                        "[xinsp2] kv schema changed (v%d → v%d) — dropping prior store\n",
-                        g_eng.persistent_kv_schema, new_kv_schema);
-                    std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
-                                     "\"data\":{\"store\":\"kv\",\"old_schema\":"
-                                   + std::to_string(g_eng.persistent_kv_schema)
-                                   + ",\"new_schema\":"
-                                   + std::to_string(new_kv_schema)
-                                   + ",\"reason\":\""
-                                   + (kv_downgrade ? "schema_downgrade" : "schema_mismatch")
-                                   + "\"}}";
-                    srv.send_text(ev);
-                    g_eng.persistent_kv_bytes.clear();
-                    }
-                } else {
-                    // A refused/faulted restore loses the whole cross-frame
-                    // store while compile_and_load still reports success —
-                    // surface it as the same state_dropped event the schema
-                    // drop path emits, so a headless controller can detect
-                    // the loss (stderr alone is invisible over WS).
-                    auto kv_restore_dropped = [&](const char* reason) {
-                        std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
-                                         "\"data\":{\"store\":\"kv\",\"old_schema\":"
-                                       + std::to_string(g_eng.persistent_kv_schema)
-                                       + ",\"new_schema\":"
-                                       + std::to_string(new_kv_schema)
-                                       + ",\"reason\":\"" + reason + "\"}}";
-                        srv.send_text(ev);
-                    };
-                    try {
-                        if (g_eng.script.set_kv((const uint8_t*)g_eng.persistent_kv_bytes.data(),
-                                                (int)g_eng.persistent_kv_bytes.size()) == 0) {
-                            std::fprintf(stderr, "[xinsp2] kv restored (%zu bytes, schema v%d)\n",
-                                         g_eng.persistent_kv_bytes.size(), new_kv_schema);
-                        } else {
-                            std::fprintf(stderr,
-                                "[xinsp2] replay kv_set (restore) refused the bytes — skipped\n");
-                            kv_restore_dropped("restore_refused");
-                        }
-                    } catch (const seh_exception& e) {
-                        std::fprintf(stderr,
-                            "[xinsp2] replay kv_set (restore) crashed: 0x%08X (%s) — skipped\n",
-                            e.code, e.what());
-                        xi::recover_seh_stack_or_die(e.code, "replay kv_set (restore)");
-                        kv_restore_dropped("restore_faulted");
-                    } catch (const std::exception& e) {
-                        std::fprintf(stderr,
-                            "[xinsp2] replay kv_set (restore) threw: %s — skipped\n", e.what());
-                        kv_restore_dropped("restore_faulted");
-                    }
-                }
-            }
+            // see restore_kv_into_new_script_ above.
+            restore_kv_into_new_script_(srv);
         }
 
         // Build log can be large — send as a log message, not inline data.

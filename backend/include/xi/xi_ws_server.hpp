@@ -73,6 +73,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -219,6 +220,46 @@ inline std::string to_lower(std::string_view s) {
     std::string o(s);
     for (auto& c : o) c = (char)::tolower((unsigned char)c);
     return o;
+}
+
+// Round-3 W2 #1: the ONE handshake header extractor. Root cause: the three
+// headers the handshake reads (Sec-WebSocket-Key / Authorization /
+// X-Xi-Timestamp) each hand-rolled the same find-in-lowercased-request →
+// skip OWS → find CRLF → substr → rtrim ritual, and the trim sets were one
+// drifted copy away from diverging. `lc` is detail::to_lower(req) (computed
+// once by the caller); `name_lc` is the lowercase header name INCLUDING the
+// trailing ':'. Leading skip is space/tab (RFC 7230 OWS); the trailing trim
+// is the unified, most-correct variant all three copies already agreed on —
+// space/tab (OWS) plus a defensive '\r' (unreachable while the value ends at
+// the found CRLF, kept so a future caller passing a pre-split line can't
+// leak a stray CR). Returns nullopt when the header is absent or unterminated.
+inline std::optional<std::string> get_header_(const std::string& lc,
+                                              const std::string& req,
+                                              const char* name_lc) {
+    size_t pos = lc.find(name_lc);
+    if (pos == std::string::npos) return std::nullopt;
+    pos += std::strlen(name_lc);
+    while (pos < req.size() && (req[pos] == ' ' || req[pos] == '\t')) ++pos;
+    size_t eol = req.find("\r\n", pos);
+    if (eol == std::string::npos) return std::nullopt;
+    std::string v = req.substr(pos, eol - pos);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\r' || v.back() == '\t'))
+        v.pop_back();
+    return v;
+}
+
+// Round-3 W2 #2: constant-time equality for handshake credentials. Root
+// cause: the HMAC digest check and the plain bearer check carried identical
+// inline XOR-fold loops — the one comparison in the tree that must NOT be a
+// drifting copy (a "fixed" early-exit variant would reintroduce the timing
+// side channel). Length mismatch returns false immediately: the length of
+// the expected credential is not secret, only its bytes are.
+inline bool ct_equal(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    unsigned diff = 0;
+    for (size_t i = 0; i < a.size(); ++i)
+        diff |= (unsigned char)a[i] ^ (unsigned char)b[i];
+    return diff == 0;
 }
 
 } // namespace detail
@@ -368,7 +409,18 @@ public:
         if (writer_thread_.joinable()) writer_thread_.join();
         // 2) Now that no writer is touching client_ or the queue, tear down the
         //    client (close_client also clears the — now unattended — queue).
+        //    Round-3 W2 #3: every other client-death path (poll's proactive-drop
+        //    honor, the read_pending failure) runs close_client()+on_close() as a
+        //    PAIR; stop() was the lone asymmetric path, so a client dropped by
+        //    shutdown never got its on_close bookkeeping. on_close fires on the
+        //    stop() caller's thread — safe for the sole production consumer
+        //    (service_main clears the recent-errors ring under its own mutex,
+        //    and main() calls stop() after the poll loop exits while g_eng is
+        //    still alive). Gated on a live client so the idempotent second
+        //    stop() (~Server) cannot double-fire it.
+        bool had_client = client_.load(std::memory_order_acquire) != INVALID_SOCK;
         close_client();
+        if (had_client && on_close) on_close();
         if (listen_ != INVALID_SOCK) {
             CLOSESOCK(listen_);
             listen_ = INVALID_SOCK;
@@ -797,14 +849,9 @@ private:
         if (header_end == std::string::npos) return false;
 
         auto lc = detail::to_lower(req);
-        auto key_pos = lc.find("sec-websocket-key:");
-        if (key_pos == std::string::npos) return false;
-        key_pos += std::strlen("sec-websocket-key:");
-        while (key_pos < req.size() && (req[key_pos] == ' ' || req[key_pos] == '\t')) ++key_pos;
-        auto eol = req.find("\r\n", key_pos);
-        if (eol == std::string::npos) return false;
-        std::string key = req.substr(key_pos, eol - key_pos);
-        while (!key.empty() && (key.back() == ' ' || key.back() == '\r' || key.back() == '\t')) key.pop_back();
+        auto key_hdr = detail::get_header_(lc, req, "sec-websocket-key:");
+        if (!key_hdr) return false;
+        std::string key = std::move(*key_hdr);
 
         // Optional shared-secret auth. Two modes:
         //
@@ -829,53 +876,28 @@ private:
             std::string hmac_key = hmac_mode
                 ? auth_secret_.substr(hmac_prefix.size())
                 : std::string{};
-            const std::string tag = "authorization:";
-            auto a_pos = lc.find(tag);
             bool ok = false;
-            if (a_pos != std::string::npos) {
-                a_pos += tag.size();
-                while (a_pos < req.size() && (req[a_pos] == ' ' || req[a_pos] == '\t')) ++a_pos;
-                auto a_eol = req.find("\r\n", a_pos);
-                if (a_eol != std::string::npos) {
-                    std::string hdr = req.substr(a_pos, a_eol - a_pos);
-                    while (!hdr.empty() && (hdr.back() == ' ' || hdr.back() == '\r' || hdr.back() == '\t')) hdr.pop_back();
-                    const std::string prefix = "Bearer ";
-                    if (hdr.size() > prefix.size() &&
-                        hdr.compare(0, prefix.size(), prefix) == 0) {
-                        std::string_view got(hdr.data() + prefix.size(),
-                                             hdr.size() - prefix.size());
-                        if (hmac_mode) {
-                            // Pull X-Xi-Timestamp header.
-                            const std::string ts_tag = "x-xi-timestamp:";
-                            auto ts_pos = lc.find(ts_tag);
-                            if (ts_pos != std::string::npos) {
-                                ts_pos += ts_tag.size();
-                                while (ts_pos < req.size() && (req[ts_pos] == ' ' || req[ts_pos] == '\t')) ++ts_pos;
-                                auto ts_eol = req.find("\r\n", ts_pos);
-                                if (ts_eol != std::string::npos) {
-                                    std::string ts_str = req.substr(ts_pos, ts_eol - ts_pos);
-                                    while (!ts_str.empty() && (ts_str.back() == ' ' || ts_str.back() == '\r' || ts_str.back() == '\t')) ts_str.pop_back();
-                                    int64_t ts = 0;
-                                    try { ts = std::stoll(ts_str); } catch (...) {}
-                                    int64_t now = (int64_t)std::time(nullptr);
-                                    if (ts != 0 && std::abs(now - ts) <= 60) {
-                                        std::string expected =
-                                            xi::sha256::hmac_sha256(hmac_key, ts_str);
-                                        if (got.size() == expected.size()) {
-                                            unsigned diff = 0;
-                                            for (size_t i = 0; i < got.size(); ++i)
-                                                diff |= (unsigned char)got[i] ^ (unsigned char)expected[i];
-                                            ok = (diff == 0);
-                                        }
-                                    }
-                                }
+            if (auto hdr = detail::get_header_(lc, req, "authorization:")) {
+                const std::string prefix = "Bearer ";
+                if (hdr->size() > prefix.size() &&
+                    hdr->compare(0, prefix.size(), prefix) == 0) {
+                    std::string_view got(hdr->data() + prefix.size(),
+                                         hdr->size() - prefix.size());
+                    if (hmac_mode) {
+                        // Pull X-Xi-Timestamp header.
+                        if (auto ts_hdr = detail::get_header_(lc, req, "x-xi-timestamp:")) {
+                            const std::string& ts_str = *ts_hdr;
+                            int64_t ts = 0;
+                            try { ts = std::stoll(ts_str); } catch (...) {}
+                            int64_t now = (int64_t)std::time(nullptr);
+                            if (ts != 0 && std::abs(now - ts) <= 60) {
+                                std::string expected =
+                                    xi::sha256::hmac_sha256(hmac_key, ts_str);
+                                ok = detail::ct_equal(got, expected);
                             }
-                        } else if (got.size() == auth_secret_.size()) {
-                            unsigned diff = 0;
-                            for (size_t i = 0; i < got.size(); ++i)
-                                diff |= (unsigned char)got[i] ^ (unsigned char)auth_secret_[i];
-                            ok = (diff == 0);
                         }
+                    } else {
+                        ok = detail::ct_equal(got, auth_secret_);
                     }
                 }
             }

@@ -93,17 +93,7 @@ public:
 
     // ---- core lookup -------------------------------------------------
 
-    PoolEntry* lookup(xi_image_handle h) const {
-        uint32_t idx = (uint32_t)(h & SLOT_MASK);
-        if (idx >= SLOT_COUNT) return nullptr;
-        PoolEntry* e = slots_[idx].entry.load(std::memory_order_acquire);
-        if (!e) return nullptr;
-        // Reject stale handles whose generation no longer matches the
-        // slot's current occupant. Without this a careless plugin that
-        // holds a handle past release would land on the next allocation.
-        if (e->generation != ((h >> SLOT_BITS) & GEN_MAX)) return nullptr;
-        return e;
-    }
+    PoolEntry* lookup(xi_image_handle h) const { return lookup_(h, nullptr); }
 
     // ---- create / release -------------------------------------------
 
@@ -171,11 +161,9 @@ public:
     }
 
     void release(xi_image_handle h) {
-        uint32_t idx = (uint32_t)(h & SLOT_MASK);
-        if (idx >= SLOT_COUNT) return;
-        PoolEntry* e = slots_[idx].entry.load(std::memory_order_acquire);
+        uint32_t idx = 0;
+        PoolEntry* e = lookup_(h, &idx);
         if (!e) return;
-        if (e->generation != ((h >> SLOT_BITS) & GEN_MAX)) return;
         if (e->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             // Last ref — clear slot, return to free list, reclaim entry.
             // The slot-null store is seq_cst (not merely release) so it is
@@ -807,6 +795,23 @@ private:
         std::atomic<uint64_t>   generation{0};
         std::atomic<uint32_t>   next_free{0};   // 0 = list terminator
     };
+
+    // The ONE handle-resolve primitive (round-3 W2 #5). Root cause: release()
+    // re-implemented lookup()'s idx-mask / entry-load / generation-compare inline
+    // because it also needs the slot index — two drifting copies of the pool's
+    // most safety-critical check (both also carried a dead `idx >= SLOT_COUNT`
+    // branch: idx = h & SLOT_MASK can never exceed SLOT_COUNT-1). Rejects stale
+    // handles whose generation no longer matches the slot's current occupant —
+    // without this a careless plugin that holds a handle past release would land
+    // on the next allocation. `idx_out` (optional) receives the slot index.
+    PoolEntry* lookup_(xi_image_handle h, uint32_t* idx_out) const {
+        uint32_t idx = (uint32_t)(h & SLOT_MASK);
+        PoolEntry* e = slots_[idx].entry.load(std::memory_order_acquire);
+        if (!e) return nullptr;
+        if (e->generation != ((h >> SLOT_BITS) & GEN_MAX)) return nullptr;
+        if (idx_out) *idx_out = idx;
+        return e;
+    }
 
     Slot                  slots_[SLOT_COUNT];
     // High-water mark for slots never yet allocated. Slot 0 is reserved

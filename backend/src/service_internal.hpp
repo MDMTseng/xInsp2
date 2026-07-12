@@ -481,6 +481,45 @@ PluginCallResult guarded_plugin_call(const char* name,
     }
 }
 
+// ---- guarded_script_call: the script-DLL sibling of guarded_plugin_call -----
+// Root cause (round-3 W2 #6): the compile_and_load swap-time replay sites
+// (set_instance_def replay, kv migrate-restore, kv plain-restore) hand-copied
+// the same try{enter script DLL}catch(seh){stderr + recover_seh_stack_or_die}
+// catch(std){stderr} ritual three times, with the crash/threw log lines one
+// edit away from drifting. A script-DLL call has NO adapter, quarantine gate,
+// or on-fault policy — guarded_plugin_call's item-14 machinery genuinely does
+// not apply — so this is a deliberately smaller helper beside it, not a
+// parametrization of it.
+//   `label`       — the human stderr identity; may carry per-item detail
+//                   (e.g. "replay set_instance_def 'blobs'").
+//   `recover_ctx` — the recover_seh_stack_or_die context (the site class,
+//                   without per-item detail — matches the pre-helper strings).
+//   `fn`          — returns the thunk's int rc; nonzero maps to Refused. A
+//                   caller that ignores the rc (set_instance_def's
+//                   best-effort replay) just treats Refused like Ok.
+// Deliberately NO catch(...): the blocks this replaces let a non-std throw
+// propagate to the dispatch shell's top-level guard, and that stays true.
+enum class ScriptCallOutcome { Ok, Refused, Crashed, Threw };
+
+template <class Fn>
+inline ScriptCallOutcome guarded_script_call(const std::string& label,
+                                             const char* recover_ctx, Fn&& fn) {
+    try {
+        return fn() == 0 ? ScriptCallOutcome::Ok : ScriptCallOutcome::Refused;
+    } catch (const seh_exception& e) {
+        std::fprintf(stderr, "[xinsp2] %s crashed: 0x%08X (%s) — skipped\n",
+                     label.c_str(), e.code, e.what());
+        // Swallowed on a surviving thread — restore the stack guard page after
+        // an overflow (or hard-exit for respawn) BEFORE returning toward deep code.
+        xi::recover_seh_stack_or_die(e.code, recover_ctx);
+        return ScriptCallOutcome::Crashed;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[xinsp2] %s threw: %s — skipped\n",
+                     label.c_str(), e.what());
+        return ScriptCallOutcome::Threw;
+    }
+}
+
 // ---- script thunk grow-retry (Wave-2 #4) -------------------------------------
 // Root cause: the script DLL buffer protocol (`n = fn(buf, len); n < 0 ⇒ grow to
 // -n and retry`) was hand-rolled ~9x across the cmd handlers, and the copies

@@ -111,7 +111,7 @@ inline int build_cmake_plugin(const std::string& cmake_exe, const std::string& s
         log += "[refused: cmake_exe/config contains shell metacharacters]\n";
         return -1;
     }
-    auto q = [](const std::string& s) { return "\"" + s + "\""; };
+    const auto q = &xi::proc::quote_arg;   // round-3 W2 #7: the shared quoter
     if (!std::filesystem::exists(std::filesystem::path(build_dir) / "CMakeCache.txt")) {
         std::string cfg = q(cmake_exe) + " -S " + q(src_dir) + " -B " + q(build_dir) +
                           " -A x64 -DXINSP2_ROOT=" + q(xinsp_root);
