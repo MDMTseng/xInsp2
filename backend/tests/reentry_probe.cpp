@@ -7,8 +7,11 @@
 // the CallScope gate silently deadlocking on the cap=1 slot this thread holds.
 //
 // Raw C exports (no XI_PLUGIN_IMPL): the test drives one instance and needs to
-// arm the reentry hook from outside. xi_plugin_commit is exported so the adapter's
-// commit_fn_ is non-null and commit() reaches the guard.
+// arm the reentry hook from outside. xi_plugin_prepare AND xi_plugin_commit are
+// both exported (no-ops) because the adapter enforces them as a CONTRACT PAIR
+// (xi_cabi_adapter.hpp: half-pair => both nulled, staged path disabled); with
+// only commit exported, commit_fn_ would be nulled and commit() would bail
+// before ever reaching the debug lifecycle guard.
 //
 #include <xi/xi_abi.h>
 
@@ -45,6 +48,7 @@ XI_EXPORT int  xi_plugin_get_def(void*, char* buf, int cap) {
     if (cap > 2) { buf[0] = '{'; buf[1] = '}'; buf[2] = 0; return 2; }
     return 0;
 }
+XI_EXPORT int  xi_plugin_prepare(void*, const char*, const char*) { return 0; }
 XI_EXPORT void xi_plugin_commit(void*) {}
 
 // --- test control hook: run f(ctx) once during the next process() ---
