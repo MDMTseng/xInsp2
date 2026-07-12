@@ -37,6 +37,8 @@
 #include <string>
 #include <vector>
 
+#include "xi_proc.hpp"   // round-3 #6: the ONE bounded win32 spawn
+
 namespace xi::script {
 
 // Reap per-PID script-build dirs left by DEAD backends under `base` (J1). Each
@@ -603,28 +605,25 @@ inline const std::vector<char>* vcvars_env_block(const std::string& vcvars) {
 // WaitForSingleObject-with-timeout + TerminateProcess in xi_certify.hpp).
 static constexpr DWORD kCompileTimeoutMs = 300000;   // 5 min
 
-// Run a command line under a custom environment block; returns the process exit
-// code, or -1 if it couldn't be launched, or -2 if it exceeded kCompileTimeoutMs
-// (the caller reports a "toolchain timed out" diagnostic). (cl.exe is invoked via
-// `cmd /C` so the env's PATH resolves cl + the redirection works.)
-inline int run_with_env(const std::string& cmdline, const std::vector<char>& env) {
-    std::vector<char> mut(cmdline.begin(), cmdline.end());
-    mut.push_back('\0');
-    STARTUPINFOA si{}; si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessA(nullptr, mut.data(), nullptr, nullptr, FALSE, 0,
-                        (LPVOID)env.data(), nullptr, &si, &pi))
-        return -1;
-    if (WaitForSingleObject(pi.hProcess, kCompileTimeoutMs) == WAIT_TIMEOUT) {
-        // A hung toolchain is as dangerous to the control plane as a crashed one.
-        TerminateProcess(pi.hProcess, 1);
-        WaitForSingleObject(pi.hProcess, 2000);
-        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-        return -2;   // timed out — caller surfaces a clear diagnostic
-    }
-    DWORD code = 0; GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-    return (int)code;
+// Run a command line under a custom environment block (nullptr = inherit the
+// parent's); returns the process exit code, or -1 if it couldn't be launched,
+// or -2 if it exceeded kCompileTimeoutMs (the caller reports a "toolchain
+// timed out" diagnostic). (cl.exe is invoked via `cmd /C` so the env's PATH
+// resolves cl + the redirection works.)
+//
+// Round-3 #6: delegates to xi::proc::spawn_bounded. Two gaps closed:
+//   * the old copy killed only the immediate cmd.exe on timeout — orphaned
+//     cl.exe/mspdbsrv kept the .dll/.pdb locked; the job object now reaps the
+//     whole tree;
+//   * both compile paths fell back to UNBOUNDED std::system when the vcvars
+//     env capture failed — a wedged cl pinned the poll thread forever (the
+//     exact class kCompileTimeoutMs was added to kill). The fallback is now a
+//     bounded inherit-env spawn (the command line routes vcvars inline, so
+//     inherit-env is the std::system-equivalent), env == nullptr here.
+// Return-code semantics (0/exit-code, -1 spawn failure, -2 timeout) are
+// unchanged for all callers.
+inline int run_with_env(const std::string& cmdline, const std::vector<char>* env) {
+    return xi::proc::spawn_bounded(cmdline, kCompileTimeoutMs, env, /*capture=*/nullptr);
 }
 
 // Build (once, cached by a flag+exe signature) a precompiled header for the
@@ -665,7 +664,9 @@ inline PchResult ensure_pch(const std::string& output_dir, const std::string& fl
     cmd += "cl.exe " + flags + " /c /Yc\"" + through + "\" /Fp\"" + pch.string()
          + "\" /Fo\"" + obj.string() + "\" \"" + stub.string() + "\""
          + " > \"" + plog.string() + "\" 2>&1\"";
-    int rc = env ? run_with_env(cmd, *env) : std::system(cmd.c_str());
+    // Round-3 #6: no more std::system fallback — env == nullptr spawns bounded
+    // with the parent env inherited (the cmd line routes vcvars inline).
+    int rc = run_with_env(cmd, env);
     if (rc != 0 || !fs::exists(pch) || !fs::exists(obj)) return {};
     { std::ofstream o(sigf); o << sig; }
     return { pch.string(), obj.string() };
@@ -1100,7 +1101,10 @@ inline CompileResult compile(const CompileRequest& req) {
     cmd += "\"";
 
 #ifdef _WIN32
-    int rc = cl_env ? detail::run_with_env(cmd, *cl_env) : std::system(cmd.c_str());
+    // Round-3 #6: no more std::system fallback — cl_env == nullptr spawns
+    // bounded with the parent env inherited (the cmd line routes vcvars
+    // inline), so a wedged toolchain is killed either way.
+    int rc = detail::run_with_env(cmd, cl_env);
 #else
     int rc = std::system(cmd.c_str());
 #endif

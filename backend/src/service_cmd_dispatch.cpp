@@ -379,13 +379,18 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             // page consumed → the next deep call corrupted memory instead of
             // faulting), and there was no quarantine gate / crash bookkeeping.
             // guarded_plugin_call restores the full ritual. prepare() is
-            // quarantine-GATED: unlike set_def/commit its success path does not
-            // set InstState::Active, so it can never lift a quarantine — refusing
-            // it costs no re-enable path.
+            // quarantine-UNGATED (round-3 S1 fix): the previous round gated it on
+            // the theory that prepare's success path never sets InstState::Active
+            // so it "can't lift a quarantine" — but for a STAGED plugin the
+            // DOCUMENTED on_fault=refuse remedy is prepare_instance →
+            // commit_group, and gating prepare dead-ended that recovery at step 1
+            // (commit alone cannot re-stage). Same config-plane rationale as
+            // set_def/commit — see the gate_quarantined comment in
+            // service_internal.hpp.
             auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
             bool ok = false;
             auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
-                                         "prepare()", /*gate_quarantined=*/true, [&] {
+                                         "prepare()", /*gate_quarantined=*/false, [&] {
                 ok = inst->prepare(def_str, folder ? *folder : std::string());
             });
             switch (r.kind) {

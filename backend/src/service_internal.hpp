@@ -409,8 +409,11 @@ void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter);
 // gate — see set_inst_state in service_dispatch.cpp); gating them would make an
 // on_fault=refuse quarantine unrecoverable through its own documented remedy.
 // get_def is also ungated: reading the faulted config is how an operator repairs
-// it. prepare() IS gated (its success does not set Active, so it can't lift a
-// quarantine — nothing is lost by refusing it).
+// it. prepare() is ALSO ungated (round-3 S1): it was briefly gated on the theory
+// that its success never sets Active so it "can't lift a quarantine", but for a
+// STAGED plugin the documented on_fault=refuse remedy is prepare_instance →
+// commit_group — gating prepare dead-ended that recovery at step 1. prepare is
+// config-plane staging, exactly the surface quarantine must leave open.
 //
 // The on-fault POLICY (apply_on_fault_policy_) runs unconditionally on a caught
 // crash/throw when the instance is a C-ABI adapter: every previously-complete
@@ -422,7 +425,7 @@ struct PluginCallResult {
     enum class Kind { Ok, Quarantined, Crashed, Threw };
     Kind        kind = Kind::Ok;
     unsigned    seh_code = 0;   // Kind::Crashed only
-    std::string what;           // e.what() text (Crashed / Threw; empty for catch(...))
+    std::string what;           // e.what() text (Crashed / Threw; "non-std exception" for catch(...))
     bool ok() const { return kind == Kind::Ok; }
 };
 
@@ -470,6 +473,10 @@ PluginCallResult guarded_plugin_call(const char* name,
         note_instance_crash_(name, why);
         if (adapter) apply_on_fault_policy_(name, adapter);
         r.kind = K::Threw;
+        // Round-3 S5: leave a real message — converted call sites append r.what
+        // to user-facing errors ("xxx error: " + r.what) and an empty tail read
+        // as a truncated reply.
+        r.what = "non-std exception";
         return r;
     }
 }

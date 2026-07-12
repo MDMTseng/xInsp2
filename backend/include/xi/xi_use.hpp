@@ -747,25 +747,36 @@ inline TriggerSnapshot trigger_snapshot() {
 // below: a miss/misuse used to be silent (an empty result, no log), so a typo'd
 // name or a wrong-door call looked like "found nothing". Log it ONCE per key
 // through host->log so it's discoverable without flooding the per-frame path.
-inline void warn_once_(const xi_host_api* host, const std::string& key,
-                       const std::string& msg) {
+//
+// Round-3 S3 (same class as last round's E1/E2 check-then-build fixes): the
+// first consolidation built key AND message strings on EVERY call before
+// probing the once-map — on a per-frame misuse path (a typo'd use() inside
+// inspect()) that was several heap allocs per frame, forever, just to decide
+// "already warned". Restructure: probe first with a cheaply-built key
+// (prefix+name, one small concat); the message only materializes via the
+// builder lambda on the FIRST pass for that key.
+template <class MsgBuilder>
+inline void warn_once_(const xi_host_api* host, const char* prefix,
+                       const char* name, MsgBuilder&& build_msg) {
     if (!host || !host->log) return;
     static std::mutex mu;
     static std::unordered_map<std::string, bool> warned;
+    std::string key = std::string(prefix) + (name ? name : "");
     {
         std::lock_guard<std::mutex> lk(mu);
-        if (!warned.emplace(key, true).second) return;   // warned this key already
+        if (!warned.emplace(std::move(key), true).second) return;   // warned this key already
     }
-    host->log(3, msg.c_str());
+    host->log(3, build_msg().c_str());
 }
 
 // A miss on xi::use("name") — process/exchange returns -1 when no instance by
 // that name is registered (typo, or instance not created yet).
 inline void warn_use_miss_(const xi_host_api* host, const char* name) {
-    std::string key = name ? name : "";
-    warn_once_(host, "miss/" + key,
-        "xi::use(\"" + key + "\"): no such instance — process/exchange "
-        "returns empty (typo, or instance not created yet?)");
+    warn_once_(host, "miss/", name, [&]() -> std::string {
+        std::string n = name ? name : "";
+        return "xi::use(\"" + n + "\"): no such instance — process/exchange "
+               "returns empty (typo, or instance not created yet?)";
+    });
 }
 
 // polaris2 Gate P2: pack-door miss — the instance EXISTS but publishes no
@@ -773,11 +784,12 @@ inline void warn_use_miss_(const xi_host_api* host, const char* name) {
 // only return an empty pack. Without the log the silent empty looks identical
 // to a real empty result.
 inline void warn_use_no_pack_door_(const xi_host_api* host, const char* name) {
-    std::string key = name ? name : "";
-    warn_once_(host, "no_pack_door/" + key,
-        "xi::use(\"" + key + "\").process(pack): instance has no "
-        "xi.pack@1 door — returns an empty pack (the target plugin "
-        "publishes no pack door; it cannot be driven on the data plane)");
+    warn_once_(host, "no_pack_door/", name, [&]() -> std::string {
+        std::string n = name ? name : "";
+        return "xi::use(\"" + n + "\").process(pack): instance has no "
+               "xi.pack@1 door — returns an empty pack (the target plugin "
+               "publishes no pack door; it cannot be driven on the data plane)";
+    });
 }
 
 // U3 (docs/new_gen/17): process(pack) on a DECLARED ORDERED SINK (-5).
@@ -786,13 +798,14 @@ inline void warn_use_no_pack_door_(const xi_host_api* host, const char* name) {
 // call's reply cannot exist until the post-inspect flush, so it could only
 // return an empty pack indistinguishable from a door hard failure.
 inline void warn_use_sink_target_(const xi_host_api* host, const char* name) {
-    std::string key = name ? name : "";
-    warn_once_(host, "sink_target/" + key,
-        "xi::use(\"" + key + "\").process(pack): target is a declared "
-        "ordered sink — process() is request-reply and is rejected on "
-        "sinks (returns an empty pack); feed the sink with "
-        "xi::use(\"" + key + "\").push(pack) instead "
-        "(staged + flushed in frame order; docs/new_gen/17)");
+    warn_once_(host, "sink_target/", name, [&]() -> std::string {
+        std::string n = name ? name : "";
+        return "xi::use(\"" + n + "\").process(pack): target is a declared "
+               "ordered sink — process() is request-reply and is rejected on "
+               "sinks (returns an empty pack); feed the sink with "
+               "xi::use(\"" + n + "\").push(pack) instead "
+               "(staged + flushed in frame order; docs/new_gen/17)";
+    });
 }
 
 class UseProxy {

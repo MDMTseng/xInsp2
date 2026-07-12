@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <yyjson.h>
+#include <xi/xi_kv.hpp>      // round-3 #7: kKvHardCapBytes (capture-site bound)
 #include <xi/xi_project.hpp>
 #include <xi/xi_owner_lock.hpp>
 #include <xi/xi_script_compiler.hpp>
@@ -219,14 +220,48 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             // restore into the new DLL can detect a shape mismatch.
             if (g_eng.script.ok() && g_eng.script.get_kv) {
                 std::vector<uint8_t> kbuf(256 * 1024);
+                // Round-3 #7: xi::kKvHardCapBytes is enforced HERE — the one
+                // edge where the serialized store crosses into host memory and
+                // is persisted across reloads (see the rationale at the
+                // constant in xi_kv.hpp; per-set SDK checks would change
+                // script-side semantics and can't see the aggregate size).
+                // The -N "need N" probe reply is checked BEFORE the grow, so an
+                // oversized store is refused without the host ever allocating
+                // it. On refusal the capture is DROPPED and the PREVIOUS
+                // snapshot (bytes + schema) is kept — losing this reload's
+                // delta is strictly better than buffering an unbounded blob
+                // under run_mu + script_mu.
+                auto kv_oversized = [&](int64_t sz) {
+                    std::fprintf(stderr,
+                        "[xinsp2] kv capture DROPPED: serialized store is %lld bytes, "
+                        "over the %d-byte hard cap — keeping the previous snapshot "
+                        "(kv is cross-frame state, not bulk storage)\n",
+                        (long long)sz, xi::kKvHardCapBytes);
+                    std::string ev = "{\"type\":\"event\",\"name\":\"state_dropped\","
+                                     "\"data\":{\"store\":\"kv\",\"reason\":\"oversized\","
+                                     "\"size\":" + std::to_string(sz) +
+                                     ",\"cap\":" + std::to_string(xi::kKvHardCapBytes) + "}}";
+                    srv.send_text(ev);
+                };
                 // kv_get has no -1 error return (0 = empty store; -N = need N).
-                int kn = script_grow_retry(kbuf, /*minus_one_is_terminal=*/false,
-                    [&](uint8_t* b, int len) { return g_eng.script.get_kv(b, len); });
-                if (kn > 0) g_eng.persistent_kv_bytes.assign((const char*)kbuf.data(), (size_t)kn);
-                else        g_eng.persistent_kv_bytes.clear();
-                g_eng.persistent_kv_schema = g_eng.script.kv_schema_version
-                                           ? g_eng.script.kv_schema_version()
-                                           : 0;
+                int kn = g_eng.script.get_kv(kbuf.data(), (int)kbuf.size());
+                if (kn < 0 && -(int64_t)kn > xi::kKvHardCapBytes) {
+                    kv_oversized(-(int64_t)kn);
+                } else {
+                    if (kn < 0) {   // grow-retry (script_grow_retry shape, now cap-guarded)
+                        kbuf.resize((size_t)(-(int64_t)kn) + 1024);
+                        kn = g_eng.script.get_kv(kbuf.data(), (int)kbuf.size());
+                    }
+                    if (kn > xi::kKvHardCapBytes) {   // grew past the cap between probes
+                        kv_oversized(kn);
+                    } else {
+                        if (kn > 0) g_eng.persistent_kv_bytes.assign((const char*)kbuf.data(), (size_t)kn);
+                        else        g_eng.persistent_kv_bytes.clear();
+                        g_eng.persistent_kv_schema = g_eng.script.kv_schema_version
+                                                   ? g_eng.script.kv_schema_version()
+                                                   : 0;
+                    }
+                }
             } else {
                 // No kv channel on the OLD script (or no old script at all):
                 // disarm any snapshot captured in an earlier era. Without this,
