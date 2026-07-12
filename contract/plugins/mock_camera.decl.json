@@ -28,14 +28,9 @@
       "doc": "bool (get_def only, read-only)"
     },
     {
-      "key": "pack_mode",
-      "type": "bool",
-      "doc": "bool (default false) — emit via the xi.pack@1 door instead of Record (wave-2 pilot)"
-    },
-    {
       "key": "gain",
       "type": "double",
-      "doc": "double (default 1.0; clamped [0.05, 8.0]) — PACK-MODE brightness multiplier applied to emitted pixels (saturating at 255); the Record path is never scaled"
+      "doc": "double (default 1.0; clamped [0.05, 8.0]) — brightness multiplier applied to emitted pixels (saturating at 255)"
     }
   ],
   "commands": {

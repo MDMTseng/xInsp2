@@ -17,6 +17,7 @@
 //   key order); each image is JPEG (lossy, 8-bit). msgpack is hand-rolled below
 //   (fixed shape, no dependency) but is valid msgpack wire format.
 #include <xi/xi_abi.hpp>
+#include <xi/xi_b64.hpp>            // the shared base64 leaf (pull-path frame_b64)
 #include <xi/xi_json.hpp>
 #include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
 
@@ -35,19 +36,9 @@
 
 namespace {
 
-std::string b64(const uint8_t* p, size_t n) {
-    static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string o; o.reserve((n + 2) / 3 * 4);
-    for (size_t i = 0; i < n; i += 3) {
-        uint32_t b = p[i] << 16;
-        if (i + 1 < n) b |= p[i + 1] << 8;
-        if (i + 2 < n) b |= p[i + 2];
-        o.push_back(T[(b >> 18) & 63]); o.push_back(T[(b >> 12) & 63]);
-        o.push_back(i + 1 < n ? T[(b >> 6) & 63] : '=');
-        o.push_back(i + 2 < n ? T[b & 63] : '=');
-    }
-    return o;
-}
+// One-line forwarder to the shared SDK base64 leaf (xi/xi_b64.hpp) — the
+// local name is kept for the frame_b64 call site.
+inline std::string b64(const uint8_t* p, size_t n) { return xi::b64_encode(p, n); }
 
 }  // namespace
 
@@ -79,6 +70,10 @@ public:
     // flipped to v3 (the durable tagged-msgpack wire). XEX1-v1 encode stays
     // selectable via frame_wire_v3:false for ONE release, then is deleted —
     // doc 06 §6.2, app-team accepted.]
+    // TODO(dated 2026-07-12, one-release death row): delete build_v1_from_pack_
+    // + the frame_wire_v3:false escape (and the v1 legs of xex1_encode.hpp's
+    // consumers) in the FIRST release after v12 ships. If this line is older
+    // than the current release, the grace window is over — cut it.
     void process(xi::PackIn& in, xi::PackOut& out) override {
         const std::string channel(in.str(xi::pack_contract::kChannel).value_or("default"));
         const uint64_t    seq = (uint64_t)in.i64_or(xi::pack_contract::kSeq, 0);

@@ -16,7 +16,6 @@ namespace keys {
 inline constexpr const char* kPatches = "patches";  // array of {key,value} — per-emit patches (open value; generated Patch builder)
 inline constexpr const char* kKey = "key";  // string — patch target path
 inline constexpr const char* kData = "data";  // string — the user's JSON document, spliced raw under "data"
-inline constexpr const char* kPackMode = "pack_mode";  // bool (default false) — emit each document as a sealed xi.pack@1 pack (top-level scalars → canonical entries, nested → one ingress-canonicalized mp entry, plus seq) instead of a Record (wave-2 bilingual)
 inline constexpr const char* kCommand = "command";  // string (command selector)
 inline constexpr const char* kValue = "value";  // int (command payload value)
 inline constexpr const char* kSetData = "set_data";

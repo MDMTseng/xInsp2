@@ -1,7 +1,6 @@
 {
   "plugin": "mock_camera",
   "config": {
-    "pack_mode": true,
     "width": 32,
     "height": 24,
     "fps": 20

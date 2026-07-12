@@ -202,11 +202,30 @@ public:
         auto p = xi::Json::parse(cmd);
         const std::string command = p["command"].as_string();
 
+        if (command == "set_threshold" || command == "set_min_area" ||
+            command == "set_max_area"  || command == "set_invert") {
+            // Guard 2 (mirrors mock_camera): the payload is required — fail
+            // loud, never a silent no-op on a set_* that forgot its "value".
+            // set_max_area completes the exchange surface: every knob set_def
+            // takes (threshold/min_area/max_area/invert) is command-settable.
+            const bool  is_bool = (command == "set_invert");
+            const char* want    = is_bool ? "bool" : "int";
+            auto v = p["value"];
+            if (!v.valid())
+                return xi::contract::fault_json(xi::contract::kMissingInput, "value", want);
+            if (is_bool ? !v.is_bool() : !v.is_number())
+                return xi::contract::fault_json(xi::contract::kWrongType, "value", want);
+
+            std::lock_guard<std::mutex> lk(mu_);
+            if      (command == "set_threshold") thresh_   = v.as_int();
+            else if (command == "set_min_area")  min_area_ = v.as_int();
+            else if (command == "set_max_area")  max_area_ = v.as_int();
+            else                                 invert_   = v.as_bool();
+            return get_def_locked_();
+        }
+
         std::lock_guard<std::mutex> lk(mu_);
-        if      (command == "set_threshold") thresh_   = p["value"].as_int(thresh_);
-        else if (command == "set_min_area")  min_area_ = p["value"].as_int(min_area_);
-        else if (command == "set_invert")    invert_   = p["value"].as_bool(invert_);
-        return get_def_locked_();
+        return get_def_locked_();   // unknown/get commands: the status idiom
     }
 
     std::string get_def() const override {

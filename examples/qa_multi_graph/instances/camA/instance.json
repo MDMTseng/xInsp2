@@ -2,7 +2,6 @@
   "plugin": "mock_camera",
   "group": "line_a",
   "config": {
-    "pack_mode": true,
     "width": 64,
     "height": 48,
     "fps": 30

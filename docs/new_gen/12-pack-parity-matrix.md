@@ -54,8 +54,8 @@ not hidden debt.
 
 | Example | What it proves pack-only in the live service |
 |---|---|
-| `qa_pack_pilot` | mock_camera pack_mode → dual-carry dispatch → `t.pack()` reads seq + image dims → verdict. **Now pack-only end to end**: the expose leg (formerly the marked [EXPOSE-SCRIPT] Record gap) is a ScriptPackBuilder result pack pushed via `use("expose").push()` (ported 2026-07-03, still green). |
-| `qa_pack_stereo` | synced_stereo pack_mode gathers left+right+seq into ONE sealed pack per trigger; script verifies both images' pixel-stamped seq equals the pack's `seq` entry (same-event correlation) — pack-only end to end, observed via the verdict plane alone (no Record anywhere). |
+| `qa_pack_pilot` | mock_camera (sealed-pack emit, v12 sole currency) → dispatch → `t.pack()` reads seq + image dims → verdict. **Now pack-only end to end**: the expose leg (formerly the marked [EXPOSE-SCRIPT] Record gap) is a ScriptPackBuilder result pack pushed via `use("expose").push()` (ported 2026-07-03, still green). |
+| `qa_pack_stereo` | synced_stereo gathers left+right+seq into ONE sealed pack per trigger; script verifies both images' pixel-stamped seq equals the pack's `seq` entry (same-event correlation) — pack-only end to end, observed via the verdict plane alone (no Record anywhere). |
 | `qa_pack_walk` | the script read surfaces beyond string gets: generic `for_each` walk with ABI tags, typed-schema (`ScriptTypedPack`) reads equal string-keyed reads, and a ScriptPack captured BY VALUE into a worker thread stays valid — pack-only, verdict-plane observed. |
 | `qa_use_pack_door` **(new — the write-half flagship)** | the FULL P2 loop in one script: `xi::ScriptPackBuilder` assembles a white-square gray pack (image + scalars + a nested `xi::mp::Writer` entry round-tripped byte-identical — U4), chains it into blob_analysis's xi.pack@1 door via `xi::use("det").process(pack)` (blob_count/threshold_used/binary asserted off the returned ScriptPack), then builds a RESULT pack (derived binary image + nested mp + `$channel`/`$seq`) and `xi::use("expose").push()`es it, plus a second script-built pack on channel "qa2" (multi-channel). The driver decodes the XEX1-v3 wire and byte-checks the pushed pixels on both channels and the decoded nested entry; wire seq strictly increasing per channel (sink-staged flush). No `xi::Record` anywhere. |
 
@@ -70,7 +70,7 @@ above.
 
 | # | Pattern | Taught by | Status | Evidence / blocker detail |
 |---|---|---|---|---|
-| A1 | Single-source per-frame **image** delivered to the script | burst_pipeline, image_sources, use_demo.cpp, qa_local_auto, qa_emit_frame_key | **GREEN** | `qa_pack_pilot` (dims through the door), `qa_pack_walk` (pixel reads). Source side: mock_camera `pack_mode` emits from its capture thread. |
+| A1 | Single-source per-frame **image** delivered to the script | burst_pipeline, image_sources, use_demo.cpp, qa_local_auto, qa_emit_frame_key | **GREEN** | `qa_pack_pilot` (dims through the door), `qa_pack_walk` (pixel reads). Source side: mock_camera emits sealed packs from its capture thread (v12: the sole emit currency). |
 | A2 | **Scalar/string metadata** payload delivered to the script | trigger_metadata (meta_source), json_source README | **GREEN** | `qa_pack_pilot`/`qa_pack_stereo`/`qa_pack_walk` (`seq` i64 entries). json_source's full JSON→pack mapping (scalars, bools, nested→mp, `$fault` on hostile input) is proven against the real DLL in `plugins/json_source/tests/test_json_source_pack.cpp`; the [USE-DOOR] that was blocking a script-side drive of its `process()` has landed (`use(name).process(ScriptPack)` live-proven in `qa_use_pack_door`), so the script-drive leg is now GREEN (composition). |
 | A3 | **Gathered multi-image trigger** (stereo pair, one event) | stereo_sync (synced_cam), synced_stereo README | **GREEN** | `qa_pack_stereo` (new): one sealed pack carries `left`+`right`+`seq`; same-event correlation asserted in script hands. Note: gathering is the PLUGIN's job (one emitter, one pack) — the bus carries exactly one pack per event and has no bus-level multi-emitter pack merge; no example needs one (see §Explicit non-needs). |
 | A4 | Trigger **identity / timing / ordered arrival** with data in flight | burst_pipeline (latency), qa_result_order (order) | **GREEN** | seq strict monotonicity through the ordered dispatch: `qa_pack_pilot` assert 2, `qa_pack_stereo` assert 3. `t.id()/timestamp_us()/dequeued_at_us()` are event fields, currency-independent. |
@@ -270,11 +270,11 @@ ACHIEVED WITH NAMED RESIDUALS (both since resolved — U1 by doc 15, U3 by doc
 
 `plugins/build` is a SEPARATE cmake tree from `backend/build`; `tools/gate.py
 build` builds both, but a manual backend-only rebuild leaves stale plugin DLLs
-in `plugins/<name>/` — and because `set_def` ignores unknown keys, a stale
-pre-bilingual DLL silently downgrades `pack_mode:true` to Record emission
-(observed live: `get_def` missing the `pack_mode` key is the tell; the
-pack-only QA examples then fail loudly with "no verdict", which is the
-designed fail-loud, not a silent pass).
+in `plugins/<name>/`. (Historical: during the wave-2 bilingual window a stale
+pre-bilingual DLL silently downgraded `pack_mode:true` to Record emission —
+`get_def` missing the key was the tell. Since v12 the knob is gone, the sealed
+pack is the sole emit currency, and a stale pre-v12 DLL is refused outright by
+the loader's min-compat gate.)
 
 ## Row-flip protocol
 

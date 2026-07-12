@@ -86,7 +86,7 @@ public:
     bool valid() const { return j_.valid(); }
     int  capacity()  const { return j_[keys::kCapacity].as_int(); }
     int  count()     const { return j_[keys::kCount].as_int(); }   // TOTAL ring occupancy (records + packs)
-    int  packs()     const { return j_[keys::kPacks].as_int(); }   // of which are retained sealed packs
+    int  packs()     const { return j_[keys::kPacks].as_int(); }   // retained sealed packs (== count since v12: every entry is a pack)
     bool replaying() const { return j_[keys::kReplaying].as_bool(); }
 private:
     xi::Json j_;

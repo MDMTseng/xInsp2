@@ -21,17 +21,15 @@
 // ordering (that is on-disk deterministic replay, a separate feature); it
 // reproduces load/timing shape.
 //
-// polaris2 wave-2 — BILINGUAL (docs/new_gen/07 + 10 gate P1). buffer_replay now
-// speaks BOTH currencies through ONE ring: a Record entry is a deep-copied
-// Record (below), a Pack entry is a RETAINED reference to a sealed host Pack
-// (xi.pack@1). Retaining a sealed pack keeps it — and its pool image handles —
-// alive BEYOND the frame that produced it; replay re-emits the SAME sealed pack
-// handle with a fresh trigger id (zero pixel copy — proven by a stable pool
-// live-count across replay). Eviction / clear / teardown release every retained
-// pack, exactly as `release()` on the ring's owning ref. The replay commands are
-// ring-agnostic: they work on whichever entry kind lives at the target slot, and
-// replay_timed paces one loop over the variant entry (records + packs interleave
-// and replay in capture order). See README § "Pack retention".
+// v12 (THE CUT): the ring holds ONE currency — every entry is a RETAINED
+// reference to a sealed host Pack (xi.pack@1; the wave-2 bilingual Record
+// variant went with the Record plane). Retaining a sealed pack keeps it — and
+// its pool image handles — alive BEYOND the frame that produced it; replay
+// re-emits the SAME sealed pack handle with a fresh trigger id (zero pixel
+// copy — proven by a stable pool live-count across replay). Eviction / clear /
+// teardown release every retained pack, exactly as `release()` on the ring's
+// owning ref; replay_timed paces one loop over the ring in capture order.
+// See README § "Pack retention".
 
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
@@ -89,7 +87,7 @@ public:
             size = (int)ring_.size();
         }
         release_packs_(reclaim);                                // evicted entries
-        out.i64(keys::kBuffered, (int64_t)size);                // same ack shape as the Record path
+        out.i64(keys::kBuffered, (int64_t)size);                // the buffered-count ack
     }
 
     std::string exchange(const std::string& cmd) override {
@@ -172,7 +170,7 @@ public:
         return xi::Json::object()
             .set(keys::kCapacity, capacity_)
             .set(keys::kCount, (int)ring_.size())
-            .set(keys::kPacks, packs_locked_())
+            .set(keys::kPacks, (int)ring_.size())   // == count since v12 (every entry is a pack); key kept for driver/UI compat
             .set(keys::kReplaying, replaying_.load())
             .dump();
     }
@@ -207,7 +205,6 @@ private:
     struct Entry {
         xi_pack_handle pack = XI_PACK_NULL;
         int64_t        t_us = 0;
-        bool is_pack() const { return pack != XI_PACK_NULL; }
         static Entry from_pack(xi_pack_handle h, int64_t t) { Entry e; e.pack = h; e.t_us = t; return e; }
     };
 
@@ -234,7 +231,7 @@ private:
     // and releases these bridge refs back on the exchange thread.
     Entry snapshot_locked_(const Entry& e) {
         Entry s = e;
-        if (s.is_pack()) { if (const xi_pack_v1* fi = pack_iface()) fi->retain(s.pack); }
+        if (const xi_pack_v1* fi = pack_iface()) fi->retain(s.pack);
         return s;
     }
 
@@ -242,19 +239,15 @@ private:
     // release after the lock (a pack entry's owning ref is dropped on eviction).
     void trim_locked_(std::vector<xi_pack_handle>& reclaim) {
         while ((int)ring_.size() > capacity_) {
-            if (ring_.front().is_pack()) reclaim.push_back(ring_.front().pack);
+            reclaim.push_back(ring_.front().pack);
             ring_.pop_front();
         }
     }
 
     // Empty the ring, collecting every retained pack ref to release after unlock.
     void drain_ring_locked_(std::vector<xi_pack_handle>& reclaim) {
-        for (auto& e : ring_) if (e.is_pack()) reclaim.push_back(e.pack);
+        for (auto& e : ring_) reclaim.push_back(e.pack);
         ring_.clear();
-    }
-
-    int packs_locked_() const {
-        int n = 0; for (auto& e : ring_) if (e.is_pack()) ++n; return n;
     }
 
     // --- emit / release (no lock held) --------------------------------------
@@ -269,17 +262,15 @@ private:
     // sealed pack handle via the host emit door (emit_pack takes its own event
     // ref — zero copy, the snapshot/ring refs are untouched).
     void emit_entry_(const Entry& e) {
-        if (e.is_pack()) {
-            if (const xi_pack_v1* fi = pack_iface())
-                fi->emit_pack(name().c_str(), XI_TRIGGER_NULL, e.pack, 0);  // fresh id, ts = now
-        }
+        if (const xi_pack_v1* fi = pack_iface())
+            fi->emit_pack(name().c_str(), XI_TRIGGER_NULL, e.pack, 0);  // fresh id, ts = now
     }
 
     // Emit each snapshot entry, then release the snapshot's retained pack refs.
     void emit_snapshot_(std::vector<Entry>& snap) {
         for (auto& e : snap) emit_entry_(e);
         const xi_pack_v1* fi = pack_iface();
-        if (fi) for (auto& e : snap) if (e.is_pack()) fi->release(e.pack);
+        if (fi) for (auto& e : snap) fi->release(e.pack);
         snap.clear();
     }
 
@@ -317,16 +308,16 @@ private:
         // Worker refs: retained owner-0, released owner-0 (ledger no-op both
         // ends). Bridge refs: retained tagged, released tagged, same thread.
         std::vector<xi_pack_handle> bridge;
-        for (const auto& e : snap) if (e.is_pack()) bridge.push_back(e.pack);
+        for (const auto& e : snap) bridge.push_back(e.pack);
         auto owned = std::make_shared<std::promise<void>>();
         std::future<void> owned_f = owned->get_future();
 
         // Blessed worker: xi::spawn_worker installs the per-thread SEH translator
         // + top-level catch so a fault mid-replay is contained to this thread
         // rather than taking down the whole backend (a raw std::thread would not).
-        // ONE loop over the variant entry — records + packs interleave and replay
-        // in capture order; the worker's own (owner-neutral) pack refs are
-        // released on exit (every path, including an early stop) so nothing leaks.
+        // ONE loop over the ring snapshot, replayed in capture order; the
+        // worker's own (owner-neutral) pack refs are released on exit (every
+        // path, including an early stop) so nothing leaks.
         replay_thread_ = xi::spawn_worker(name() + "-replay", [this, snap = std::move(snap), speed, owned]() mutable {
             // Take this thread's OWN refs before anything else: current_owner()
             // is 0 here, so these are untagged (rc-only) — symmetric with the
@@ -335,7 +326,7 @@ private:
             // alive until this point, so no handle can die under us.
             {
                 const xi_pack_v1* fi = pack_iface();
-                if (fi) for (auto& e : snap) if (e.is_pack()) fi->retain(e.pack);
+                if (fi) for (auto& e : snap) fi->retain(e.pack);
                 owned->set_value();
             }
             for (size_t i = 0; i < snap.size(); ++i) {
@@ -358,7 +349,7 @@ private:
             // owner 0 on release — the ledger is untouched on both ends, only
             // rc moves. (Never release an exchange-thread-tagged ref here.)
             const xi_pack_v1* fi = pack_iface();
-            if (fi) for (auto& e : snap) if (e.is_pack()) fi->release(e.pack);
+            if (fi) for (auto& e : snap) fi->release(e.pack);
             replaying_.store(false);
         });
 

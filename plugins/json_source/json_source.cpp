@@ -124,7 +124,7 @@ bool apply_patch(yyjson_mut_doc* doc, yyjson_mut_val* dst, yyjson_mut_val* patch
     return json_set_path(doc, dst, yyjson_mut_get_str(k), v);
 }
 
-// --- pack-mode (polaris2 wave-2) nested-value encoder -----------------------
+// --- pack nested-value encoder (polaris2 wave-2) -----------------------------
 // Depth cap for the JSON→msgpack walk. Matches the ingress limit so the pack
 // interior never sees a value the edge would reject; also bounds THIS recursion
 // so a depth-bomb document can't overflow the plugin's stack before the ingress
@@ -239,9 +239,6 @@ public:
         yyjson_mut_val* data = data_root ? yyjson_val_mut_copy(doc, data_root)
                                          : yyjson_mut_obj(doc);
         yyjson_mut_obj_add_val(doc, root, jkeys::kData, data);
-        // Reflect the pack-mode flag so a UI/driver can read (and round-trip
-        // via set_def) the emit mode — mirrors mock_camera's get_def.
-        yyjson_mut_obj_add_bool(doc, root, jkeys::kPackMode, pack_mode_.load());
 
         char* s = yyjson_mut_write(doc, 0, NULL);
         std::string out = s ? s : "{\"data\":{}}";
@@ -271,10 +268,6 @@ public:
             char* s = yyjson_val_write(data, 0, NULL);
             if (s) { stored_json_.assign(s); free(s); }
         }
-        // polaris2 wave-2: opt into pack-plane emit (default false). An absent
-        // key leaves the current mode (a legacy config keeps emitting Records).
-        yyjson_val* pm = yyjson_obj_get(root, jkeys::kPackMode);
-        if (pm && yyjson_is_bool(pm)) pack_mode_ = yyjson_get_bool(pm);
         yyjson_doc_free(doc);
         return true;
     }
@@ -307,7 +300,7 @@ private:
         if (!yyjson_mut_is_obj(base)) {
             err_code = xi::contract::kWrongType;
             err_key  = jkeys::kData;
-            err_detail = "pack_mode requires a JSON object at the document root";
+            err_detail = "the pack emit requires a JSON object at the document root";
         } else {
             size_t i, n; yyjson_mut_val *k, *v;
             yyjson_mut_obj_foreach(base, i, n, k, v) {
@@ -389,8 +382,7 @@ private:
     static constexpr size_t kPackMaxEntryBytes = 8u * 1024u * 1024u;
 
     std::string stored_json_ = "{}";
-    std::atomic<bool>    pack_mode_{false};   // polaris2 wave-2 (default OFF)
-    std::atomic<int64_t> seq_{0};             // per-emit counter (pack mode)
+    std::atomic<int64_t> seq_{0};             // per-emit counter
 };
 
 XI_PLUGIN_IMPL(JsonSource)

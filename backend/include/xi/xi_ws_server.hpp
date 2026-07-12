@@ -52,6 +52,7 @@
   #define CLOSESOCK closesocket
 #else
   #include <arpa/inet.h>
+  #include <fcntl.h>        // O_NONBLOCK — the busy-reject drain (see poll())
   #include <netinet/in.h>
   #include <sys/socket.h>
   #include <unistd.h>
@@ -60,6 +61,7 @@
   #define CLOSESOCK ::close
 #endif
 
+#include "xi_b64.hpp"
 #include "xi_sha256.hpp"
 
 #include <algorithm>
@@ -193,22 +195,9 @@ inline std::string sha1(std::string_view s) {
     return std::string(reinterpret_cast<char*>(digest), 20);
 }
 
-// base64 encode (fixed 20-byte input is all we need).
-inline std::string base64(const uint8_t* in, size_t n) {
-    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((n + 2) / 3) * 4);
-    for (size_t i = 0; i < n; i += 3) {
-        uint32_t v = (uint32_t)in[i] << 16;
-        if (i + 1 < n) v |= (uint32_t)in[i + 1] << 8;
-        if (i + 2 < n) v |= (uint32_t)in[i + 2];
-        out.push_back(tbl[(v >> 18) & 63]);
-        out.push_back(tbl[(v >> 12) & 63]);
-        out.push_back(i + 1 < n ? tbl[(v >> 6) & 63] : '=');
-        out.push_back(i + 2 < n ? tbl[v & 63]        : '=');
-    }
-    return out;
-}
+// base64 encode (fixed 20-byte input is all we need) — one-line forwarder to
+// the shared SDK leaf (xi_b64.hpp); the local name is kept for call sites.
+inline std::string base64(const uint8_t* in, size_t n) { return xi::b64_encode(in, n); }
 
 inline std::string ws_accept_key(std::string_view sec_key) {
     std::string s = std::string(sec_key) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -543,19 +532,24 @@ public:
                     // misbehaving 2nd connector can't stall the poll loop.
                     // shutdown arg 1 == SD_SEND (Win32) == SHUT_WR (POSIX).
                     ::shutdown(s, 1);
-#ifdef _WIN32
                     // M4: drain NON-BLOCKING so a benign reconnect storm can't stall the
                     // poll thread (this runs on it, and it also owns the attached client's
                     // inbound + drop_requested_ + heartbeat). Was a blocking recv-loop with
                     // SO_RCVTIMEO=400ms → up to 400ms/reject on the liveness thread. One
                     // non-blocking pass reads whatever's already buffered; any unread tail
                     // is discarded by CLOSESOCK (harmless — the connection was rejected).
+                    // Portable (round-3): closing with unread inbound RSTs the 503 away
+                    // on POSIX too, so BOTH platforms flip the socket non-blocking
+                    // (FIONBIO / O_NONBLOCK) and run the same drain loop.
+#ifdef _WIN32
                     u_long nb = 1;
                     ::ioctlsocket(s, FIONBIO, &nb);
+#else
+                    int fl = ::fcntl(s, F_GETFL, 0);
+                    if (fl != -1) ::fcntl(s, F_SETFL, fl | O_NONBLOCK);
+#endif
                     char drain[1024];
                     while (::recv(s, drain, (int)sizeof(drain), 0) > 0) { /* buffered only, no block */ }
-#endif
-                    // TODO(linux): SO_RCVTIMEO via struct timeval, same drain.
                     CLOSESOCK(s);
                 }
             }
