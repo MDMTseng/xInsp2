@@ -7,28 +7,22 @@
 //   1. Build two distinct frames (left = vertical stripes, right = horizontal)
 //      stamped with the same `seq` so the script can verify they really come
 //      from the same event.
-//   2. emit them together, under ONE trigger, in whichever currency is active:
-//        * DEFAULT — emit(Record().image("left", L).image("right", R))
-//        * pack_mode — one sealed xi.pack@1 Pack carrying left+right images +
-//          the seq entry, adopting the same pool slots (zero-copy addref).
+//   2. Gather them into ONE sealed xi.pack@1 Pack — the left + right image
+//      entries plus the seq entry — and emit it under a single trigger. v12
+//      (THE CUT): the sealed Pack is the SOLE data plane; adopt_image rides
+//      the pool refcount (zero-copy addref), and a host without the xi.pack@1
+//      plane cannot run this source's emit path.
 //
-// polaris2 wave-2 (docs/new_gen/10 Pack migration, gate P1): the plugin is
-// BILINGUAL. The Record path is byte-for-byte the original; pack_mode is an
-// opt-in config (default OFF) that only flips the emit currency — the gathering
-// semantic (both images, one trigger) is IDENTICAL either way, and a single
-// sealed Pack with two image entries is exactly what showcases it. A host
-// without the xi.pack@1 plane degrades safely back to the Record path.
-//
-// The dispatched event carries both images; a script reads them via
-// xi::current_trigger().image("left")/.image("right") (Record) or the pack
-// door / expose walk (Pack).
+// The dispatched event carries both images; a script reads them via the pack
+// (t.pack().image("left") / .image("right")) or the expose walk.
 //
 
 #include <xi/xi_abi.hpp>
 #include <xi/xi_json.hpp>
+#include <xi/xi_contract.hpp>   // fail-loud schema-skew guard (kSchemaKey)
 #include <xi/xi_thread.hpp>   // xi::spawn_worker — SEH-safe capture thread
 
-#include "synced_stereo_keys.gen.h"   // the ONE key contract (kLeft/kRight/kSeq/kPackMode)
+#include "synced_stereo_keys.gen.h"   // the ONE key contract (kLeft/kRight/kSeq)
 
 #include <atomic>
 #include <chrono>
@@ -67,18 +61,24 @@ public:
             .set("running", running_.load())
             .set("fps", fps_.load())
             .set("ticks", (int)ticks_.load())
-            .set(keys::kPackMode, pack_mode_.load())
             .dump();
     }
 
     bool set_def(const std::string& json) override {
         auto p = xi::Json::parse(json);
         if (!p.valid()) return false;
+        // Guard 3: reject a config built against an incompatible header schema
+        // with a precise error naming both versions (mirrors mock_camera /
+        // json_source). Absent stamp (a legacy persisted instance.json) is
+        // tolerated.
+        auto sv = p[xi::contract::kSchemaKey];
+        if (sv.is_number() && sv.as_int() != xi::synced_stereo::kSchemaVersion) {
+            log_error("synced_stereo: config schema mismatch: built for v" +
+                      std::to_string(sv.as_int()) + ", this plugin serves v" +
+                      std::to_string(xi::synced_stereo::kSchemaVersion));
+            return false;
+        }
         fps_ = p["fps"].as_int(fps_.load());
-        // polaris2 wave-2: opt into the sealed-Pack emit currency (default false).
-        // Absent key leaves the current mode (a legacy config keeps emitting the
-        // two-image Record).
-        if (p[keys::kPackMode].valid()) pack_mode_ = p[keys::kPackMode].as_bool(false);
         return true;
     }
 
@@ -88,7 +88,6 @@ private:
     // Written from the control thread (exchange/set_def), read by run_loop_()'s
     // worker — atomic for the same reason mock_camera's config fields are.
     std::atomic<int>  fps_{10};
-    std::atomic<bool> pack_mode_{false};   // polaris2 wave-2 emit currency (default OFF)
     std::thread       thread_;
 
     void start_() {

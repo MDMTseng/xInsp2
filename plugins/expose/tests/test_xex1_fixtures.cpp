@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include <xi/xi_b64.hpp>
 #include <xi/xi_json.hpp>
 
 #include "xex1_encode.hpp"
@@ -47,20 +48,11 @@ std::vector<uint8_t> synth(size_t n, uint8_t salt) {
     return v;
 }
 
-std::string b64(const std::vector<uint8_t>& in) {
-    static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const uint8_t* p = in.data(); size_t n = in.size();
-    std::string o; o.reserve((n + 2) / 3 * 4);
-    for (size_t i = 0; i < n; i += 3) {
-        uint32_t b = p[i] << 16;
-        if (i + 1 < n) b |= p[i + 1] << 8;
-        if (i + 2 < n) b |= p[i + 2];
-        o.push_back(T[(b >> 18) & 63]); o.push_back(T[(b >> 12) & 63]);
-        o.push_back(i + 1 < n ? T[(b >> 6) & 63] : '=');
-        o.push_back(i + 2 < n ? T[b & 63] : '=');
-    }
-    return o;
-}
+// Routed through the shared SDK leaf (xi/xi_b64.hpp). The independence this
+// test guards is the XEX1 msgpack ENCODER vs the JS/Python decoders — base64
+// here only serializes manifest bytes (a wrong encoding would fail the
+// cross-implementation manifest check loudly), so sharing the leaf is safe.
+std::string b64(const std::vector<uint8_t>& in) { return xi::b64_encode(in.data(), in.size()); }
 
 struct Frame {
     std::string                                   name;      // -> <name>.bin

@@ -145,6 +145,30 @@ inline void set(char* dst, size_t n, const char* src) {
     dst[n - 1] = 0;
 }
 
+// Round-3 #8: death-path breadcrumb stamp. on_terminate / raise_for_dump used
+// to call ctx() to stamp last_cmd — but ctx() can CLAIM a fresh slot, and
+// constructing its thread_local SlotGuard may allocate inside the CRT's
+// TLS-dtor registration. That violates the filter's own rule (see the
+// "looked up READ-ONLY by tid, not via ctx()" comment in write_minidump): on a
+// heap-corruption abort the allocation can fault inside broken malloc and lose
+// the dump entirely. This helper uses the same read-only scan-by-tid the
+// filter uses — stamp only if this thread ALREADY owns a slot, never claim on
+// the death path (a thread with no slot simply reports empty fields, exactly
+// what a freshly claimed slot would have shown anyway).
+inline void stamp_death_breadcrumb(const char* cause) noexcept {
+#ifdef _WIN32
+    uint32_t tid = (uint32_t)GetCurrentThreadId();
+#else
+    uint32_t tid = 1;  // TODO(linux): pthread_self()-derived id (match ctx())
+#endif
+    for (int i = 0; i < kMaxSlots; ++i) {
+        if (g_slot_tid[i].load(std::memory_order_acquire) == tid) {
+            set(g_slots[i].last_cmd, sizeof(g_slots[i].last_cmd), cause);
+            return;
+        }
+    }
+}
+
 // Convenience for setting the current thread's inspect phase.
 inline void set_phase(const char* phase) {
     auto& c = ctx();
@@ -588,7 +612,9 @@ inline LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
         "[xinsp2] std::terminate (thread %lu): %s — %s\n",
         (unsigned long)GetCurrentThreadId(), tname, what);
     std::fflush(stderr);
-    set(ctx().last_cmd, sizeof(ctx().last_cmd), "terminate");
+    // Round-3 #8: read-only scan-by-tid — never ctx() (may claim/allocate) on
+    // the death path; see stamp_death_breadcrumb.
+    stamp_death_breadcrumb("terminate");
     // 0xE0000002 — distinct from --test-crash's 0xE0000001 so blame_module and
     // exception_name still tag it as MS_C++ish; the json_path will record this
     // code so the next-startup report distinguishes the two paths. NONCONTINUABLE
@@ -608,7 +634,10 @@ inline LONG WINAPI write_minidump(EXCEPTION_POINTERS* info) {
 // real thread context (same trick as on_terminate). Robustness BUG 1, found by
 // the robustness-fuzzer dogfood; see docs/internals/fe-be.md crash story.
 [[noreturn]] inline void raise_for_dump(const char* cause, DWORD code) noexcept {
-    set(ctx().last_cmd, sizeof(ctx().last_cmd), cause);
+    // Round-3 #8: read-only scan-by-tid — never ctx() (may claim/allocate) on
+    // the death path; a heap-corruption abort would fault inside broken malloc
+    // and lose the dump. See stamp_death_breadcrumb.
+    stamp_death_breadcrumb(cause);
     std::fprintf(stderr, "[xinsp2] CRT fatal (%s) — writing crash report\n", cause);
     std::fflush(stderr);
     RaiseException(code, EXCEPTION_NONCONTINUABLE, 0, nullptr);

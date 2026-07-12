@@ -7,9 +7,9 @@
 //
 //   * PLUGIN-door probe — blob_analysis publishes xi_plugin_get_interface and
 //     answers ("xi.pack", 1); mock_camera answers it too since ex-feedback
-//     (its CONTROL door: the bilingual source emits packs AND accepts
+//     (its CONTROL door: the source emits packs AND accepts
 //     control packs). The host adapter reflects both via has_pack_door().
-//   * CHAINED FLOW — mock_camera in pack mode emits a Pack through the bus;
+//   * CHAINED FLOW — mock_camera emits a Pack through the bus;
 //     the test (playing the gray-conversion step a script would own) converts
 //     it to a "gray" pack and drives it through blob_analysis's pack door.
 //   * DETERMINISTIC DOOR — a controlled white-square gray pack through the door
@@ -124,7 +124,7 @@ static bool decode_blobs(const uint8_t* mp, int32_t n, int& blob_count, int& tot
 }
 
 int main() {
-    std::printf("[test] xi.pack@1 pilot pair (mock_camera pack mode -> blob_analysis pack door)\n");
+    std::printf("[test] xi.pack@1 pilot pair (mock_camera -> blob_analysis pack door)\n");
 
     xi::install_pack_abi();
     xi_host_api host = xi::ImagePool::make_host_api();
@@ -139,10 +139,10 @@ int main() {
 
     // ---------------------------------------------------------------------
     // (A) Plugin-door probe: BOTH answer xi.pack@1 — blob's is the operator
-    //     door; mock's is its CONTROL door (ex-feedback: the bilingual source
+    //     door; mock's is its CONTROL door (ex-feedback: the source
     //     emits packs AND accepts control packs on its own door).
     // ---------------------------------------------------------------------
-    SECTION("plugin door probe: blob has xi.pack@1; mock (bilingual source) too");
+    SECTION("plugin door probe: blob has xi.pack@1; mock (pack source) too");
     CHECK(blob.get_iface != nullptr);
     if (blob.get_iface) {
         CHECK(blob.get_iface("xi.pack", 1) != nullptr);
@@ -218,7 +218,7 @@ int main() {
     }
 
     // ---------------------------------------------------------------------
-    // (D) Chained flow: mock_camera(pack mode) emits a Pack through the bus;
+    // (D) Chained flow: mock_camera emits a Pack through the bus;
     //     convert to gray (the step a script owns) and drive blob's door.
     // ---------------------------------------------------------------------
     SECTION("chained: mock_camera pack-emit -> bus -> convert -> blob pack door");
@@ -232,9 +232,10 @@ int main() {
             cv.notify_one();
         });
 
-        // Enable pack mode + a small, fast pack, then start the source.
+        // Configure a small, fast frame, then start the source (v12: the sealed
+        // pack is the sole emit currency — no mode knob to flip).
         CHECK(mock.adapter->set_def(
-            "{\"" + std::string(mkeys::kPackMode) + "\":true,\"" +
+            std::string("{\"") +
             mkeys::kWidth + "\":64,\"" + mkeys::kHeight + "\":48,\"" + mkeys::kFps + "\":30}"));
         mock.adapter->exchange(std::string("{\"") + mkeys::kCommand + "\":\"" + mkeys::kStart + "\"}");
 

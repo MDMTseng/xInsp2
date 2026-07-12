@@ -60,9 +60,11 @@ extern "C" {
 /* newer ABI than the host provides.                                  */
 /*                                                                    */
 /* Current version history:                                           */
-/*   1 — initial frozen surface (image pool, trigger bus, SHM [fields  */
-/*       retained for layout stability; SHM removed 2026-05, always  */
-/*       null on current hosts], host api with read_image_file).     */
+/*   1 — initial frozen surface (image pool, trigger bus, SHM, host  */
+/*       api with read_image_file). [SHM itself was removed 2026-05; */
+/*       its five always-null stub fields rode along for layout      */
+/*       stability through v10 and were DELETED at v11 — see the     */
+/*       v11 note in xi_host_api below.]                             */
 /*   2 — + emit_resource (emit/fetch resource store). Additive at the */
 /*       struct tail, so v1 plugins keep working unchanged.          */
 /*   3 — + in-process doc pass-by-pointer (γ): xi_record.doc /        */
@@ -632,11 +634,13 @@ typedef struct xi_host_api {
     /*                                                                   */
     /* This is the query door (core_fix_plan.md §12 Phase 1). All future */
     /* capabilities arrive as frozen interfaces behind this door, not as */
-    /* new xi_host_api fields. Registered ids:                           */
-    /*   [ xi.legacy@9 was RETIRED in Phase 4 (v11) — the whole-table    */
-    /*     legacy view is no longer published; get_interface("xi.legacy",*/
-    /*     9) now returns NULL. Reach capabilities via the carved         */
-    /*     interfaces below, or the struct fields directly. ]            */
+    /* new xi_host_api fields. Registered ids (this list mirrors          */
+    /* get_interface_impl in xi_image_pool.hpp — the resolver's branches  */
+    /* are the truth; regenerate this list from them):                    */
+    /*   [ RETIRED ids — both now return NULL: xi.legacy@9 (Phase 4 /     */
+    /*     v11, the whole-table legacy view) and xi.doc@1 (THE CUT /      */
+    /*     v12, the in-proc yyjson-doc allocator + refcount — went with   */
+    /*     the Record data plane). ]                                      */
     /*   get_interface("xi.preview", 1) -> const xi_preview_v1*  (the     */
     /*       compress_image capability, carved in Phase 2).              */
     /*   get_interface("xi.imaging", 1) -> const xi_imaging_v1*  (image   */
@@ -644,41 +648,54 @@ typedef struct xi_host_api {
     /*   get_interface("xi.imaging_rw", 1) -> const xi_imaging_rw_v1* (the */
     /*       read-only-input / writable-output access discipline; ext.     */
     /*       review 02 I.4).                                               */
-    /*   get_interface("xi.doc", 1)     -> const xi_doc_v1*  (the in-proc */
-    /*       doc allocator + refcount, Phase 3).                          */
-    /*   get_interface("xi.emit", 1)    -> const xi_emit_v1*  (emit_record*/
-    /*       + emit_binary, Phase 3).                                     */
+    /*   get_interface("xi.emit", 1)    -> const xi_emit_v1*  (carries     */
+    /*       ONLY emit_binary since v12 — emit_record left with the        */
+    /*       Record plane; see the xi_emit_v1 typedef above).              */
     /*   get_interface("xi.log", 1)     -> const xi_log_v1*  (log +       */
     /*       set_status, Phase 3).                                        */
+    /*   get_interface("xi.pack", 1)    -> const xi_pack_v1*  (the v3     */
+    /*       keyed-buffer Pack data plane, polaris2 wave-2; NULL on a     */
+    /*       host with no pack plane installed).                          */
+    /*   get_interface("xi.cap", 1)     -> const xi_cap_v1*  (the         */
+    /*       capability consumer funnel, docs/new_gen/14; NULL when no    */
+    /*       capability plane is installed).                              */
+    /*   get_interface("xi.cap.provider", 1) -> const xi_cap_provider_v1* */
+    /*       (the provider-side registration door; NULL likewise).        */
     /* Null on a pre-v10 host — always null-check before calling; a       */
     /* caller then falls back to the legacy field (e.g. compress_image). */
     const void* (*get_interface)(const char* id, uint32_t version);
 } xi_host_api;
 
 /* ------------------------------------------------------------------ *
- * FROZEN SIGNATURE — xi_host_api, v11 (the NEW frozen baseline).       *
+ * FROZEN SIGNATURE — xi_host_api, v12 (the current frozen baseline).   *
  *                                                                    *
- * Phase 4 (core_fix_plan.md §12) intentionally BROKE the old v9-prefix *
- * freeze: the dead shm_* block was removed and xi.legacy retired (an   *
- * authorized major break). From v11 onward the freeze discipline of    *
- * ADR-001 resumes: the v11 layout below is fixed and will not be       *
- * edited in place; any add/change/remove of a host capability ships as *
- * the NEXT version, and NEW capabilities arrive as frozen per-interface *
- * structs behind get_interface, NOT as new xi_host_api fields.         *
+ * Two authorized major breaks preceded it: Phase 4 (v11) removed the   *
+ * dead shm_* block and retired xi.legacy; THE CUT (v12) deleted the    *
+ * Record dispatch path (read_image_file, emit_record, the doc_* γ      *
+ * slots). From here the freeze discipline of ADR-001 holds: the v12    *
+ * layout above is fixed and will not be edited in place; any           *
+ * add/change/remove of a host capability ships as the NEXT version,    *
+ * and NEW capabilities arrive as frozen per-interface structs behind   *
+ * get_interface, NOT as new xi_host_api fields.                        *
  *                                                                    *
- * v11 layout = image_create … compress_image (offsets 0..160) +        *
- * get_interface at offset 168 (the last field). get_interface remains  *
- * the query door (Phase 1); it is the ONLY sanctioned struct field for *
- * a capability from here — everything else is a carved interface.      *
+ * v12 layout = 14 fn pointers (XI_ABI_EXPECTED_SIZE bytes on 64-bit):  *
+ * image_create … compress_image, then get_interface as the LAST field. *
+ * The static_asserts below pin the tail RELATIVE to the size macro     *
+ * (self-maintaining — no hand-tracked offsets to drift): get_interface *
+ * at XI_ABI_EXPECTED_SIZE - 1*ptr, compress_image at - 2*ptr.          *
+ * get_interface remains the query door (Phase 1); it is the ONLY       *
+ * sanctioned struct field for a capability from here — everything      *
+ * else is a carved interface.                                          *
  *                                                                    *
  * Two guards enforce this (both fail the BUILD — there is no CI        *
  * runner in this repo):                                                *
- *   1. The static_asserts just below (size + last-field anchor).       *
- *   2. backend/tests/test_abi_freeze.cpp — the full canonical v11      *
+ *   1. The static_asserts just below (size + last-field anchors).      *
+ *   2. backend/tests/test_abi_freeze.cpp — the full canonical v12      *
  *      signature: every field's offset AND exact fn-pointer type, in   *
  *      order. backend/tests/test_golden_plugin.cpp additionally loads  *
- *      a v11 plugin through the real path and runs process() once, and *
- *      asserts a stale pre-v11 plugin is REFUSED by the min-compat gate.*
+ *      a current plugin through the real path and runs the pack door   *
+ *      once, and asserts a stale pre-min-compat plugin is REFUSED by   *
+ *      the min-compat gate.                                            *
  * See core_fix_plan.md §10-12.                                         *
  * ------------------------------------------------------------------ */
 
@@ -700,9 +717,10 @@ static_assert(sizeof(xi_host_api) == XI_ABI_EXPECTED_SIZE,
 static_assert(offsetof(xi_host_api, get_interface) == XI_ABI_EXPECTED_SIZE - sizeof(void*),
               "get_interface is no longer the last field — a field was added/removed "
               "without updating the ABI guard; bump XI_ABI_VERSION.");
-/* v12 baseline: compress_image is the last non-door field at offset 152
- * (168 - 2*ptr); get_interface appends after it at 160. If this fires, a v12
- * field moved — that breaks every v12 plugin. */
+/* v12 baseline: compress_image is the last non-door field, pinned RELATIVE to
+ * the size macro (XI_ABI_EXPECTED_SIZE - 2*ptr); get_interface appends after it
+ * as the final field (- 1*ptr, asserted above). If this fires, a v12 field
+ * moved — that breaks every v12 plugin. */
 static_assert(offsetof(xi_host_api, compress_image) == XI_ABI_EXPECTED_SIZE - 2 * sizeof(void*),
               "the frozen prefix moved: compress_image must remain the last "
               "non-door field (get_interface appends after it).");
@@ -761,26 +779,18 @@ typedef int   (*xi_plugin_set_def_fn)(void* inst, const char* json);
 typedef int   (*xi_plugin_prepare_fn)(void* inst, const char* def_json, const char* folder);
 typedef void  (*xi_plugin_commit_fn)(void* inst);
 
-/* OPTIONAL (null if the plugin didn't opt in). A STATIC declaration of the
- * cross-plugin Record fields this plugin produces / consumes, for wire/load-time
- * contract validation (see xi_record_schema.hpp; core_fix_plan.md §21 / OQ-7).
- * NOT part of xi_host_api — a plugin-side export resolved via GetProcAddress
- * exactly like prepare/commit, so it is ABI-ADDITIVE and leaves the frozen v11
- * xi_host_api layout untouched (docs/internals/adr-001-host-api-freeze.md).
- *   xi_plugin_record_schema(buf, buflen) -> bytes written (or, if the buffer is
- *     too small, the NEGATED required size, same convention as get_def). Writes
- *     a small JSON:
- *       {"produces":[{"key":"score","type":"double"}],
- *        "consumes":[{"key":"gray","type":"image"}]}
- *   Types: int|double|bool|string|image|record|array|any. Purely declarative;
- *   a plugin that does not export it keeps its current (schemaless) behaviour. */
-typedef int   (*xi_plugin_record_schema_fn)(char* buf, int buflen);
+/* [ABI v12 — the OPTIONAL xi_plugin_record_schema export (OQ-7b: a static
+ * produces/consumes Record-field declaration, validated at wire/load time) was
+ * DELETED at THE CUT together with xi_record_schema.hpp and the whole Record
+ * plane. No host GetProcAddress for it remains — a plugin exporting the symbol
+ * gets no validation, only silent false safety. The pack-plane analogue is the
+ * plugin's decl.json contract (contract/plugins/, codegen'd key headers).] */
 
 /* OPTIONAL plugin-side capability door (ABI v11+, polaris2 wave-2). The
  * SYMMETRIC MIRROR of xi_host_api::get_interface: a plugin exports this to
  * publish its OWN capabilities to the host, resolved via GetProcAddress
- * exactly like prepare/commit/record_schema (so it is ABI-ADDITIVE — the
- * frozen xi_host_api layout is untouched). The host probes
+ * exactly like prepare/commit (so it is ABI-ADDITIVE — the frozen
+ * xi_host_api layout is untouched). The host probes
  * xi_plugin_get_interface("xi.pack", 1) -> const xi_pack_proc_v1* to learn a
  * plugin does pack-in/pack-out; NULL means the capability is absent.
  *

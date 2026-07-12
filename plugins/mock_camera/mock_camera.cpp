@@ -89,7 +89,6 @@ public:
             .set(keys::kHeight, h_.load())
             .set(keys::kFps, fps_.load())
             .set(keys::kStreaming, running_.load())
-            .set(keys::kPackMode, pack_mode_.load())
             .set(keys::kGain, gain_.load())
             .dump();
     }
@@ -112,11 +111,8 @@ public:
         if (p[keys::kWidth].as_int(0)  > 0) w_ = p[keys::kWidth].as_int();
         if (p[keys::kHeight].as_int(0) > 0) h_ = p[keys::kHeight].as_int();
         if (p[keys::kFps].as_int(0)    > 0) fps_ = clamp_fps_(p[keys::kFps].as_int());
-        // polaris2 wave-2: opt into pack-plane emit (default false). Absent key
-        // leaves the current mode (a legacy config keeps emitting Records).
-        if (p[keys::kPackMode].valid()) pack_mode_ = p[keys::kPackMode].as_bool(false);
-        // polaris2 ex-feedback: pack-mode brightness multiplier (default 1.0).
-        // Only the pack emit branch scales pixels; the Record path never does.
+        // polaris2 ex-feedback: brightness multiplier (default 1.0) applied to
+        // the emitted pixels.
         if (p[keys::kGain].is_number()) gain_ = clamp_gain_(p[keys::kGain].as_double());
         return true;
     }
@@ -211,8 +207,7 @@ private:
     // gain_ is additionally written by the pack DOOR (host-driven, another thread).
     std::atomic<int> w_{640}, h_{480}, fps_{10};
     std::atomic<bool> running_{false};
-    std::atomic<bool> pack_mode_{false};   // polaris2 wave-2 (default OFF)
-    std::atomic<double> gain_{1.0};        // polaris2 ex-feedback (pack-mode only)
+    std::atomic<double> gain_{1.0};        // polaris2 ex-feedback brightness gain
     std::atomic<int> seq_{0};              // frame counter (door acks read it)
     std::thread thread_;
 

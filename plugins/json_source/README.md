@@ -1,72 +1,56 @@
 # json_source
 
-Emits a configurable JSON record. The user edits the JSON via the plugin's GUI;
-the stored object is produced as the output Record on every `process()` call,
-optionally mutated by runtime patches carried in the input. Useful for injecting
-test fixtures, configuration, or manual data into a pipeline.
+Emits a configurable JSON document as a sealed `xi.pack@1` pack. The user edits
+the JSON via the plugin's GUI; on every tick the stored document is emitted
+through the host pack door. Useful for injecting test fixtures, configuration,
+or manual data into a pipeline.
 
 ## Open output, typed control surface
 
 The JSON this plugin emits is **user-defined**, so its output data plane is an
 **open schema** by design (docs/new_gen/02-plugin-data-contract.md — intrinsically
 generic plugins declare open schemas). There is deliberately **no typed Output
-extractor**: the produced record is whatever the user authored.
+extractor**: the produced pack is whatever the user authored.
 
 What *is* a fixed, declarable vocabulary is the plugin's **control surface** — its
-commands, its config wrapper, and the patch shape `process()` accepts. Those key
-names (hand-parsed with raw yyjson before) now follow the plugin data contract:
+commands and its config wrapper. Those key names follow the plugin data contract:
 
 ## Keys — one source of truth
 
 Every control key is declared **once** in
 [`../../contract/plugins/json_source.decl.json`](../../contract/plugins/json_source.decl.json),
 from which `contract/codegen/gen_contract.py` generates `json_source_keys.gen.h`
-(the `keys::` constants) **and** `json_source_io.gen.h` (the typed
-`Config`/`Command`/`Patch` view). The config/`set_data`/`Patch` builders splice
-raw user JSON — an OPEN control surface by design — declared through the decl's
-constrained raw-JSON shapes (`"raw_json"` fields/params + the `"patch_builder"`
-family, the polaris2 codegen-gap-#2 extension), so this plugin is now a **full
-swap**: the hand-written `_io.h` is deleted and every consumer includes the
-generated header (see `contract/codegen/README.md`, "Coverage").
+(the `keys::` constants the plugin's readers compile from) plus the TS/Py
+typings and the docs keys table. The config and `set_data` splice raw user
+JSON — an OPEN control surface by design — declared through the decl's
+constrained raw-JSON shapes.
 
 | Surface | Key | Type | Notes |
 |---------|-----|------|-------|
 | config  | `data`    | json | the stored user document (wrapped: `{ "data": … }`) |
-| config  | `pack_mode` | bool | opt into pack-plane emit (default `false`); see "Bilingual" below |
-| output  | `seq`     | int  | per-emit counter (pack-mode entry, mirrors mock_camera) |
+| output  | `seq`     | int  | per-emit counter (mirrors mock_camera) |
 | command | `command` | string | `set_data` / `reset` / `get_status` |
 | command | `value`   | json | **required** for `set_data` (the new document) |
-| input (patch) | `key`     | string | patch target path, e.g. `.a.b[2]` |
-| input (patch) | `value`   | json | patch value (open) |
-| input (patch) | `patches` | array | batch form: `[ {key,value}, … ]` |
 
 Schema version: `xi::json_source::kSchemaVersion` (currently **1**). A config
 built against a different version is rejected by `set_def` (naming both versions
 in the log); a config with no `_schema` stamp is tolerated.
 
-## Bilingual: pack-mode emit (polaris2 wave-2)
+(v12 / THE CUT: the wave-2 bilingual `pack_mode` knob and the per-emit Record
+input patches are gone with the Record plane — the sealed pack is the sole emit
+currency, and document edits go through `set_data`/`set_def`.)
 
-`json_source` is **bilingual** (docs/new_gen/10 — Gate P1). Set the `pack_mode`
-config flag (**default `false`**) and, on a host that publishes the `xi.pack@1`
-door, each `process()` emission builds a sealed [Pack](../../docs/new_gen/07-uniform-keyed-buffer-plane.md)
-through the host emit door — exactly as `mock_camera` does — **instead of**
-returning a Record. With `pack_mode` off (every existing project), the Record
-path below is **byte-for-byte unchanged**.
+## Pack emit — JSON document → pack entries
 
-```jsonc
-// config wrapper (set_def): flip the flag alongside the document
-{ "pack_mode": true, "data": { "n": 42, "roi": { "x": 1, "pts": [3,4,5] } } }
-```
-
-**Mapping rule — JSON document → pack entries.** The (patched) document must be
-a JSON **object** at its root; each top-level field becomes one pack entry:
+The stored document must be a JSON **object** at its root; each top-level field
+becomes one pack entry:
 
 | Top-level JSON value | Pack entry |
 |---|---|
 | number (integer) | canonical `i64` |
 | number (real) | canonical `f64` |
 | string | canonical `str` |
-| boolean | canonical `bool` (tag `XI_PACK_TAG_BOOL`, the 0xc2/0xc3 byte; was `i64` `0`/`1` before the pack plane grew a bool tag) |
+| boolean | canonical `bool` (tag `XI_PACK_TAG_BOOL`, the 0xc2/0xc3 byte) |
 | `null` | **skipped** |
 | object / array (**nested**) | **one** `mp` entry — the value encoded to canonical msgpack and re-proven through the ingress edge (see below) |
 
@@ -101,14 +85,9 @@ carrying `seq` + the reason code:
 ## Using it from a driver / script
 
 ```cpp
-#include "json_source_io.gen.h"
-
-host.set_def(src, xi::json_source::Config().data(R"({"roi":[0,0,64,64]})"));
-host.exchange(src, xi::json_source::Command::set_data(R"({"n":3})"));
-
-// Per-emit patch — mutate one path for THIS emit only (open value, JSON text).
-auto in_single = xi::json_source::Patch::single(".n", "7");
-auto in_batch  = xi::json_source::Patch::batch({ {".a", "1"}, {".b", "\"x\""} });
+host.set_def(src, R"({"data":{"roi":[0,0,64,64]}})");
+host.exchange(src, R"({"command":"set_data","value":{"n":3}})");
+// Each tick emits the stored document as ONE sealed pack (entries {seq, n}).
 ```
 
 ## Failure shape
@@ -119,22 +98,15 @@ auto in_batch  = xi::json_source::Patch::batch({ {".a", "1"}, {".b", "\"x\""} })
 { "error": "missing_input", "key": "value", "expected_type": "json" }
 ```
 
-(`error` uses the `xi::contract` reason codes shared with the Record path.)
+(`error` uses the shared `xi::contract` reason codes.)
 
 ## Tests
 
-`tests/test_json_source.cpp` asserts: `set_data` with no `value` → structured
-fault; a future config `_schema` → `set_def` rejects it and leaves the stored
-JSON unchanged; and the `Config`/`Command`/`Patch` builder happy path (a patch
-mutates only the emitted record, read back with a raw key since the output is
-open). Run via `ctest -C Release -R json_source_test` from `plugins/build`.
-
-`tests/test_json_source_pack.cpp` (`json_source_pack_test`) is the bilingual
-proof against the **real DLL** through the `xi.pack@1` door: `pack_mode` off
-leaves the Record path untouched (zero packs on the bus); on, the document's
-scalars land as canonical entries, a nested object rides as one
-ingress-canonicalized `mp` entry that decodes back, and a leading `seq` counter
-advances per emit; a depth-bomb / non-object document is rejected loudly with a
-`$fault` pack. Pooled-handle balance is asserted across the run. It follows
-`pack_pilot_test`'s host-mock pattern (`make_host_api` + `install_pack_abi` +
-`install_trigger_hook`).
+`tests/test_json_source_pack.cpp` (`json_source_pack_test`) is the proof
+against the **real DLL** through the `xi.pack@1` door: the document's scalars
+land as canonical entries, a nested object rides as one ingress-canonicalized
+`mp` entry that decodes back, and a leading `seq` counter advances per emit; a
+depth-bomb / non-object document is rejected loudly with a `$fault` pack.
+Pooled-handle balance is asserted across the run. It follows
+`pack_pilot_test`'s host-mock pattern (`make_host_api` + `install_pack_abi`).
+Run via `ctest --test-dir plugins/build -C Release -R json_source_pack_test`.

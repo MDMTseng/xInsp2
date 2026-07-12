@@ -164,9 +164,24 @@ void cmd_recompile_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::Pa
             if (i) data += ",";
             xp::json_escape_into(data, rr.reattached_instances[i]);
         }
-        data += "]}";
+        data += "]";
+        // Round-3 S2: an ok reply may carry a non-fatal warning (additive field,
+        // same convention as load_project's *_warnings arrays) — e.g. "old
+        // module still mapped" when the versioned new DLL loaded fine but a
+        // lingering worker pins the old image.
+        if (!rr.warning.empty()) {
+            data += ",\"warning\":";
+            xp::json_escape_into(data, rr.warning);
+        }
+        data += "}";
         if (rr.ok) {
             send_rsp_ok(srv, id, data);
+            if (!rr.warning.empty()) {
+                xp::LogMsg lm;
+                lm.level = "warn";
+                lm.msg = "recompile " + *pname + ": " + rr.warning;
+                srv.send_text(lm.to_json());
+            }
         } else {
             // Wave-2 #2: same as export above — send_rsp_err owns the push.
             send_rsp_err(srv, id, rr.error, data);

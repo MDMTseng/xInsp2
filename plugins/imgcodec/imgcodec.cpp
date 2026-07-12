@@ -26,11 +26,11 @@
 //                       and receive byte-identical JPEG.
 //
 //   "xi.image.decode" — Pack in:  bin "data" (PNG/JPEG/BMP/TGA/GIF/PSD/HDR/PIC
-//                                 — stb_image, mirroring host_api->
-//                                 read_image_file's format set: this
-//                                 capability is that field's designated
-//                                 eviction target at v12; the host field
-//                                 stays untouched until then), optional i64
+//                                 — stb_image, the same format set the host's
+//                                 former read_image_file slot decoded: that
+//                                 field was EVICTED at THE CUT (v12) and this
+//                                 capability IS its replacement — the only
+//                                 image-decode path left), optional i64
 //                                 "raw" (1 = preserve the file's NATIVE channel
 //                                 count, incl. 2-ch gray+alpha — the host sets
 //                                 this so the eviction is byte-for-byte), and

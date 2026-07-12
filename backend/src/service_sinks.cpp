@@ -263,6 +263,20 @@ int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out
     // U3: static misuse — checked BEFORE the fault gates (the plugin is never
     // entered, no health/quarantine state is touched).
     if (adapter->is_sink()) return -5;
+    // Round-3 S4: the Wave-2 consolidation moved the -4 no-pack-door check
+    // BEFORE the quarantine gate (which lives inside guarded_plugin_call), so a
+    // quarantined door-less instance started answering -4 where the old
+    // contract said -3 — scripts branching on -3 ("refused, operator action
+    // needed") vs -4 ("wrong target, fix the script") saw the wrong bucket.
+    // Restore the old precedence: gates first, door check after. The pre-gate
+    // duplicates guarded_plugin_call's check on purpose (it must run before the
+    // -4 check, which in turn must run before the plugin is entered); the
+    // re-check inside guarded_plugin_call is a harmless no-op.
+    if (adapter->quarantined()) return -3;
+    if (adapter->reinit_pending()) {
+        apply_pending_reinit_(name, adapter);
+        if (adapter->quarantined()) return -3;
+    }
     if (!adapter->has_pack_door()) return -4;      // Record-only plugin
     // Wave-2 #1: shared fault boundary (data plane ⇒ quarantine-gated).
     auto r = guarded_plugin_call(name, adapter, inst->plugin_name(), "pack door",

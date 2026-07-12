@@ -6,7 +6,6 @@ from typing import TypedDict, NotRequired, List
 
 SyncedStereoConfig = TypedDict('SyncedStereoConfig', {
     "fps": NotRequired[int],
-    "pack_mode": NotRequired[bool],
     "running": NotRequired[bool],
     "ticks": NotRequired[int],
 })

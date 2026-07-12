@@ -864,20 +864,31 @@ inline PluginManager::RecompileResult PluginManager::recompile_project_plugin(co
     // on the NEW module (see reinstate_machine_provider_locked_). No-op if a
     // project instance above provides the plugin, or it isn't autoload-eligible.
     reinstate_machine_provider_locked_(pi, plugin_name, "recompile");
-    // Stale-module fail-check — the recompile sibling of reattach_plugin_from_
-    // dll_locked_'s (#18): instances were re-attached above so nothing dangles,
-    // but the OLD module never unloaded, so its code keeps running (silently
-    // running stale code is the exact bug to surface). Report loudly and skip
-    // the change-gate stamp so the next recompile/rebuild retries the reload.
+    // Stale-module check — the recompile sibling of reattach_plugin_from_
+    // dll_locked_'s (#18), but with a DIFFERENT verdict (round-3 S2 fix).
+    // Root cause of the old false failure: the check samples the OLD module's
+    // on-disk path BEFORE the new DLL loads, and the cl.exe lane VERSIONS the
+    // output filename — so by this point the NEW module has loaded fine and
+    // every instance/factory/provider above re-attached to NEW code. Returning
+    // ok=false with "the OLD code is still running" was half-false: the only
+    // real problem is a leaked old mapping (a lingering worker thread or
+    // pinned dependency DLL holding the old image). Contrast the reattach lane
+    // (reattach_plugin_from_dll_locked_): there the pinned module IS the
+    // module being replaced at the SAME path, so stale genuinely means old
+    // code keeps running and ok=false stands — its semantics are unchanged.
+    // Here: succeed LOUDLY (warning field + stderr) and DO stamp the
+    // change-gate — new code is running, so retry-forever on the next
+    // recompile would be wrong.
     if (stale_module) {
-        r.error = "old DLL did not unload (module still mapped after recompile) — "
-                  "an instance likely left a worker thread or GPU context alive; "
-                  "the OLD code is still running";
-        return r;
+        r.warning = "old module still mapped after recompile — a lingering "
+                    "worker thread or pinned dependency DLL may still hold the "
+                    "OLD image; new code is live and all instances re-attached";
+        std::fprintf(stderr, "[xinsp2] WARNING: recompile('%s'): %s\n",
+                     plugin_name.c_str(), r.warning.c_str());
     }
     // Refresh the change-gate stamp so a later reload_changed_plugins()
     // doesn't see this freshly-recompiled DLL as "changed" and swap it again.
-    // (#18: genuine success only — AFTER the stale_module check.)
+    // (S2: stamped even on stale_module — the NEW dll_path is what's loaded.)
     stamp_loaded_dll_(pi, cres.dll_path);
     r.ok = true;
     return r;

@@ -4,5 +4,4 @@
 
 export interface JsonSourceConfig {
   data?: string;
-  pack_mode?: boolean;
 }

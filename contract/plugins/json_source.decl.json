@@ -1,13 +1,12 @@
 {
-  "$comment": "TRANSCRIBED from plugins/json_source/json_source_keys.h + _io.h. json_source is a generic injector whose EMITTED data plane is an OPEN schema by design (docs/new_gen/02), and whose control surface is deliberately string-shaped: the Config splices RAW user JSON under \"data\" (\"raw_json\": true + \"default\"), set_data carries arbitrary JSON (a raw_json command param), and the per-emit Patch shape ({key,value} single or {patches:[...]} batch) is the fixed \"patch_builder\" family — all constrained whitelisted shapes the generator emits verbatim since the polaris2 codegen gap #2 extension (no more \"handwritten_io\"). The typed pack_mode config key rides the same raw config document (a raw-JSON Config emits setters only for its raw fields). The patch key names ride \"inputs\" ONLY so collect_keys mints their k-constants (a source's inputs never become schema slots or TS/Py types).",
+  "$comment": "TRANSCRIBED from plugins/json_source/json_source_keys.h + _io.h. json_source is a generic injector whose EMITTED data plane is an OPEN schema by design (docs/new_gen/02), and whose control surface is deliberately string-shaped: the Config splices RAW user JSON under \"data\" (\"raw_json\": true + \"default\"), set_data carries arbitrary JSON (a raw_json command param), and the per-emit Patch shape ({key,value} single or {patches:[...]} batch) is the fixed \"patch_builder\" family — all constrained whitelisted shapes the generator emits verbatim since the polaris2 codegen gap #2 extension (no more \"handwritten_io\"). The patch key names ride \"inputs\" ONLY so collect_keys mints their k-constants (a source's inputs never become schema slots or TS/Py types). (The wave-2 bilingual pack_mode knob was removed at v12 — the sealed xi.pack@1 pack is the sole emit currency.)",
   "plugin": "json_source",
   "namespace": "xi::json_source",
   "schema_version": 1,
   "role": "source",
   "title": "json_source — user-authored JSON injector (open output; typed control surface).",
   "config": [
-    { "key": "data", "type": "string", "raw_json": true, "default": "{}", "doc": "string — the user's JSON document, spliced raw under \"data\"" },
-    { "key": "pack_mode", "type": "bool", "doc": "bool (default false) — emit each document as a sealed xi.pack@1 pack (top-level scalars → canonical entries, nested → one ingress-canonicalized mp entry, plus seq) instead of a Record (wave-2 bilingual)" }
+    { "key": "data", "type": "string", "raw_json": true, "default": "{}", "doc": "string — the user's JSON document, spliced raw under \"data\"" }
   ],
   "commands": {
     "selector_key": "command",

@@ -280,8 +280,15 @@ inline bool strip_quotes(std::string& s) {
     return false;
 }
 
+// Round-3 W2 #4: find_key used to take a 5th `const char*& after_out` param
+// (the cursor just past the matched value). It NEVER had a live consumer —
+// every one of the ten call sites (here + service_cmd_dispatch/_project.cpp)
+// declared a phantom `const char* after;` local purely to satisfy the
+// signature and then ignored it. The parameter is deleted, not defaulted:
+// keeping a dead out-param invites the next caller to trust a cursor no test
+// exercises.
 inline bool find_key(const char* p, const char* end, std::string_view key,
-                     std::string& value_out, const char*& after_out) {
+                     std::string& value_out) {
     // Expect we're at '{' or just past it. Advance to interior.
     p = skip_ws(p, end);
     if (p < end && *p == '{') ++p;
@@ -299,7 +306,6 @@ inline bool find_key(const char* p, const char* end, std::string_view key,
         p = extract_value(p, end, v);
         if (k == key) {
             value_out = std::move(v);
-            after_out = p;
             return true;
         }
         p = skip_ws(p, end);
@@ -316,24 +322,23 @@ inline std::optional<ParsedCmd> parse_cmd(std::string_view json) {
 
     // type must be "cmd"
     std::string type_val;
-    const char* after;
-    if (!detail::find_key(p, end, "type", type_val, after)) return std::nullopt;
+    if (!detail::find_key(p, end, "type", type_val)) return std::nullopt;
     detail::strip_quotes(type_val);
     if (type_val != "cmd") return std::nullopt;
 
     ParsedCmd out;
 
     std::string id_val;
-    if (!detail::find_key(p, end, "id", id_val, after)) return std::nullopt;
+    if (!detail::find_key(p, end, "id", id_val)) return std::nullopt;
     try { out.id = std::stoll(id_val); } catch (...) { return std::nullopt; }
 
     std::string name_val;
-    if (!detail::find_key(p, end, "name", name_val, after)) return std::nullopt;
+    if (!detail::find_key(p, end, "name", name_val)) return std::nullopt;
     detail::strip_quotes(name_val);
     out.name = std::move(name_val);
 
     std::string args_val;
-    if (detail::find_key(p, end, "args", args_val, after)) {
+    if (detail::find_key(p, end, "args", args_val)) {
         out.args_json = std::move(args_val);
     } else {
         out.args_json = "{}";
@@ -351,8 +356,7 @@ inline std::optional<ParsedCmd> parse_cmd(std::string_view json) {
 // which case the caller falls back to a log-only reject.
 inline std::optional<int64_t> recover_cmd_id(std::string_view json) {
     std::string v;
-    const char* after;
-    if (!detail::find_key(json.data(), json.data() + json.size(), "id", v, after))
+    if (!detail::find_key(json.data(), json.data() + json.size(), "id", v))
         return std::nullopt;
     detail::strip_quotes(v);   // tolerate a quoted "id":"7" as well as bare 7
     try {
@@ -416,8 +420,7 @@ inline void dispatch_command_guarded(std::string_view text,
 // handlers to pluck args like {"path":"..."} without dragging in a parser.
 inline std::optional<std::string> get_string_field(std::string_view json, std::string_view key) {
     std::string v;
-    const char* after;
-    if (!detail::find_key(json.data(), json.data() + json.size(), key, v, after)) {
+    if (!detail::find_key(json.data(), json.data() + json.size(), key, v)) {
         return std::nullopt;
     }
     if (!detail::strip_quotes(v)) return std::nullopt;
@@ -426,8 +429,7 @@ inline std::optional<std::string> get_string_field(std::string_view json, std::s
 
 inline std::optional<double> get_number_field(std::string_view json, std::string_view key) {
     std::string v;
-    const char* after;
-    if (!detail::find_key(json.data(), json.data() + json.size(), key, v, after)) {
+    if (!detail::find_key(json.data(), json.data() + json.size(), key, v)) {
         return std::nullopt;
     }
     try { return std::stod(v); } catch (...) { return std::nullopt; }

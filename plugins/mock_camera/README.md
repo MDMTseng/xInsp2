@@ -2,23 +2,26 @@
 
 Simulated camera source. Streams RGB test frames (a shifting gradient with a
 frame counter drawn top-left) on its own capture thread; configurable
-width/height/fps; start/stop via commands.
+width/height/fps; start/stop via commands. Each frame is emitted as ONE sealed
+`xi.pack@1` Pack (v12: the sole data plane): the `frame` image entry (a
+zero-copy `adopt_image` of the pool slot it was painted into) plus the `seq`
+counter and the `gain` the frame was painted with.
 
-Being a **source**, it has no `process()` input Record — its script/UI-facing
+Being a **source**, it has no `process()` *data* input — its script/UI-facing
 contract is its **config** (`get_def`/`set_def`), its **commands**
-(`exchange`), and the **frame** it emits. It implements the plugin data contract
+(`exchange`), the **frame pack** it emits, and its **control door** (below).
+It implements the plugin data contract
 ([docs/new_gen/02-plugin-data-contract.md](../../docs/new_gen/02-plugin-data-contract.md))
-on those surfaces: a typed builder for config/commands, a typed extractor for
-the emitted frame, fail-loud required command payloads, and a config
-schema-version stamp.
+on those surfaces: generated key constants, fail-loud required command
+payloads, and a config schema-version stamp.
 
 ## Keys — one source of truth
 
 Every key name is declared **once** in
 [`../../contract/plugins/mock_camera.decl.json`](../../contract/plugins/mock_camera.decl.json),
 from which `contract/codegen/gen_contract.py` generates `mock_camera_keys.gen.h`
-and the typed `mock_camera_io.gen.h`; the plugin's readers and the typed view
-both compile from those generated constants.
+(the `keys::` constants the plugin's readers compile from) plus the TS/Py
+typings and the docs keys table.
 
 | Surface | Key | Type | Notes |
 |---------|-----|------|-------|
@@ -26,13 +29,12 @@ both compile from those generated constants.
 | config  | `height` | int | |
 | config  | `fps`    | int | clamped to [1, 60] |
 | config  | `streaming` | bool | read-only (`get_def` only) |
-| config  | `pack_mode` | bool | default false — emit via the xi.pack@1 plane instead of Record |
-| config  | `gain` | double | default 1.0, clamped to [0.05, 8.0] — **pack-mode** brightness multiplier |
+| config  | `gain` | double | default 1.0, clamped to [0.05, 8.0] — brightness multiplier |
 | command | `command` | string | `start` / `stop` / `get_status` / `set_fps` / `set_resolution` / `set_gain` |
 | command | `value`   | int/double | **required** for `set_fps` (int) and `set_gain` (double) |
 | output  | `frame`   | image | emitted RGB frame |
-| output  | `seq`     | int | frame counter (pack-mode entry) |
-| output  | `gain`    | double | pack-mode entry: the gain THIS frame was painted with |
+| output  | `seq`     | int | frame counter |
+| output  | `gain`    | double | the gain THIS frame was painted with |
 | door    | `ack`     | string | door reply: echoes the applied command name |
 
 Schema version: `xi::mock_camera::kSchemaVersion` (currently **1**). A config
@@ -42,21 +44,12 @@ naming both versions. A config with no `_schema` stamp (e.g. a legacy persisted
 
 ## Using it from a driver / script
 
-Include the generated `mock_camera_io.gen.h`:
-
 ```cpp
-#include "mock_camera_io.gen.h"
-
-// Config via the typed builder (stamps the schema version).
-host.set_def(cam, xi::mock_camera::Config().width(1280).height(720).fps(15));
-
-// Commands via the typed builder.
-host.exchange(cam, xi::mock_camera::Command::start());
-host.exchange(cam, xi::mock_camera::Command::set_fps(30));
-
-// Read an emitted frame with the typed extractor.
-xi::mock_camera::Frame f{ emitted_record };
-if (f.has_frame()) show(f.image());
+host.set_def(cam, R"({"width":1280,"height":720,"fps":15})");
+host.exchange(cam, R"({"command":"start"})");
+host.exchange(cam, R"({"command":"set_fps","value":30})");
+// Each dispatched trigger carries ONE sealed Pack — read it via t.pack()
+// (entries {frame, seq, gain}) or drive the control door below.
 ```
 
 ## Failure shape
@@ -68,16 +61,16 @@ silently no-op'ing. `set_fps` with no `value` returns:
 { "error": "missing_input", "key": "value", "expected_type": "int" }
 ```
 
-(`error` is one of `missing_input` / `wrong_type`, matching the `xi::contract`
-reason codes used on the Record path.) Unknown commands return the framework's
+(`error` is one of `missing_input` / `wrong_type` — the shared `xi::contract`
+reason codes.) Unknown commands return the framework's
 `{"error":"unknown_command", ...}` shape.
 
-## Control door (pack-mode closed loop)
+## Control door (closed loop)
 
-Since polaris2 ex-feedback the source is **bilingual both directions**: besides
-*emitting* pack frames (`pack_mode`), it *accepts* control packs through its
-own `xi.pack@1` door (`XI_PLUGIN_PACK_DOOR`). The door speaks the same command
-vocabulary as `exchange()`, as pack entries:
+Since polaris2 ex-feedback the source speaks the pack plane **both
+directions**: besides *emitting* frame packs, it *accepts* control packs
+through its own `xi.pack@1` door (`XI_PLUGIN_PACK_DOOR`). The door speaks the
+same command vocabulary as `exchange()`, as pack entries:
 
 ```
 { command:"set_gain", value:f64 }   →  ack pack { ack:"set_gain", gain:<clamped>, seq:<frame counter> }
@@ -87,25 +80,19 @@ vocabulary as `exchange()`, as pack entries:
 A script closes the loop with `xi::use("cam").process(ctrl)` (request-reply;
 the sealed door output IS the ack) or `.push(ctrl)` (fire-and-forget). The
 commanded gain applies to the **next** emitted frame — frame-latency control;
-each pack-mode frame echoes the gain it was painted with (`gain` entry) so the
-loop can regulate against the actual plant state. Faults are the pack-shaped
-fail-loud contract: a value-less `set_gain` acks `$fault=missing_input`, a
-mis-typed value `$fault=wrong_type`, an unknown selector
-`$fault=unknown_command` — never a silent no-op.
+each frame echoes the gain it was painted with (`gain` entry) so the loop can
+regulate against the actual plant state. Faults are the pack-shaped fail-loud
+contract: a value-less `set_gain` acks `$fault=missing_input`, a mis-typed
+value `$fault=wrong_type`, an unknown selector `$fault=unknown_command` —
+never a silent no-op.
 
-This addition is strictly **additive**: the Record emit path is untouched
-(never scaled, byte-for-byte the pre-door behavior), and a host that never
-probes `xi_plugin_get_interface` sees exactly the plugin it always saw. The
-live exemplar is [examples/qa_pack_feedback](../../examples/qa_pack_feedback/README.md)
+The live exemplar is
+[examples/qa_pack_feedback](../../examples/qa_pack_feedback/README.md)
 (mean-intensity analysis in the script steering `gain` into a target band).
 
 ## Tests
 
-`tests/test_mock_camera.cpp` asserts: `set_fps` with no `value` → structured
-fault; a future config `_schema` → `set_def` rejects it and leaves config
-unchanged; the `Config`/`Command` builder happy path (including fps and gain
-clamping); and the control door (set_gain ack round-trip + clamp + fail-loud
-`$fault` on a command-less pack). The script-surface door chain is covered in
-`plugins/use_pack_door_test.cpp` (5c) and the live loop in
-`examples/qa_pack_feedback`. Run via `ctest -C Release -R mock_camera_test`
-from `plugins/build`.
+The pack emit + chained-door flow is proven against the real DLL in
+`plugins/pack_pilot_test.cpp` (pack_pilot_test); the script-surface door chain
+in `plugins/use_pack_door_test.cpp`; the live closed loop in
+`examples/qa_pack_feedback`. Run via `ctest --test-dir plugins/build -C Release`.

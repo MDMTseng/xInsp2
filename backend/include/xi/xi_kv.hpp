@@ -75,6 +75,24 @@
 
 namespace xi {
 
+// Round-3 #7: hard cap on the SERIALIZED persistent-kv store. Every other
+// ingress edge in the tree carries a bound (the WS frame caps at 16 MiB), but
+// the kv store had NONE — a runaway script could grow it without limit, and
+// the whole serialized blob is captured under run_mu + script_mu on EVERY
+// recompile (a 2 GB store = a 2 GB copy inside the hot-reload critical
+// section). 16 MiB matches the WS frame bound: kv is cross-frame STATE, not
+// bulk storage, and nothing larger could round-trip the wire anyway.
+//
+// Enforced HOST-SIDE at the capture site (compile_and_load's get_kv snapshot,
+// service_cmd_lifecycle.cpp), NOT per-set inside this SDK class: a per-set
+// check would change script-side semantics/ABI expectations (sets that
+// succeeded for years would start refusing), and no single set knows the
+// aggregate serialized size. The capture site is the one edge where the store
+// crosses into host memory and gets persisted across reloads — bounding that
+// edge caps the damage (host never buffers an unbounded blob) without touching
+// in-script behavior.
+inline constexpr int kKvHardCapBytes = 16 * 1024 * 1024;   // 16 MiB
+
 class Kv {
 public:
     enum class Type { I64, F64, Bool, Str, Bin, Mp };
