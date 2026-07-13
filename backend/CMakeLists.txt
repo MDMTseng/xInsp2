@@ -689,6 +689,16 @@ add_test(NAME owner_cancel_stress_heavy COMMAND test_owner_cancel_stress)
 set_tests_properties(owner_cancel_stress_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
+# pixpool size-class buffer recycler (perf/imagepool-sizeclass): magazine
+# hits on same-size churn, 64B alignment, zero-fill-on-recycle contract,
+# byte-budget eviction, cross-thread buffer migration, > 64 MiB direct lane.
+add_executable(test_image_pool_recycle tests/test_image_pool_recycle.cpp)
+target_link_libraries(test_image_pool_recycle PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_image_pool_recycle PRIVATE pthread)
+endif()
+add_test(NAME image_pool_recycle COMMAND test_image_pool_recycle)
+
 add_executable(test_image_pool_stress tests/test_image_pool_stress.cpp)
 target_link_libraries(test_image_pool_stress PRIVATE xi_core)
 if(NOT MSVC)

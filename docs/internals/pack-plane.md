@@ -29,6 +29,35 @@ API unity"):
   **only** through the typeless `pack_pool` facade (a typeless N-byte buffer is
   an (N,1,1) image) — the privileged mint path of doc 07's ingress rule.
 
+### ImagePool pixel storage — the size-class recycler (`pixpool`)
+
+Where the pool buffers' *bytes* come from (2026-07, hotpath-perf C-1 fix,
+backported from the design-C prototype): `ImagePool::create()` no longer heap-
+allocates a `std::vector` per image. Pixel storage is a **64-byte-aligned
+buffer from a size-class recycler** (`pixpool` in `xi_image_pool.hpp`):
+
+- **2ⁿ size classes, 4 KiB–64 MiB**; a request above 64 MiB (the pool's
+  per-image cap is 1 GiB) takes a **direct heap lane** (exact-size
+  `_aligned_malloc`/`_aligned_free`, never cached).
+- **Free path:** per-thread LIFO **magazine** → mutexed global **overflow
+  shelf** → heap. A buffer created on thread A and released on thread B
+  migrates to B's magazine. **Byte budgets** (constexpr-tunable): magazine ≤ 4
+  buffers/class/thread and ≤ 64 MiB/class/thread (so the 64 MiB class keeps 1);
+  shelf ≤ 32 buffers/class and ≤ 128 MiB/class (so the 64 MiB class hoards at
+  most 2). Over-budget frees go straight to the heap.
+- **Zero-fill contract unchanged:** `create()` still returns zeroed pixels —
+  recycled buffers are `memset` (callers exist that paint onto a "blank"
+  canvas). Still ~10x cheaper than the old alloc + zero + first-touch-fault
+  path for the hot same-size case (1920×1200: ~533 µs → ~53 µs per
+  create/release cycle; magazine hit itself is nanoseconds).
+- **Teardown:** the shelf is intentionally leaked (same doctrine as the
+  `ImagePool` singleton), so per-thread magazine destructors can always drain
+  survivors to it no matter how late they run.
+- Handles, generations, refcounts, owner sweep and `WalkGuard` deferred
+  reclamation are **untouched** — only where pixel bytes come from and where
+  they go on free changed. Diagnostics: `ImagePool::pixel_alloc_stats()`
+  (magazine/shelf hits, evictions); asserted by `test_image_pool_recycle`.
+
 Entry values are stored as their **canonical max-width msgpack encoding** (int64
 `0xd3`, float64 `0xcb`, bool `0xc2/0xc3`, str32/bin32), so `raw_at(i)` hands a
 generic dumper (XEX1-v3, `record_save`) the small plane *exactly as it lives in

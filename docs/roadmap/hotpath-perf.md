@@ -1,7 +1,8 @@
 # Hot-path performance — findings, baseline, and roadmap
 
-> **Status:** findings-only (nothing here is implemented yet). Captured from the
-> 2026-07-10 hot-path scan + `bench_*` baseline.
+> **Status:** captured from the 2026-07-10 hot-path scan + `bench_*` baseline.
+> **C-1 (ImagePool pixel recycling) shipped 2026-07-13** (`perf/imagepool-sizeclass`);
+> the remaining items are findings-only.
 >
 > **[2026-07-11] TypedPack deleted (commit `cba51fe`):** the in-process
 > `TypedPack<Schema>`/`TypedPackBuilder` container this page benchmarks was
@@ -66,7 +67,15 @@ zero-fill** (value-init, then the real pixels overwrite = a redundant N-byte wri
 
 ## Findings
 
-### C-1 — ImagePool recycles handle *slots*, never *pixel memory* (biggest reclaim)
+### C-1 — ImagePool recycles handle *slots*, never *pixel memory* (biggest reclaim) — **DONE 2026-07-13** (`perf/imagepool-sizeclass`)
+
+**Shipped:** `pixpool` size-class recycler in `xi_image_pool.hpp` (2ⁿ classes
+4 KiB–64 MiB, 64B-aligned, per-thread magazines + budgeted global shelf,
+> 64 MiB direct lane). Zero-fill contract kept (recycled buffers memset).
+Measured (same box, Release): 1920×1200×1 create/release **533 µs → 53 µs**
+(no-touch, 10.1×) / **611 µs → 105 µs** (with full caller memset, 5.8×);
+gate 320×240×3 create+memset 6.6 µs → ~3 µs-class. Asserted by
+`test_image_pool_recycle`; bench rows added to `bench_image_pool`.
 `xi_image_pool.hpp` `create` does `new PoolEntry()` + `pixels.resize(n)` per create;
 `release`→`reclaim_entry_` `delete`s the entry. A per-frame frame buffer (and any
 `add_bin` ≥ `kPackLargeThreshold=4096`) therefore pays an allocation **and a
@@ -156,9 +165,8 @@ sustained emission into a persistent lane.
 
 ## Roadmap (by reclaim ÷ risk, per the bench)
 
-1. **C-1 ImagePool pixel recycling** — biggest by the numbers (frame-buffer create
-   dominates: 6.5 µs–344 µs), but touches the lock-free pool core → its own PR + a
-   focused `bench_image_pool` before/after and a concurrency review.
+1. ~~**C-1 ImagePool pixel recycling**~~ — **DONE 2026-07-13** (see C-1 above:
+   size-class magazine backport, 1920×1200 cycle 533 µs → 53 µs).
 2. ~~**B-2 strict TypedPack + B-1 >24-key steer**~~ — moot 2026-07-11 (TypedPack
    deleted, `cba51fe`); only B-1's lazy-index option remains live.
 3. **A-2/A-1/A-3 + B-3 + the kChunk constant** — behavior-preserving fast-path caches;
