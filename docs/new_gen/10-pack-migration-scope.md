@@ -1,5 +1,7 @@
 # Pack Plane — Migration Scope Decision (Wave-2 Exit)
 
+> [2026-07-14] Storage model superseded by the v3 slab (packv3 branch): raw-scalar slab container, canonical msgpack at the edge via the `canonical_value` walk — see docs/internals/pack-plane.md.
+
 > [2026-07-11] Partially superseded: the in-process `TypedPack` benchmarked below was deleted (`cba51fe`), and the `xi_script_set_run_id` export was replaced by the explicit RunContext thunks (`a293cfe`) — see docs/internals/pack-plane.md / docs/reference/c-abi.md.
 
 > **Naming note:** the container was renamed **Frame → Pack** after this

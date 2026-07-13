@@ -11,23 +11,48 @@ canonical headers: `xi_pack.hpp` (container), `xi_pack_abi.hpp` (host door),
 `xi_pack_contract.hpp` (reserved keys + fault contract), `xi_mp.hpp` (codec),
 `xi_ingress.hpp` (untrusted edge).
 
-## The container memory model (`xi_pack.hpp`)
+## The container memory model (`xi_pack.hpp`) — the v3 SLAB
 
-A pack's storage has two planes, resolved behind one API (D1 "storage duality,
-API unity"):
+**(pack-v3 slab migration, 2026-07 packv3 branch.)** One sealed pack = **one
+contiguous slab** + N pool-backed EXTERN buffers, resolved behind one API (D1
+"storage duality, API unity"):
 
-- **Arena** — a per-pack bump allocator that owns every *small* entry's bytes
-  (scalars, strings, inline binaries below the 4096-byte `kPackLargeThreshold`,
-  nested msgpack) **and** the interned key strings. Allocation is a pointer bump;
-  the common one-chunk pack keeps its chunk inline (no chunk-vector alloc), and
-  chunks are borrowed from / returned to a **thread-local `ArenaPool` freelist**,
-  so a steady stream of packs on one lane's thread stops heap-allocating
-  entirely — the ImagePool discipline in miniature. Destruction returns every
-  chunk in one shot ("the arena dies with the pack").
-- **Pool buffers** — large payloads (images; binaries ≥ threshold) do *not* live
-  in the arena. They are raw ImagePool buffers referenced by handle, minted
-  **only** through the typeless `pack_pool` facade (a typeless N-byte buffer is
-  an (N,1,1) image) — the privileged mint path of doc 07's ingress rule.
+- **Slab** — all inline storage in a single heap block, laid out as
+  `[PackHeader 64B] [DirEntry × n, 32B, sorted by (key_hash, key bytes,
+  ordinal)] [order table: order[ordinal] → dir index] [payload: keys + entry
+  bytes, bump-packed, per-entry aligned]`. Lookup is a binary search on the
+  hash-sorted directory (equal-hash runs memcmp-verified against the real key
+  bytes — collisions handled, never assumed away); **iteration is insertion
+  order** via the ordinal→dir order table, so `key_at`/`tag_at`/`for_each`
+  present exactly the order entries were added (the walkers' contract). Small
+  and large packs share the same O(log n) path — no side index, no hash map,
+  no per-entry heap nodes.
+- **Scalars are stored RAW** — an i64/f64 is 8 aligned bytes (a typed read is
+  one pointer add + one 8-byte load, zero msgpack decode), a bool one 0/1
+  byte, strings/small binaries raw bytes (length in the DirEntry), and only
+  nested msgpack (`Mp`) keeps its canonical bytes verbatim. NaN doubles are
+  flattened to the one quiet pattern at `add_f64` time (ruling 1).
+- **EXTERN entries** — images, tensors, and binaries ≥ the 4096-byte
+  `kPackLargeThreshold` do *not* live in the slab. They are raw ImagePool
+  buffers referenced by handle, minted **only** through the typeless
+  `pack_pool` facade (a typeless N-byte buffer is an (N,1,1) image) — the
+  privileged mint path of doc 07's ingress rule. The slab payload holds a
+  24-byte `ExtRecord {handle, logical w/h/c, byte length}` per EXTERN entry;
+  the DirEntry points at it, so the pack carries the *logical* dims itself.
+- **Recycling** — the slab buffer is borrowed from / returned to the
+  per-thread **`SlabPool` freelist** (the previous `ArenaPool`, renamed), and
+  the builder's staging vectors recycle through a per-thread scratch pool, so
+  a steady stream of packs on one lane's thread is heap-free after warmup —
+  the ImagePool discipline in miniature. Destruction returns the slab in one
+  shot ("the slab dies with the pack").
+- **NEW first-class entries (additive):** `PackTag::Tensor` — logical shape
+  `{w,h,c}` + a `PackDtype` (`U8…F64`, carried in `DirEntry::type_id`) over a
+  pool buffer, via `add_tensor` / `get_tensor` / `get_tensor_of<T>` (dtype
+  mismatch fails closed); and `add_blob(type_id)` user blobs (`type_id ≥
+  kPackTypeUserBase`), read back like any bin plus `type_id_at`. There is
+  deliberately **no `xi_pack_v1` door accessor for Tensor** — that surface is
+  reserved for the clean `xi.pack@3` door (in flight on the packv3 line;
+  documented in `c-abi.md` when it lands).
 
 ### ImagePool pixel storage — the size-class recycler (`pixpool`)
 
@@ -58,17 +83,36 @@ buffer from a size-class recycler** (`pixpool` in `xi_image_pool.hpp`):
   they go on free changed. Diagnostics: `ImagePool::pixel_alloc_stats()`
   (magazine/shelf hits, evictions); asserted by `test_image_pool_recycle`.
 
-Entry values are stored as their **canonical max-width msgpack encoding** (int64
-`0xd3`, float64 `0xcb`, bool `0xc2/0xc3`, str32/bin32), so `raw_at(i)` hands a
-generic dumper (XEX1-v3, `record_save`) the small plane *exactly as it lives in
-memory* — wire bytes equal memory bytes.
+### Memory ≠ wire: canonical msgpack at the edge (the walk API)
+
+The **wire/at-rest format is unchanged** — the canonical max-width msgpack
+profile (int64 `0xd3`, float64 `0xcb`, bool `0xc2/0xc3`, str32/bin32, via
+`xi_mp.hpp`) remains the serialization truth. What changed is *where* those
+bytes exist: scalars are raw **only in memory**, and the canonical bytes are
+produced **on demand at the serialization boundary** by the pack's walk API:
+
+- `for_each_entry(fn)` / `entry_at(i)` — visit every entry in insertion order
+  with a typed `EntryView` (key, tag, `type_id`, inline raw span *or* EXTERN
+  shape + borrowed handle).
+- `canonical_value(i, xi::mp::Writer&)` — append the i-th entry's ONE
+  canonical msgpack value, byte-identical to what the old arena stored (the
+  emit goes through `xi::mp::Writer`, the one canonical-encode truth,
+  including the ruling-1 NaN flatten). Image/Tensor entries have no single
+  scalar form and return `false` — their wire shape is the dumper's contract.
+
+The retired identity "memory ≈ wire" (arena bytes were already canonical and
+were spliced verbatim onto the wire) is pinned in its new form by
+`plugins/xex1_v2_identity_test.cpp`: **`canonical_value` == an independent
+`xi::mp::Writer` re-encode == the XEX1-v3 encoder's wire bytes == disk**.
+Consequently `raw_at(i)` now returns the entry's RAW stored payload (empty for
+EXTERN entries), and `arena_bytes()` became `slab_bytes()`.
 
 ### One container, one read path
 
 - **`Pack` / `PackBuilder`** — the dynamic, string-keyed container (generic
-  walkers, ad-hoc producers, ingress-canonicalized foreign maps). Lookup is
-  hybrid by measurement: ≤ 24 entries → a linear memcmp scan over the contiguous
-  table (no index allocated); larger packs build an `unordered_map` once at seal.
+  walkers, ad-hoc producers, ingress-canonicalized foreign maps). Lookup is a
+  binary search on the slab's hash-sorted directory (memcmp-verified; the
+  pre-slab hybrid "linear ≤ 24 / `unordered_map` at seal" scheme is gone).
 
 > **Retired 2026-07-11 (contraction, commit `cba51fe`):** the second in-process
 > container — `TypedPack<Schema>` / `TypedPackBuilder` over a `PackSchema` CRTP
@@ -82,11 +126,15 @@ memory* — wire bytes equal memory bytes.
 ## Seal and identity
 
 A pack under construction (`PackBuilder`) is never shareable; `seal()` is the
-one-way flip — it moves the arena, entry table and handle ledger into an
-immutable `Pack` and empties the builder (no double-seal, no write-after-seal;
-asserts guard both). A sealed `Pack` is **single-owner and move-only** in C++:
-its destruction *is* the whole lifecycle end — arena freed in one shot, every
-pool handle released exactly once. Drop-on-crash is exactly destruction; there
+one-way flip — it hash-sorts the staged entries and writes the one slab
+(directory + order table + payload), producing an immutable `Pack` and
+emptying the builder (no double-seal, no write-after-seal; asserts guard
+both). A sealed `Pack` is **single-owner and move-only** in C++: its
+destruction *is* the whole lifecycle end — the slab returned to the recycle
+pool in one shot, every pool handle released exactly once. Borrowed views
+(`get_str`/`get_bin`/`get_mp`/`raw_at` spans, `key_at` string_views) stay
+valid for the life of the owning Pack — the slab is a stable heap block, so
+views survive a Pack move. Drop-on-crash is exactly destruction; there
 is no reconciliation and no COW, which is what dissolves the Record plane's
 caught-crash leak-over-UAF class (`data-layer.md` §Q0f).
 

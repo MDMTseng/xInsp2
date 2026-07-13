@@ -14,24 +14,37 @@
 // number is reported verbatim, with any implementation cause named.
 //
 // ---------------------------------------------------------------------------
-// THE COSTS UNDER TEST (docs/new_gen/07-uniform-keyed-buffer-plane.md):
-//   C1  arena bump-alloc BUILD (vs mutable-DOM node allocation)            (§Costs)
-//   C2  one-shot pack FREE (vs refcount reconciliation)                   (§lifecycle 4)
-//   C3  sealed O(1) offset READS (canonical fixed-width + fixed order)     (§profile 1)
-//   C4  memcpy-on-HOP on the small plane (vs a contended refcount CAS)     (§D "small plane")
-// The micros below isolate those four costs at the same points.
+// THE COSTS UNDER TEST (docs/new_gen/07-uniform-keyed-buffer-plane.md, updated
+// for the pack-v3 SLAB container — scalars stored RAW, canonical msgpack only
+// at the serialization edge via canonical_value):
+//   C1  slab bump BUILD (staging scratch + one slab write at seal)         (§Costs)
+//   C2  one-shot pack FREE (slab back to the per-thread recycle pool)      (§lifecycle 4)
+//   C3  sealed RAW READS (binary search + one raw 8-byte load, no decode)  (§profile 1)
+//   C4  move-on-HOP (a sealed Pack hops as a MOVE — pointer swap, no copy,
+//       no refcount CAS)                                                   (§D "small plane")
+// The micros below isolate those costs at the same points.
+//
+// SLAB MIGRATION NOTE (packv3, d8fe140): the previous revision of this bench
+// modelled the small plane as ONE contiguous canonical-msgpack buffer
+// (xi::mp::Writer), hopped it by memcpy, and read M fields by PRECOMPUTED
+// OFFSET (pack_mp_detail fixed-width decodes). That representation is retired:
+// nothing in production builds an mp plane to hop a pack or reads mp-at-offset
+// from a Pack anymore (the fixed-offset readers' remaining consumers decode
+// WIRE bytes, covered by bench_pack_c). The old "mp plane + memcpy-hop +
+// offset-read" lanes were therefore replaced by their slab equivalents: the
+// dispatch event carries a sealed xi::Pack (moved, never copied) and the
+// consumer reads M fields through the typed accessors (raw slab loads).
 //
 // ---------------------------------------------------------------------------
 // THE PACK PLANE ------------------------------------------------------------
 //
-//   Per pack the producer builds the small plane as ONE contiguous canonical-
-//   profile msgpack buffer via xi::mp::Writer — N scalars + a nested map — a
-//   single growing arena-style buffer, zero per-node heap allocation (C1). The
-//   HOP is a raw std::memcpy of that sealed plane into the consumer's (reused)
-//   arena — no refcount, no CAS (C4). The consumer READS M fields by DIRECT
-//   OFFSET: the canonical profile fixes every field's byte offset for a known
-//   schema, so reads are a fixed-width decode at a precomputed offset (C3). FREE
-//   is dropping the plane buffer (C2).
+//   Per pack the producer builds N scalars + a nested msgpack map through
+//   xi::PackBuilder (thread-local staging scratch, zero steady-state heap,
+//   C1), seals to ONE contiguous slab, and the event carries the sealed Pack
+//   BY MOVE (C4 — ownership transfer is a pointer swap). The consumer READS M
+//   fields via the typed accessors: a binary search on the hash-sorted
+//   directory + a raw 8-byte load, zero msgpack decode (C3). FREE returns the
+//   slab to the per-thread recycle pool in one shot (C2).
 //
 //   IMAGE traffic in the dispatch part is REAL: a pooled 320x240x3 frame
 //   (xi::ImagePool) rides the event, addref'd on emit, released on consume, and
@@ -50,13 +63,6 @@
 //             not the TriggerBus emit_pack path — bench_hotpath covers that).
 //   NOT in span (on purpose): script/plugin compute (a fixed tiny inspect stands
 //             in), JPEG/expose, WS/PLC — same exclusions as bench_hotpath.
-//
-// The HOP uses the mp::Writer contiguous plane rather than the xi_pack.hpp
-// PackBuilder arena because 07 §D1's "arena copy" hop must be an actual MEMCPY of
-// a position-independent small plane; the PackBuilder arena is a scattered chunk
-// set whose pointers can't be memcpy'd verbatim. The PackBuilder/Pack container
-// (arena bump + seal + O(1) index + one-shot free) IS measured directly in the
-// metadata-only micro below, the cleanest read on C1/C2/C3.
 //
 #include "perf_fingerprint.hpp"
 
@@ -95,76 +101,43 @@ static constexpr int kScalars = 8;   // $src, seq, count, ts_us, score, x, y, pa
 static constexpr int kReads   = 4;   // seq, score, count, $src  (the consumer's M)
 
 // ---------------------------------------------------------------------------
-// PACK lane metadata — build the small plane as ONE canonical msgpack buffer.
-// Same N scalars + nested map. mp::Writer emits the canonical max-width profile
-// (int64 0xd3, float64 0xcb, str32 0xdb, map32) — the v3 small plane verbatim.
+// PACK lane metadata — build the same N scalars + nested map as a sealed slab
+// Pack through xi::PackBuilder. Scalars land RAW in the slab (one 8-byte store,
+// no msgpack encode); the nested region is one canonical-msgpack Mp entry
+// (nesting is msgpack's job, D3).
 // ---------------------------------------------------------------------------
-static xi::mp::Bytes build_pack_plane(int64_t seq) {
+static xi::Pack build_bench_pack(int64_t seq) {
+    xi::PackBuilder b;
+    b.add_str("$src", "matcher");
+    b.add_i64("seq", seq);
+    b.add_i64("count", seq % 17);
+    b.add_i64("ts_us", seq * 1000);
+    b.add_f64("score", 0.7 + (seq % 30) * 0.01);
+    b.add_f64("x", 100.0 + seq * 0.5);
+    b.add_f64("y", 50.0 + seq * 0.25);
+    b.add_bool("pass", (seq & 1) != 0);
     xi::mp::Writer w;
-    w.map(kScalars + 1);                                   // 8 scalars + region
-    w.key("$src");  w.str("matcher");
-    w.key("seq");   w.int_(seq);
-    w.key("count"); w.int_(seq % 17);
-    w.key("ts_us"); w.int_(seq * 1000);
-    w.key("score"); w.float_(0.7 + (seq % 30) * 0.01);
-    w.key("x");     w.float_(100.0 + seq * 0.5);
-    w.key("y");     w.float_(50.0 + seq * 0.25);
-    w.key("pass");  w.boolean((seq & 1) != 0);
-    w.key("region"); w.map(4);
-        w.key("area");  w.float_(142.5 + (double)seq);
-        w.key("cx");    w.float_(12.0);
-        w.key("cy");    w.float_(34.0);
-        w.key("label"); w.str("ok");
-    return w.take();
+    w.map(4);
+    w.key("area");  w.float_(142.5 + (double)seq);
+    w.key("cx");    w.float_(12.0);
+    w.key("cy");    w.float_(34.0);
+    w.key("label"); w.str("ok");
+    xi::mp::Bytes region = w.take();
+    b.add_mp("region", region.data(), region.size());
+    return b.seal();
 }
 
-// The precomputed offset table — the crux of C3. Because the profile is
-// canonical (fixed-width numbers, widest markers) AND the field order is fixed by
-// the schema, each field's VALUE begins at a byte offset that is IDENTICAL across
-// every pack. A generated accessor caches these once; every read is then a
-// fixed-width decode at a known offset (no scan, no hash). We compute the table
-// ONCE from a sample plane by a single structural scan.
-struct PackOffsets { size_t seq = 0, score = 0, count = 0, src = 0; bool ok = false; };
-
-static void skip_value_(xi::mp::Reader& r) {
-    xi::mp::Element e;
-    if (r.next(e) != xi::mp::Status::Ok) return;
-    if (e.kind == xi::mp::Kind::Array)
-        for (uint32_t i = 0; i < e.len; ++i) skip_value_(r);
-    else if (e.kind == xi::mp::Kind::Map)
-        for (uint32_t i = 0; i < e.len; ++i) { skip_value_(r); skip_value_(r); }
-    // scalars/str/bin/ext are fully consumed by next()
-}
-
-static PackOffsets compute_offsets(const xi::mp::Bytes& plane) {
-    PackOffsets off;
-    xi::mp::Reader r(plane);
-    xi::mp::Element top;
-    if (r.next(top) != xi::mp::Status::Ok || top.kind != xi::mp::Kind::Map) return off;
-    for (uint32_t i = 0; i < top.len; ++i) {
-        xi::mp::Element k;
-        if (r.next(k) != xi::mp::Status::Ok || k.kind != xi::mp::Kind::Str) return off;
-        std::string key((const char*)k.data, k.len);
-        size_t voff = r.offset();                 // value begins here
-        if      (key == "seq")   off.seq   = voff;
-        else if (key == "score") off.score = voff;
-        else if (key == "count") off.count = voff;
-        else if (key == "$src")  off.src   = voff;
-        skip_value_(r);
-    }
-    off.ok = off.seq && off.score && off.count && off.src;
-    return off;
-}
-
-// The consumer's M reads by direct offset on the (hopped) plane bytes — reusing
-// xi_pack.hpp's canonical readers (0xd3/0xcb/0xdb), the exact decode a sealed
-// Pack's typed accessor performs.
-static inline void read_pack_plane(const uint8_t* p, const PackOffsets& off) {
+// The consumer's M reads on a sealed slab Pack — the crux of C3 post-slab: a
+// binary search on the hash-sorted directory + a raw aligned load per field,
+// zero msgpack decode. (The old precomputed-offset mp decode this replaces
+// measured the retired mp-plane representation; wire-byte offset decodes are
+// bench_pack_c's territory.)
+static inline void read_bench_pack(const xi::Pack& f) {
     uint64_t s = 0;
-    s += (uint64_t)xi::pack_mp_detail::read_i64(p + off.seq);
-    s += (uint64_t)(int64_t)xi::pack_mp_detail::read_f64(p + off.score);
-    s += (uint64_t)xi::pack_mp_detail::read_i64(p + off.count);
-    s += xi::pack_mp_detail::read_str(p + off.src).size();
+    s += (uint64_t)f.get_i64("seq").value_or(0);
+    s += (uint64_t)(int64_t)f.get_f64("score").value_or(0);
+    s += (uint64_t)f.get_i64("count").value_or(0);
+    s += f.get_str("$src").value_or(std::string_view{}).size();
     g_sink += s;
 }
 
@@ -187,77 +160,49 @@ static double best_us(F&& op, int L = 2000, int R = 60) {
     return best;
 }
 
-// A small canonical msgpack map for the nested "region" — built once, added to
-// the PackBuilder via add_mp (D3: nesting is msgpack's job).
-static xi::mp::Bytes region_mp(int64_t seq) {
-    xi::mp::Writer w;
-    w.map(4);
-    w.key("area");  w.float_(142.5 + (double)seq);
-    w.key("cx");    w.float_(12.0);
-    w.key("cy");    w.float_(34.0);
-    w.key("label"); w.str("ok");
-    return w.take();
-}
-
-// (b) PACK container (xi_pack.hpp) — PackBuilder + seal + read M (O(1) sealed
-//     accessors) + drop. The task's named "PackBuilder+seal+read+drop": bump
-//     BUILD (C1), sealed O(1) READ (C3), one-shot FREE (C2). No hop.
+// (b) PACK container (xi_pack.hpp) — PackBuilder + seal + read M (sealed typed
+//     accessors) + drop. The task's named "PackBuilder+seal+read+drop": slab
+//     BUILD (C1), sealed raw READ (C3), one-shot FREE (C2). No hop.
 //     METRIC MEANING CHANGE (slab migration): the container now stores scalars
 //     RAW in one slab (build no longer msgpack-encodes scalars; seal adds a
 //     hash-sort + one slab write; reads are raw 8-byte loads via binary
 //     search). GATE frame_micro_framebuilder_ns therefore measures the slab
 //     build/read/free cost — compare against pre-migration baselines with that
-//     in mind. The mp-plane hop metric below is unchanged (pure xi_mp).
+//     in mind.
 static double micro_frame_builder() {
     return best_us([&] {
-        xi::PackBuilder b;
-        b.add_str("$src", "matcher");
-        b.add_i64("seq", 7);
-        b.add_i64("count", 7 % 17);
-        b.add_i64("ts_us", 7000);
-        b.add_f64("score", 0.7 + 7 * 0.01);
-        b.add_f64("x", 100.0 + 7 * 0.5);
-        b.add_f64("y", 50.0 + 7 * 0.25);
-        b.add_i64("pass", 1);
-        xi::mp::Bytes region = region_mp(7);
-        b.add_mp("region", region.data(), region.size());
-        xi::Pack f = b.seal();
-        uint64_t s = 0;
-        s += (uint64_t)f.get_i64("seq").value_or(0);
-        s += (uint64_t)(int64_t)f.get_f64("score").value_or(0);
-        s += (uint64_t)f.get_i64("count").value_or(0);
-        s += f.get_str("$src").value_or(std::string_view{}).size();
-        g_sink += s;
-        // f drops: arena freed in one shot, no handles.
+        xi::Pack f = build_bench_pack(7);
+        read_bench_pack(f);
+        // f drops: slab back to the per-thread recycle pool, no handles.
     });
 }
 
-// (c) PACK plane + memcpy HOP: mp::Writer plane (BUILD) + memcpy into a reused
-//     consumer arena (HOP, C4) + read M by offset (C3) + drop (C2). The memcpy
-//     hop is what a refcount-CAS handshake would otherwise cost on the small plane
-//     (the v2 Record share_out/adopt CAS this used to be measured against, retired
-//     at THE CUT).
-static double micro_pack_plane(const PackOffsets& off) {
-    static thread_local std::vector<uint8_t> arena;   // consumer arena, reused
-    return best_us([&] {
-        xi::mp::Bytes plane = build_pack_plane(7);
-        arena.resize(plane.size());
-        std::memcpy(arena.data(), plane.data(), plane.size());   // the hop
-        read_pack_plane(arena.data(), off);
-    });
+// (c) SLAB RAW READ — M typed reads on one pre-sealed pack, isolating C3 (the
+//     per-read cost: directory binary search + raw aligned load, no decode).
+//     METRIC RENAME (slab migration): this lane REPLACES the retired
+//     frame_micro_plane_memcpy_hop_ns ("mp plane + memcpy-hop + offset-read").
+//     That lane modelled the pre-slab representation — a contiguous canonical-
+//     msgpack small plane hopped by memcpy and decoded at precomputed offsets —
+//     which nothing in production does anymore: a sealed Pack hops as a MOVE
+//     (pointer swap, cost ~0) and consumers read raw slab. Old and new numbers
+//     are NOT comparable.
+static double micro_slab_read() {
+    xi::Pack f = build_bench_pack(7);
+    return best_us([&] { read_bench_pack(f); });
 }
 
 // ===========================================================================
 // PART 2 — the DISPATCH path. emit -> funnel -> lane -> tiny inspect -> ordered
-// result, real pooled image traffic, per pack the metadata plane built by the
-// producer and hopped+read by the consumer.
+// result, real pooled image traffic, per pack a sealed slab Pack built by the
+// producer, MOVED onto the event (the post-slab hop), and read by the consumer
+// via typed raw-slab accessors.
 // ===========================================================================
 struct BenchEvent {
     int64_t         timestamp_us   = 0;   // steady t_emit
     int64_t         dequeued_at_us = 0;
     int64_t         arrival_id     = 0;
     xi_image_handle image          = XI_IMAGE_NULL;   // pooled 320x240x3 frame
-    xi::mp::Bytes   pack_plane;                       // the sealed small plane
+    xi::Pack        pack;                             // the sealed slab pack (moves)
 };
 
 struct MiniLane {
@@ -298,7 +243,7 @@ static inline void tiny_inspect(const uint8_t* px, size_t nbytes, int work) {
     g_sink += acc;
 }
 
-static Result run_scenario(const Config& cfg, const PackOffsets& off) {
+static Result run_scenario(const Config& cfg) {
     auto& pool = xi::ImagePool::instance();
     const size_t nbytes = (size_t)cfg.width * cfg.height * cfg.channels;
 
@@ -318,10 +263,9 @@ static Result run_scenario(const Config& cfg, const PackOffsets& off) {
         permit_cv.notify_one();
     };
 
-    // ---- workers: dequeue -> inspect -> metadata HOP+read -> ordered emit ----
+    // ---- workers: dequeue -> inspect -> typed slab reads -> ordered emit -----
     for (int w = 0; w < cfg.parallel; ++w) {
         lane.workers.emplace_back([&] {
-            std::vector<uint8_t> arena;   // this consumer's reused hop arena
             while (keep_going.load()) {
                 BenchEvent ev; bool have = false; int64_t rid = 0; int64_t eseq = -1;
                 {
@@ -340,11 +284,9 @@ static Result run_scenario(const Config& cfg, const PackOffsets& off) {
                 ev.dequeued_at_us = xi::wall_us();
                 tiny_inspect(pool.data(ev.image), nbytes, cfg.work);
 
-                // --- the metadata plane hop: memcpy the sealed small plane into
-                //     this consumer's arena, then read M fields by direct offset.
-                arena.resize(ev.pack_plane.size());
-                std::memcpy(arena.data(), ev.pack_plane.data(), ev.pack_plane.size());
-                read_pack_plane(arena.data(), off);
+                // --- the metadata reads: the pack already hopped BY MOVE with
+                //     the event; read M fields via the typed raw-slab accessors.
+                read_bench_pack(ev.pack);
 
                 xi::EmitTurn turn(&lane.gate, eseq, &keep_going);
                 turn.wait_turn();
@@ -359,7 +301,7 @@ static Result run_scenario(const Config& cfg, const PackOffsets& off) {
         });
     }
 
-    // ---- producer: build the metadata plane + a pooled image, enqueue --------
+    // ---- producer: build the sealed pack + a pooled image, enqueue -----------
     auto enqueue = [&](BenchEvent&& ev) {
         std::unique_lock<std::mutex> lk(lane.mu);
         if ((int)lane.q.size() < lane.queue_depth) {
@@ -389,7 +331,7 @@ static Result run_scenario(const Config& cfg, const PackOffsets& off) {
         BenchEvent ev;
         ev.image        = h;
         ev.timestamp_us = xi::mono_us();
-        ev.pack_plane   = build_pack_plane(i);
+        ev.pack         = build_bench_pack(i);
         enqueue(std::move(ev));
     }
 
@@ -441,14 +383,14 @@ static void print_dist(const char* label, Result& r) {
 
 // Best-of-R median of the closed-loop, single-worker per-pack latency — the
 // stable gate signal (matches bench_hotpath's gate discipline).
-static int64_t gate_p50(const PackOffsets& off) {
+static int64_t gate_p50() {
     Config cfg;
     cfg.parallel = 1; cfg.inflight = 1; cfg.ordered = false;
     cfg.frames = 5000;
-    run_scenario(cfg, off);   // warm up
+    run_scenario(cfg);   // warm up
     int64_t best_p50 = (int64_t)1e18;
     for (int rep = 0; rep < 7; ++rep) {
-        Result r = run_scenario(cfg, off);
+        Result r = run_scenario(cfg);
         std::sort(r.lat_us.begin(), r.lat_us.end());
         int64_t p50 = pct(r.lat_us, 50);
         if (p50 < best_p50) best_p50 = p50;
@@ -460,14 +402,17 @@ static int64_t gate_p50(const PackOffsets& off) {
 // Machine-readable GATE lines (integer, slower-is-worse) for perf_gate.cmake:
 // the metadata-micro medians (least noise) + the closed-loop single-worker p50.
 // No baseline shipped -> SKIPs-with-reason off the capture box.
-static int gate_main(const PackOffsets& off) {
+static int gate_main() {
     // micro: min-of-batches (ns), the cleanest per-op metadata cost.
-    double frb_ns   = micro_frame_builder()       * 1000.0;
-    double frp_ns   = micro_pack_plane(off)      * 1000.0;
+    double frb_ns   = micro_frame_builder()      * 1000.0;
+    double frr_ns   = micro_slab_read()          * 1000.0;
     std::printf("GATE frame_micro_framebuilder_ns %lld\n",       (long long)(frb_ns + 0.5));
-    std::printf("GATE frame_micro_plane_memcpy_hop_ns %lld\n",   (long long)(frp_ns + 0.5));
+    // RENAMED from frame_micro_plane_memcpy_hop_ns (slab migration — the mp
+    // plane + memcpy-hop + offset-read lane measured the retired pre-slab
+    // representation; see the lane comment on micro_slab_read).
+    std::printf("GATE frame_micro_slab_read_ns %lld\n",          (long long)(frr_ns + 0.5));
 
-    int64_t frm_p50 = gate_p50(off);
+    int64_t frm_p50 = gate_p50();
     std::printf("GATE frame_hotpath_frame_p50_us_320x240x3_p1 %lld\n",  (long long)frm_p50);
 
     xi_perf::print_fingerprint();
@@ -475,15 +420,12 @@ static int gate_main(const PackOffsets& off) {
 }
 
 int main(int argc, char** argv) {
-    PackOffsets off = compute_offsets(build_pack_plane(7));
-    if (!off.ok) { std::fprintf(stderr, "pack offset table failed to build\n"); return 2; }
-
     Config cli;
     bool have_cli = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&](int def) { return i + 1 < argc ? std::atoi(argv[++i]) : def; };
-        if      (a == "--gate")     return gate_main(off);
+        if      (a == "--gate")     return gate_main();
         else if (a == "--parallel") { cli.parallel = next(cli.parallel); have_cli = true; }
         else if (a == "--frames")   { cli.frames   = next(cli.frames);   have_cli = true; }
         else if (a == "--inflight") { cli.inflight = next(cli.inflight); have_cli = true; }
@@ -501,7 +443,7 @@ int main(int argc, char** argv) {
     std::printf("MODELLED: MiniLane queue plumbing (== bench_hotpath); producer = direct enqueue.\n\n");
 
     if (have_cli) {
-        Result r = run_scenario(cli, off);
+        Result r = run_scenario(cli);
         char lbl[64];
         std::snprintf(lbl, sizeof(lbl), "PACK p=%d inflight=%d", cli.parallel, cli.inflight);
         print_dist(lbl, r);
@@ -510,19 +452,19 @@ int main(int argc, char** argv) {
 
     // -------- metadata-only micro (cleanest read on the 07 claims) -----------
     std::printf("--- metadata-plane MICRO (no images, no dispatch; min-of-batches, ns/op) ---\n");
-    double frb_ns = micro_frame_builder()  * 1000.0;
-    double frp_ns = micro_pack_plane(off) * 1000.0;
-    std::printf("  %-52s %9.1f ns/op\n", "PACK  PackBuilder+seal+read+drop [v3 dynamic]", frb_ns);
-    std::printf("  %-52s %9.1f ns/op\n", "PACK  mp plane + memcpy-hop + offset-read [v3 hop]", frp_ns);
-    std::printf("    ^ Dynamic cost = arena build + hybrid index + interned keys + one-shot free;\n");
-    std::printf("      Hop cost     = mp plane build + memcpy hop + offset-read + drop.\n\n");
+    double frb_ns = micro_frame_builder() * 1000.0;
+    double frr_ns = micro_slab_read()     * 1000.0;
+    std::printf("  %-52s %9.1f ns/op\n", "PACK  PackBuilder+seal+read+drop [v3 slab]", frb_ns);
+    std::printf("  %-52s %9.1f ns/op\n", "PACK  M typed raw-slab reads on a sealed pack [v3 read]", frr_ns);
+    std::printf("    ^ Slab cost = staged build + hash-sort seal + raw reads + one-shot free;\n");
+    std::printf("      Read cost = per-read directory binary search + raw aligned load (no decode).\n\n");
 
     // -------- dispatch across parallelism ------------------------------------
     std::printf("--- closed-loop dispatch (matched load, inflight=parallel) — STEADY-STATE service latency ---\n");
     for (int p : {1, 2, 4, 8}) {
         Config c; c.parallel = p; c.inflight = p; c.ordered = (p > 1);
         c.frames = 20000;
-        Result r = run_scenario(c, off);
+        Result r = run_scenario(c);
         char lbl[48];
         std::snprintf(lbl, sizeof(lbl), "PACK   inflight=parallel=%d%s", p, p > 1 ? " ordered" : "");
         print_dist(lbl, r);

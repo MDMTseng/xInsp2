@@ -1,17 +1,23 @@
 # Data types at the boundary — Pack, Image, typed I/O
 
 What crosses between a script and a plugin: a **Pack** (a sealed, keyed, typed
-container — canonical msgpack) carrying **Images** (refcounted pixel handles).
+container) carrying **Images** (refcounted pixel handles).
 The mechanics live in [`../internals/pack-plane.md`](../internals/pack-plane.md)
 (how a pack crosses zero-copy); this is the contract you author against.
 
 ## The Pack (`xi.pack@1`)
 
 The universal container since THE CUT (ABI v12): a sealed, immutable set of
-`key → typed entry` pairs. One encoding everywhere — the same bytes in memory,
-on the WS wire (XEX1-v3) and on disk (`.xex1`). Entry types: `i64`, `f64`,
-`bool`, `str`, `bin`, `image`, and `mp` (one nested canonical-msgpack subtree
-for arrays/maps — nesting is msgpack's job, not flattened keys).
+`key → typed entry` pairs. One *external* encoding everywhere — the same
+canonical msgpack bytes on the WS wire (XEX1-v3) and on disk (`.xex1`). In
+memory (pack-v3 slab) scalars are stored raw for zero-decode typed reads; the
+canonical bytes are produced at the serialization edge
+([`../internals/pack-plane.md`](../internals/pack-plane.md)). Entry types:
+`i64`, `f64`, `bool`, `str`, `bin`, `image`, and `mp` (one nested
+canonical-msgpack subtree for arrays/maps — nesting is msgpack's job, not
+flattened keys); in-core the slab also carries first-class `tensor` (shape +
+dtype) and typed user-blob entries, whose door access arrives with the
+`xi.pack@3` interface (in flight — not part of `xi.pack@1`).
 
 Each side of the boundary has its own facade over the same door:
 

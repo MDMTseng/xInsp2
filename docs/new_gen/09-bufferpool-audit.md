@@ -1,5 +1,7 @@
 # BufferPool Audit — Can ImagePool Serve as the v3 Typeless Large-Buffer Pool?
 
+> [2026-07-14] Container storage superseded by the v3 slab (packv3 branch) — the `pack_pool` facade verdict below still stands (EXTERN entries ride ImagePool unchanged); the arena/container details are historical. See docs/internals/pack-plane.md.
+
 | Field | Value |
 |---|---|
 | **Date** | 2026-07-02 |
