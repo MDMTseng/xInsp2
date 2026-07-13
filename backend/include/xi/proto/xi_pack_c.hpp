@@ -26,6 +26,11 @@
 //   * serialize = slab verbatim + each EXTERN buffer appended
 //     (type_id+shape+len+bytes); deserialize re-mints the EXTERN buffers and
 //     patches the directory handles in the fresh slab copy.
+//   * RAII refs (PackRef/BufRef) are the C++-side ownership default —
+//     copy=retain, move=steal, dtor=release; the raw handle APIs remain as
+//     the C-ABI wire shape.
+//   * Tensors carry a first-class dtype (u8/u16/i32/f32/f64) encoded in the
+//     type_id — see the Dtype block for the representation rationale.
 //
 // SPEC DEVIATION (recorded honestly): the agreed 32B DirEntry carried
 // {key_hash, key_off, type_id, storage, union{inl|ext}, shape[3]} — that is
@@ -83,8 +88,53 @@ inline constexpr uint16_t kTypeI64      = 1;
 inline constexpr uint16_t kTypeF64      = 2;
 inline constexpr uint16_t kTypeStr      = 3;
 inline constexpr uint16_t kTypeMp       = 4;   // opaque canonical msgpack bytes
-inline constexpr uint16_t kTypeTensorU8 = 5;   // EXTERN, shape = {w,h,c}
+inline constexpr uint16_t kTypeTensorU8 = 5;   // EXTERN, shape = {w,h,c}, u8
+inline constexpr uint16_t kTypeTensorU16= 6;   // EXTERN tensor, u16 elements
+inline constexpr uint16_t kTypeTensorI32= 7;   // EXTERN tensor, i32 elements
+inline constexpr uint16_t kTypeTensorF32= 8;   // EXTERN tensor, f32 elements
+inline constexpr uint16_t kTypeTensorF64= 9;   // EXTERN tensor, f64 elements
 inline constexpr uint16_t kTypeUserBase = 0x100;
+
+// ---- tensor dtype -------------------------------------------------
+// REPRESENTATION CHOICE (documented per the dtype feature spec): dtype is
+// encoded IN the type_id — one contiguous type_id per element type
+// (kTypeTensorU8..kTypeTensorF64) rather than a single kTypeTensor + a
+// separate dtype field. Rationale:
+//   * type_id already travels everywhere shape does — the DirEntry, the
+//     BufTable Slot, AND the 22-byte EXTERN wire record — so serialize/
+//     deserialize round-trip the dtype with ZERO format change (the Slot has
+//     spare room for a dtype u16, but a field that duplicates information the
+//     type_id already carries would just be a second source of truth to keep
+//     honest).
+//   * as_tensor type-checking stays exactly as honest as as_blob: one u16
+//     compare against the stored type_id.
+// Dtype <-> type_id is a fixed offset (tensor_type_for / tensor_dtype).
+enum Dtype : uint16_t {
+    kDtypeU8  = 0,
+    kDtypeU16 = 1,
+    kDtypeI32 = 2,
+    kDtypeF32 = 3,
+    kDtypeF64 = 4,
+};
+inline constexpr uint32_t kDtypeElemSize[] = {1, 2, 4, 4, 8};
+inline constexpr uint32_t dtype_elem_size(Dtype d) { return kDtypeElemSize[d]; }
+inline constexpr bool is_tensor_type(uint16_t type_id) {
+    return type_id >= kTypeTensorU8 && type_id <= kTypeTensorF64;
+}
+inline constexpr uint16_t tensor_type_for(Dtype d) {
+    return uint16_t(kTypeTensorU8 + uint16_t(d));
+}
+inline constexpr Dtype tensor_dtype(uint16_t type_id) {   // pre: is_tensor_type
+    return Dtype(type_id - kTypeTensorU8);
+}
+// C++ element type -> Dtype (drives as_tensor_of<T>). Unsupported T = no
+// specialization = compile error, so a bogus element type can't slip through.
+template <class T> struct dtype_of;                       // intentionally undefined
+template <> struct dtype_of<uint8_t>  { static constexpr Dtype value = kDtypeU8;  };
+template <> struct dtype_of<uint16_t> { static constexpr Dtype value = kDtypeU16; };
+template <> struct dtype_of<int32_t>  { static constexpr Dtype value = kDtypeI32; };
+template <> struct dtype_of<float>    { static constexpr Dtype value = kDtypeF32; };
+template <> struct dtype_of<double>   { static constexpr Dtype value = kDtypeF64; };
 
 // Storage discriminator.
 inline constexpr uint16_t kStorageInline = 0;
@@ -546,6 +596,92 @@ private:
 };
 
 // ===================================================================
+// RAII refs — the C++-side DEFAULT ownership vocabulary.
+//
+// The raw-handle APIs (BufHandleC/PackHandleC + addref/retain/release) stay:
+// they model the C-ABI seam — the wire shape a plugin sees across the DLL
+// boundary. C++ users hold PackRef/BufRef instead and never touch a manual
+// retain/release; the normal flow is
+//
+//     PackRef pk = builder.seal_ref();          // owns the seal's rc=1
+//     PackViewC pak(pk);                        // borrow for reading
+//     BufRef buf = pak["img"].buf_ref();        // co-own a buffer
+//
+// Discipline (identical for both classes):
+//   * raw-handle ctor ADOPTS — it takes over an existing ref (no extra
+//     retain), so wrapping the rc=1 a mint/seal returns is exactly right;
+//   * copy = retain/addref, move = steal, dtor/reset = release;
+//   * get() exposes the raw handle for the C-ABI seam (non-owning peek).
+// ===================================================================
+class BufRef {
+public:
+    BufRef() = default;
+    // ADOPTING: takes over one existing ref (e.g. the rc=1 from mint()).
+    // To co-own a buffer you don't own a ref on, use BufRef::retained().
+    explicit BufRef(BufHandleC h) noexcept : h_(h) {}
+    static BufRef retained(BufHandleC h) {              // addref'd copy
+        if (h != kBufNull) BufTable::instance().addref(h);
+        return BufRef(h);
+    }
+    BufRef(const BufRef& o) : h_(o.h_) {
+        if (h_ != kBufNull) BufTable::instance().addref(h_);
+    }
+    BufRef(BufRef&& o) noexcept : h_(o.h_) { o.h_ = kBufNull; }
+    BufRef& operator=(const BufRef& o) {
+        if (this != &o) { BufRef tmp(o); std::swap(h_, tmp.h_); }
+        return *this;
+    }
+    BufRef& operator=(BufRef&& o) noexcept {
+        if (this != &o) { reset(); h_ = o.h_; o.h_ = kBufNull; }
+        return *this;
+    }
+    ~BufRef() { reset(); }
+
+    BufHandleC get() const { return h_; }
+    explicit operator bool() const { return h_ != kBufNull; }
+    void reset() {
+        if (h_ != kBufNull) { BufTable::instance().release(h_); h_ = kBufNull; }
+    }
+
+private:
+    BufHandleC h_ = kBufNull;
+};
+
+class PackRef {
+public:
+    PackRef() = default;
+    // ADOPTING: takes over one existing ref (e.g. the rc=1 from seal()) —
+    // no extra retain. To co-own use PackRef::retained().
+    explicit PackRef(PackHandleC h) noexcept : h_(h) {}
+    static PackRef retained(PackHandleC h) {
+        if (h != kPackNull) PackTableC::instance().retain(h);
+        return PackRef(h);
+    }
+    PackRef(const PackRef& o) : h_(o.h_) {
+        if (h_ != kPackNull) PackTableC::instance().retain(h_);
+    }
+    PackRef(PackRef&& o) noexcept : h_(o.h_) { o.h_ = kPackNull; }
+    PackRef& operator=(const PackRef& o) {
+        if (this != &o) { PackRef tmp(o); std::swap(h_, tmp.h_); }
+        return *this;
+    }
+    PackRef& operator=(PackRef&& o) noexcept {
+        if (this != &o) { reset(); h_ = o.h_; o.h_ = kPackNull; }
+        return *this;
+    }
+    ~PackRef() { reset(); }
+
+    PackHandleC get() const { return h_; }
+    explicit operator bool() const { return h_ != kPackNull; }
+    void reset() {
+        if (h_ != kPackNull) { PackTableC::instance().release(h_); h_ = kPackNull; }
+    }
+
+private:
+    PackHandleC h_ = kPackNull;
+};
+
+// ===================================================================
 // Read side — EntryViewC / PackViewC.
 //
 // A PackViewC is a borrowed, trivially-copyable view over the slab of a pack
@@ -558,6 +694,19 @@ struct TensorViewC {
     uint64_t bytes = 0;
     uint32_t shape[3] = {0, 0, 0};
     uint16_t type_id = 0;
+    Dtype    dtype = kDtypeU8;
+    uint32_t elem_size = 0;          // bytes per element (dtype table)
+    bool ok() const { return data != nullptr; }
+};
+
+// Element-typed tensor view — what as_tensor_of<T>() hands back: the same
+// buffer, but `data` already carries the element type and `count` is in
+// ELEMENTS, so the caller never reinterpret_casts.
+template <class T>
+struct TensorOfC {
+    const T* data = nullptr;
+    uint64_t count = 0;              // elements, not bytes
+    uint32_t shape[3] = {0, 0, 0};
     bool ok() const { return data != nullptr; }
 };
 
@@ -603,9 +752,11 @@ public:
         if (!check_(kTypeMp, "as_mp")) return {};
         return std::span<const uint8_t>(slab_ + e_->u.inl.off, e_->u.inl.len);
     }
+    // Any-dtype tensor view (the dtype travels in the type_id — see the
+    // Dtype block up top). Fail-loud on a non-tensor entry.
     TensorViewC as_tensor() const {
         TensorViewC t;
-        if (!e_ || e_->type_id != kTypeTensorU8 || e_->storage != kStorageExtern) {
+        if (!e_ || !is_tensor_type(e_->type_id) || e_->storage != kStorageExtern) {
             if (e_) fail_type("as_tensor");
             return t;
         }
@@ -615,7 +766,28 @@ public:
         t.shape[0] = bt.shape(e_->u.ext, 0);
         t.shape[1] = bt.shape(e_->u.ext, 1);
         t.shape[2] = bt.shape(e_->u.ext, 2);
-        t.type_id = kTypeTensorU8;
+        t.type_id = e_->type_id;
+        t.dtype   = tensor_dtype(e_->type_id);
+        t.elem_size = dtype_elem_size(t.dtype);
+        return t;
+    }
+    // Element-typed read: fail-loud unless the STORED dtype matches T —
+    // the same producer/consumer contract discipline as as_blob(expect).
+    template <class T>
+    TensorOfC<T> as_tensor_of() const {
+        constexpr Dtype want = dtype_of<T>::value;
+        TensorOfC<T> t;
+        if (!e_ || e_->storage != kStorageExtern ||
+            e_->type_id != tensor_type_for(want)) {
+            if (e_) fail_type("as_tensor_of");
+            return t;
+        }
+        auto& bt = BufTable::instance();
+        t.data  = reinterpret_cast<const T*>(bt.data(e_->u.ext));
+        t.count = bt.bytes(e_->u.ext) / sizeof(T);
+        t.shape[0] = bt.shape(e_->u.ext, 0);
+        t.shape[1] = bt.shape(e_->u.ext, 1);
+        t.shape[2] = bt.shape(e_->u.ext, 2);
         return t;
     }
     std::span<const uint8_t> as_blob(uint16_t expect_type_id) const {
@@ -628,10 +800,14 @@ public:
         if (!p) return {};
         return std::span<const uint8_t>(p, bt.bytes(e_->u.ext));
     }
-    // The raw EXTERN handle (for cross-pack adopt).
+    // The raw EXTERN handle (the C-ABI seam; NOT owning — pair with a manual
+    // addref if you keep it past the pack's life).
     BufHandleC buf_handle() const {
         return (e_ && e_->storage == kStorageExtern) ? e_->u.ext : kBufNull;
     }
+    // Owning RAII co-ref on the EXTERN buffer (addref'd): the C++-side way
+    // to keep the bytes alive past every pack that carries them.
+    BufRef buf_ref() const { return BufRef::retained(buf_handle()); }
 
 private:
     bool check_(uint16_t want, const char* what) const {
@@ -650,6 +826,9 @@ class PackViewC {
 public:
     PackViewC() = default;
     explicit PackViewC(PackHandleC h) : slab_(PackTableC::instance().slab(h)) {}
+    // Borrow from a PackRef (the RAII default). The view does NOT take a ref:
+    // the caller's PackRef must outlive the view, same contract as the raw form.
+    explicit PackViewC(const PackRef& r) : PackViewC(r.get()) {}
     explicit PackViewC(const uint8_t* slab) : slab_(slab) {}
 
     bool valid() const { return slab_ != nullptr; }
@@ -783,15 +962,22 @@ public:
         if (n) std::memcpy(s_->payload.data() + e.inl_off, mp, n);
         s_->entries.push_back(e);
     }
-    // Tensor: pixels copied into a pooled 64B-aligned buffer, shape {w,h,c}.
+    // Tensor: elements copied into a pooled 64B-aligned buffer, shape {w,h,c},
+    // bytes = w*h*c*elem_size(dtype). The dtype rides in the type_id.
+    bool add_tensor(std::string_view key, uint32_t w, uint32_t h, uint32_t c,
+                    Dtype dtype, const void* px) {
+        const uint32_t shape[3] = {w, h, c};
+        uint64_t bytes = uint64_t(w) * h * c * dtype_elem_size(dtype);
+        BufHandleC bh = BufTable::instance().mint(tensor_type_for(dtype), shape,
+                                                  bytes, px);
+        if (bh == kBufNull) return false;
+        push_extern_(key, tensor_type_for(dtype), bh);
+        return true;
+    }
+    // u8 convenience (the original signature — image-shaped callers).
     bool add_tensor(std::string_view key, uint32_t w, uint32_t h, uint32_t c,
                     const void* px) {
-        const uint32_t shape[3] = {w, h, c};
-        uint64_t bytes = uint64_t(w) * h * c;
-        BufHandleC bh = BufTable::instance().mint(kTypeTensorU8, shape, bytes, px);
-        if (bh == kBufNull) return false;
-        push_extern_(key, kTypeTensorU8, bh);
-        return true;
+        return add_tensor(key, w, h, c, kDtypeU8, px);
     }
     // Typed blob: caller-declared type_id (>= kTypeUserBase), bytes copied.
     bool add_blob(std::string_view key, uint16_t type_id, const void* data,
@@ -812,6 +998,18 @@ public:
         push_extern_(key, tid, bh);
         return true;
     }
+    // RAII adopt: the pack takes its OWN ref; the caller's BufRef is untouched
+    // (still owning, still valid).
+    bool adopt(std::string_view key, const BufRef& br) {
+        return adopt(key, br.get());
+    }
+
+    // RAII seal — the C++-side default: the returned PackRef adopts the
+    // seal's rc=1, so the normal flow never touches a raw handle. seal()
+    // (below) stays as the raw form because the raw handle IS the C-ABI
+    // wire shape (and the bench drives it directly); this keeps ONE seal
+    // implementation instead of a seal/seal_raw split.
+    PackRef seal_ref(int64_t ts_us = 0) { return PackRef(seal(ts_us)); }
 
     // Sort the directory, write the slab, hand it to the pack table (rc = 1).
     // The builder is spent afterwards (scratch returned).

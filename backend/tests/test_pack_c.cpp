@@ -24,6 +24,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 static int g_fail = 0;
@@ -286,6 +287,120 @@ static void test_destroy_order_stress() {
     }
 }
 
+static void test_raii_refs() {
+    std::printf("RAII refs (PackRef/BufRef)...\n");
+    auto& bt = pc::BufTable::instance();
+    auto& pt = pc::PackTableC::instance();
+    const int32_t buf_before = bt.live(), pack_before = pt.live();
+
+    auto px = make_pixels(8);
+    {
+        pc::PackBuilderC b;
+        b.add_i64("$seq", 9);
+        b.add_tensor("img", kW, kH, kC, px.data());
+        pc::PackRef pk = b.seal_ref();               // adopts the seal's rc=1
+        CHECK(bool(pk), "seal_ref yields a live ref");
+        CHECK(pt.refcount(pk.get()) == 1, "seal_ref rc starts at 1 (adopting)");
+
+        // copy = retain (liveness: rc visibly bumps, and the copy keeps the
+        // pack alive after the original is reset).
+        pc::PackRef copy = pk;
+        CHECK(pt.refcount(pk.get()) == 2, "PackRef copy retained (rc 2)");
+        pc::PackHandleC raw = pk.get();
+        pk.reset();
+        CHECK(pt.slab(raw) != nullptr, "copy keeps the pack alive after reset");
+        CHECK(pt.refcount(raw) == 1, "reset dropped exactly one ref");
+
+        // move = steal (no rc change).
+        pc::PackRef moved = std::move(copy);
+        CHECK(pt.refcount(raw) == 1, "move steals, rc unchanged");
+        CHECK(!copy, "moved-from ref is empty");
+
+        // View from a PackRef + owning BufRef out of an entry.
+        pc::PackViewC pak(moved);
+        CHECK(pak["$seq"].as_i64() == 9, "PackViewC(const PackRef&) reads");
+        pc::BufHandleC braw = pak["img"].buf_handle();
+        CHECK(bt.refcount(braw) == 1, "buffer rc 1 (pack sole owner)");
+        pc::BufRef bref = pak["img"].buf_ref();      // addref'd co-ref
+        CHECK(bt.refcount(braw) == 2, "buf_ref took its own ref (rc 2)");
+        {
+            pc::BufRef bcopy = bref;                 // copy = addref
+            CHECK(bt.refcount(braw) == 3, "BufRef copy addref'd (rc 3)");
+        }                                            // scope-exit release
+        CHECK(bt.refcount(braw) == 2, "BufRef copy released at scope exit");
+
+        // adopt(key, const BufRef&): the pack takes its OWN ref, the
+        // caller's BufRef stays untouched and owning.
+        pc::PackBuilderC b2;
+        CHECK(b2.adopt("borrowed", bref), "adopt(BufRef)");
+        CHECK(bt.refcount(braw) == 3, "adopt took its own ref");
+        CHECK(bref.get() == braw, "caller's BufRef untouched");
+        pc::PackRef p2 = b2.seal_ref();
+
+        // BufRef outlives every pack: drop both packs, buffer must survive.
+        moved.reset();
+        p2.reset();
+        CHECK(bt.data(braw) != nullptr, "BufRef alone keeps the buffer alive");
+        CHECK(bt.refcount(braw) == 1, "packs gone, BufRef holds the last ref");
+        CHECK(std::memcmp(bt.data(braw), px.data(), px.size()) == 0,
+              "bytes intact under BufRef-only ownership");
+    } // <- bref/pk/copy/moved/p2 all destroyed here
+    // Scope-exit release proof: the table leak oracles are back to baseline.
+    CHECK(bt.live() == buf_before, "scope exit released every buffer (oracle)");
+    CHECK(pt.live() == pack_before, "scope exit released every pack (oracle)");
+}
+
+static void test_tensor_dtype() {
+    std::printf("tensor dtype (f32 build/read/fail-loud/round-trip)...\n");
+    const uint32_t W = 320, H = 40, C = 2;
+    std::vector<float> zf(size_t(W) * H * C);
+    for (size_t i = 0; i < zf.size(); ++i) zf[i] = float(i) * 0.5f - 100.0f;
+
+    pc::PackBuilderC b;
+    b.add_i64("$seq", 31);
+    CHECK(b.add_tensor("z", W, H, C, pc::kDtypeF32, zf.data()), "add f32 tensor");
+    pc::PackRef pk = b.seal_ref();
+    pc::PackViewC pak(pk);
+
+    // Untyped view carries the dtype + elem size; bytes = w*h*c*4.
+    pc::TensorViewC tv = pak["z"].as_tensor();
+    CHECK(tv.ok(), "as_tensor resolves the f32 tensor");
+    CHECK(tv.type_id == pc::kTypeTensorF32, "type_id is kTypeTensorF32");
+    CHECK(tv.dtype == pc::kDtypeF32 && tv.elem_size == 4, "dtype/elem_size");
+    CHECK(tv.bytes == zf.size() * sizeof(float), "bytes = w*h*c*elem_size");
+
+    // Element-typed read: right dtype resolves, count in elements.
+    pc::TensorOfC<float> tf = pak["z"].as_tensor_of<float>();
+    CHECK(tf.ok(), "as_tensor_of<float> resolves");
+    CHECK(tf.count == zf.size(), "element count");
+    CHECK(tf.shape[0] == W && tf.shape[1] == H && tf.shape[2] == C, "shape");
+    CHECK(std::memcmp(tf.data, zf.data(), zf.size() * sizeof(float)) == 0,
+          "f32 bytes equal");
+
+    // Wrong dtype is fail-loud (counter oracle), same as as_blob's discipline.
+    uint64_t before = pc::type_mismatch_count().load();
+    {
+        pc::SoftFailScope soft;
+        CHECK(!pak["z"].as_tensor_of<double>().ok(), "f32 read as f64 refused");
+        CHECK(!pak["z"].as_tensor_of<uint8_t>().ok(), "f32 read as u8 refused");
+        CHECK(!pak["$seq"].as_tensor_of<float>().ok(), "i64 read as tensor refused");
+    }
+    CHECK(pc::type_mismatch_count().load() - before == 3,
+          "each dtype mismatch counted once");
+
+    // Round-trip: dtype travels in the type_id, byte-identical payload.
+    std::vector<uint8_t> wire = pc::serialize(pk.get());
+    pc::PackRef pk2(pc::deserialize(wire.data(), wire.size()));
+    CHECK(bool(pk2), "dtype pack deserializes");
+    pc::TensorOfC<float> tf2 = pc::PackViewC(pk2)["z"].as_tensor_of<float>();
+    CHECK(tf2.ok(), "round-tripped tensor still reads as f32");
+    CHECK(pc::PackViewC(pk2)["z"].as_tensor().dtype == pc::kDtypeF32,
+          "round-tripped dtype");
+    CHECK(tf2.count == tf.count &&
+          std::memcmp(tf2.data, tf.data, tf.count * sizeof(float)) == 0,
+          "round-trip f32 bytes IDENTICAL");
+}
+
 static void test_serialize_roundtrip() {
     std::printf("serialize -> deserialize round-trip...\n");
     auto px0 = make_pixels(6), px1 = make_pixels(7);
@@ -338,6 +453,8 @@ int main() {
     test_type_mismatch_fail_loud();
     test_retain_release_and_adopt();
     test_destroy_order_stress();
+    test_raii_refs();
+    test_tensor_dtype();
     test_serialize_roundtrip();
 
     // Leak oracle: every buffer and pack minted above was released.
