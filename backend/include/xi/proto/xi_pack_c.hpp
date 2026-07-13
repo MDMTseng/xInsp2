@@ -359,6 +359,17 @@ public:
     // touching the bytes, or a concurrent release can retire the slot.
     const uint8_t* data(BufHandleC h)   { Slot* s = resolve_(h); return s ? s->mem : nullptr; }
     uint8_t* writable_data(BufHandleC h){ Slot* s = resolve_(h); return s ? s->mem : nullptr; }
+    // rc==1-GATED writable pointer — the engine support behind
+    // BufRef::writable_data(). One resolve + one acquire rc load: a caller
+    // holding its own ref (the table-wide contract) means a concurrent release
+    // can only take the count N -> N-1, never resurrect the slot, so an
+    // observed 1 genuinely means "this caller is the sole owner" (the same
+    // argument ImagePool::writable_data documents).
+    uint8_t* writable_if_unique(BufHandleC h) {
+        Slot* s = resolve_(h);
+        if (!s || s->rc.load(std::memory_order_acquire) != 1) return nullptr;
+        return s->mem;
+    }
     uint64_t bytes(BufHandleC h)        { Slot* s = resolve_(h); return s ? s->bytes : 0; }
     uint16_t type_id(BufHandleC h)      { Slot* s = resolve_(h); return s ? s->type_id : 0; }
     uint32_t shape(BufHandleC h, int i) {
@@ -612,6 +623,10 @@ private:
 //     retain), so wrapping the rc=1 a mint/seal returns is exactly right;
 //   * copy = retain/addref, move = steal, dtor/reset = release;
 //   * get() exposes the raw handle for the C-ABI seam (non-owning peek).
+//
+// BufRef additionally carries the user-facing FACTORIES (mint_tensor /
+// mint_blob) and data accessors, so user code never names
+// BufTable::instance() — the table is the engine layer behind this facade.
 // ===================================================================
 class BufRef {
 public:
@@ -641,6 +656,64 @@ public:
     explicit operator bool() const { return h_ != kBufNull; }
     void reset() {
         if (h_ != kBufNull) { BufTable::instance().release(h_); h_ = kBufNull; }
+    }
+
+    // ---- facade factories --------------------------------------------
+    // User-facing mints: RAII from the first instruction, no
+    // BufTable::instance() in user code (the table stays the ENGINE layer —
+    // handle validation / refcount / size-class / type records; these are a
+    // facade over it, not a replacement).
+    //
+    // Tensor: shape {w,h,c}, bytes = w*h*c*elem_size(dt), dtype rides the
+    // type_id. src == nullptr mints UNINITIALIZED — the camera/DMA pattern:
+    // fill through writable_data() while still sole owner, then adopt/share.
+    static BufRef mint_tensor(uint32_t w, uint32_t h, uint32_t c,
+                              Dtype dt = kDtypeU8, const void* src = nullptr) {
+        const uint32_t shape[3] = {w, h, c};
+        const uint64_t bytes = uint64_t(w) * h * c * dtype_elem_size(dt);
+        return BufRef(BufTable::instance().mint(tensor_type_for(dt), shape,
+                                                bytes, src));
+    }
+    // Typed blob: caller-declared type_id (>= kTypeUserBase), shape {n,1,1}
+    // (mirroring PackBuilderC::add_blob). Empty ref on exhaustion / n == 0.
+    static BufRef mint_blob(uint16_t type_id, const void* src, uint64_t bytes) {
+        const uint32_t shape[3] = {uint32_t(bytes), 1, 1};
+        return BufRef(BufTable::instance().mint(type_id, shape, bytes, src));
+    }
+    static BufRef mint_blob(uint16_t type_id, uint64_t bytes) {  // uninitialized
+        return mint_blob(type_id, nullptr, bytes);
+    }
+
+    // ---- accessors (null-safe on an empty/stale ref) -------------------
+    const uint8_t* data() const   { return BufTable::instance().data(h_); }
+    uint64_t bytes() const        { return BufTable::instance().bytes(h_); }
+    uint16_t type_id() const      { return BufTable::instance().type_id(h_); }
+
+    // Writable window, rc==1-GATED: the pointer comes back ONLY while this
+    // ref is the buffer's sole owner. Once shared (a pack adopted it, or a
+    // BufRef copy exists), the window is CLOSED — null + a warn-once, NO
+    // silent copy-on-write; mint your own buffer to mutate a shared input.
+    // This turns the "write before adopt/share" convention into structure —
+    // the same move production ImagePool made for writable_data (external
+    // review 02 I.4: strict null for a shared handle, never an aliased write).
+    //
+    // SEMANTICS: a PURE rc check, not a latch. The gate is a property of the
+    // CURRENT ownership count: if every co-owner dies and this ref is again
+    // sole owner (rc back to 1), the window naturally REOPENS. That is the
+    // honest mechanism — "who else can observe the bytes right now" — rather
+    // than a sticky "was ever shared" bit.
+    uint8_t* writable_data() const {
+        if (h_ == kBufNull) return nullptr;
+        uint8_t* p = BufTable::instance().writable_if_unique(h_);
+        if (!p) {
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true, std::memory_order_relaxed))
+                std::fprintf(stderr,
+                    "[pack_c] BufRef::writable_data(): buffer is shared (rc>1) "
+                    "-- write window closed; mint a fresh buffer to mutate "
+                    "(warn-once)\n");
+        }
+        return p;
     }
 
 private:

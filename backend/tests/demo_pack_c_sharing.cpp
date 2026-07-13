@@ -4,9 +4,11 @@
 // retain/release in this file, and the scope braces ARE the destruction
 // points.
 //
-//   1. camera pattern : mint into a BufRef -> write pixels IN PLACE -> adopt
-//                       (0 copies); the BufRef's scope-exit hands sole
-//                       ownership to the pack
+//   1. camera pattern : BufRef::mint_tensor -> write pixels IN PLACE through
+//                       writable_data() (rc==1 write window) -> adopt
+//                       (0 copies); once shared the window CLOSES (null);
+//                       the BufRef's scope-exit hands sole ownership to the
+//                       pack
 //   2. stereo pattern : pack B adopts pack A's image (1 buffer, 2 packs)
 //   3. producer dies  : PackRef A leaves scope; pack B still reads the bytes
 //   4. derived result : result pack references the original profile blob +
@@ -28,8 +30,6 @@ static const char* aligned64(const void* p) {
 }
 
 int main() {
-    auto& bt = BufTable::instance();
-
     BufRef kept;                       // scenario 5: outlives every pack below
     const uint8_t* cam_dst = nullptr;  // where the "camera" wrote (ptr compare)
 
@@ -42,15 +42,18 @@ int main() {
             PackBuilderC ba;
             ba.add_i64("serial", 1001);
             { // the camera's own ref lives exactly this long
-                const uint32_t shape[3] = {W, H, 1};
-                BufRef cam(bt.mint(kTypeTensorU8, shape, uint64_t(W) * H,
-                                   nullptr));            // adopts the mint's rc=1
-                uint8_t* dst = bt.writable_data(cam.get()); // camera/DMA writes HERE
+                BufRef cam = BufRef::mint_tensor(W, H, 1);  // u8, UNINITIALIZED
+                uint8_t* dst = cam.writable_data(); // rc==1: the write window is
+                                                    // OPEN — camera/DMA lands HERE
                 for (uint32_t i = 0; i < W * H; ++i) dst[i] = uint8_t(i & 0xFF);
                 cam_dst = dst;
                 std::printf("1. minted frame buffer: %u B, 64B-aligned=%s (wrote in place, 0 copies)\n",
                             W * H, aligned64(dst));
                 ba.adopt("img", cam);   // pack takes its OWN ref; cam untouched
+                // rc is now 2 (cam + pack): the rc==1 gate CLOSES the window —
+                // no aliased writes to bytes a pack already carries.
+                std::printf("   write window closed once shared: %s\n",
+                            cam.writable_data() == nullptr ? "YES" : "no");
             }                           // <- cam dies: the pack is now sole owner
             // profile blob for scenario 4
             float zbuf[512];
@@ -98,14 +101,16 @@ int main() {
                     p4, p4 == 1.0f ? "YES" : "no");
     } // <- ---- 5. BOTH packs die HERE (PackRefs B and R destroyed) ---------
 
-    const uint8_t* still = bt.data(kept.get());
+    const uint8_t* still = kept.data();
     std::printf("5. ALL packs out of scope. kept BufRef: data=%p [77]=%u (alive: %s)\n",
                 (const void*)still, still ? still[77] : 0,
                 (still && still[77] == 77) ? "YES" : "no");
     BufHandleC raw = kept.get();       // peek the wire handle before letting go
     kept.reset();                      // RAII release: last ref -> back to pool
+    // Stale-handle probe through the facade: retained() on a dead handle
+    // yields a ref whose reads are null (the generation discipline).
     std::printf("   kept.reset() -> buffer returned to its size-class (stale read now null: %s)\n",
-                bt.data(raw) == nullptr ? "YES" : "no");
+                BufRef::retained(raw).data() == nullptr ? "YES" : "no");
 
     std::puts("\nOK");
     return 0;

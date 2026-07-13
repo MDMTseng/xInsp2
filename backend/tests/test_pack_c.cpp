@@ -14,6 +14,9 @@
 //   * serialize -> deserialize round-trip, byte-equality on every entry;
 //   * destroy-order stress: producer pack dropped FIRST, adopting pack still
 //     reads the shared buffer (rc keeps it alive);
+//   * BufRef facade: mint_tensor/mint_blob round-trip + the writable_data
+//     rc==1 write window (open sole-owner, closed shared, reopens when rc
+//     returns to 1 — a pure rc check, not a latch);
 //   * table-level leak oracles (BufTable/PackTableC live counts) at the end.
 
 #include "xi/proto/xi_pack_c.hpp"
@@ -350,6 +353,85 @@ static void test_raii_refs() {
     CHECK(pt.live() == pack_before, "scope exit released every pack (oracle)");
 }
 
+static void test_bufref_facade() {
+    std::printf("BufRef facade (mint_tensor/mint_blob/writable_data gate)...\n");
+    // BufTable stays fair game HERE: this test uses it as the ENGINE oracle
+    // (rc/shape/live counts) — exactly the layer the facade hides from users.
+    auto& bt = pc::BufTable::instance();
+    const int32_t buf_before = bt.live();
+    {
+        // ---- mint_tensor(src) round-trip through the accessors ----------
+        auto px = make_pixels(11);
+        pc::BufRef t = pc::BufRef::mint_tensor(kW, kH, kC, pc::kDtypeU8, px.data());
+        CHECK(bool(t), "mint_tensor(src) yields a live ref");
+        CHECK(t.bytes() == px.size(), "bytes = w*h*c*elem_size");
+        CHECK(t.type_id() == pc::kTypeTensorU8, "u8 type_id");
+        CHECK(t.data() && std::memcmp(t.data(), px.data(), px.size()) == 0,
+              "src bytes copied in");
+        CHECK(bt.shape(t.get(), 0) == kW && bt.shape(t.get(), 1) == kH &&
+              bt.shape(t.get(), 2) == kC, "shape recorded (engine oracle)");
+        CHECK(bt.refcount(t.get()) == 1, "mint rc = 1 (adopted, not retained)");
+
+        // dtype sizing: f32 tensor, default-src (uninitialized)
+        pc::BufRef f = pc::BufRef::mint_tensor(16, 4, 2, pc::kDtypeF32);
+        CHECK(bool(f) && f.bytes() == 16ull * 4 * 2 * 4, "f32 elem size in bytes");
+        CHECK(f.type_id() == pc::kTypeTensorF32, "dtype rides the type_id");
+
+        // ---- mint_blob: src + uninitialized variant ---------------------
+        auto blob = make_blob();
+        pc::BufRef bl = pc::BufRef::mint_blob(kBlobTypeCal, blob.data(), blob.size());
+        CHECK(bl.bytes() == blob.size() && bl.type_id() == kBlobTypeCal,
+              "mint_blob record");
+        CHECK(bl.data() && std::memcmp(bl.data(), blob.data(), blob.size()) == 0,
+              "mint_blob bytes equal");
+        pc::BufRef bu = pc::BufRef::mint_blob(kBlobTypeCal, 4096);
+        CHECK(bool(bu) && bu.bytes() == 4096, "uninitialized mint_blob");
+        CHECK(bu.writable_data() != nullptr, "uninitialized blob writable at rc 1");
+
+        // ---- writable_data: PURE rc==1 gate ------------------------------
+        uint8_t* w = t.writable_data();
+        CHECK(w != nullptr, "sole owner: write window open");
+        w[0] = 0xAB;
+        CHECK(t.data()[0] == 0xAB, "write through the window landed");
+
+        {   // a pack adopts -> rc 2 -> window CLOSED (null, no aliased write)
+            pc::PackBuilderC b;
+            CHECK(b.adopt("img", t), "adopt(BufRef)");
+            pc::PackRef pk = b.seal_ref();
+            CHECK(bt.refcount(t.get()) == 2, "adopt -> rc 2");
+            CHECK(t.writable_data() == nullptr, "shared: write window closed");
+        }   // <- pack dies, rc back to 1
+        // REOPEN SEMANTICS: the gate is a pure rc check, not a latch — sole
+        // ownership regained means the window naturally reopens (documented
+        // on BufRef::writable_data; this pins the mechanism's behaviour).
+        CHECK(bt.refcount(t.get()) == 1, "pack death -> rc back to 1");
+        CHECK(t.writable_data() != nullptr, "rc back to 1: window reopens");
+
+        {   // a plain BufRef copy is sharing too — closed on BOTH refs
+            pc::BufRef alias = t;
+            CHECK(t.writable_data() == nullptr, "copy alias closes the window");
+            CHECK(alias.writable_data() == nullptr, "closed on the alias as well");
+        }
+        CHECK(t.writable_data() != nullptr, "alias death reopens the window");
+
+        // empty ref: every accessor null-safe
+        pc::BufRef none;
+        CHECK(none.data() == nullptr && none.bytes() == 0 && none.type_id() == 0,
+              "empty ref accessors null-safe");
+        CHECK(none.writable_data() == nullptr, "empty ref writable_data null");
+
+        // minted tensor adopted into a pack reads back typed, zero-copy
+        pc::PackBuilderC b2;
+        CHECK(b2.adopt("img", t), "re-adopt into a fresh pack");
+        pc::PackRef pk2 = b2.seal_ref();
+        pc::TensorViewC tv = pc::PackViewC(pk2)["img"].as_tensor();
+        CHECK(tv.ok() && tv.data == t.data(), "pack view sees the minted bytes zero-copy");
+        CHECK(tv.shape[0] == kW && tv.shape[1] == kH && tv.shape[2] == kC,
+              "shape via the pack view");
+    } // <- every ref/pack above released here
+    CHECK(bt.live() == buf_before, "facade test leaked no buffers (oracle)");
+}
+
 static void test_tensor_dtype() {
     std::printf("tensor dtype (f32 build/read/fail-loud/round-trip)...\n");
     const uint32_t W = 320, H = 40, C = 2;
@@ -454,6 +536,7 @@ int main() {
     test_retain_release_and_adopt();
     test_destroy_order_stress();
     test_raii_refs();
+    test_bufref_facade();
     test_tensor_dtype();
     test_serialize_roundtrip();
 
