@@ -368,7 +368,9 @@ struct PackImageView {
 };
 
 // A borrowed const view of a tensor entry: logical shape {w,h,c} + dtype +
-// a zero-copy span over the pool buffer's element bytes.
+// a zero-copy span over the pool buffer's element bytes. `handle` is the
+// backing pool buffer, BORROWED (not addref'd) — pair with pack_pool::addref
+// (or PackBuilder::adopt_tensor, which addrefs) to keep it past the pack.
 struct PackTensorView {
     int32_t  width    = 0;
     int32_t  height   = 0;
@@ -376,6 +378,15 @@ struct PackTensorView {
     PackDtype dtype   = PackDtype::U8;
     uint32_t elem_size = 1;              // bytes per element
     std::span<const uint8_t> bytes;      // w*h*c*elem_size raw element bytes
+    xi_image_handle handle = XI_IMAGE_NULL;  // backing pool buffer (borrowed)
+};
+
+// A borrowed const view of a user-typed blob (a Bin entry read together with
+// its DirEntry::type_id): 0 = a plain bin, >= kPackTypeUserBase = the
+// producer's declared payload type (add_blob / adopt_bin).
+struct PackBlobView {
+    uint16_t type_id = 0;
+    std::span<const uint8_t> bytes;
 };
 
 // Element-typed tensor view — get_tensor_of<T>: same buffer, but `data`
@@ -710,7 +721,32 @@ public:
         t.dtype = PackDtype(e->type_id);
         t.elem_size = pack_dtype_elem_size(t.dtype);
         t.bytes = v.first(r.len);
+        t.handle = r.handle;               // borrowed — see PackTensorView
         return t;
+    }
+    // User-typed blob: a Bin entry read TOGETHER with its type_id (0 = plain
+    // bin, >= kPackTypeUserBase = the producer's declared type). Same storage
+    // duality + F1 guard as get_bin — one span either way.
+    std::optional<PackBlobView> get_blob(std::string_view key) const {
+        const auto* e = find(key);
+        if (!e || PackTag(e->tag) != PackTag::Bin) return std::nullopt;
+        PackBlobView bv;
+        bv.type_id = e->type_id;
+        if (e->storage == pack_detail::kStorageExtern) {
+            const pack_detail::ExtRecord& r = ext_of(*e);
+            auto v = pack_pool::view(r.handle);
+            if (!r.handle || v.size() < r.len) return std::nullopt;   // F1 guard
+            bv.bytes = v.first(r.len);
+        } else {
+            bv.bytes = std::span<const uint8_t>(slab() + e->off, e->len);
+        }
+        return bv;
+    }
+    // DirEntry::type_id by key (the by-key sibling of type_id_at): nullopt if
+    // the key is absent.
+    std::optional<uint16_t> type_id_of(std::string_view key) const {
+        const auto* e = find(key);
+        return e ? std::optional<uint16_t>(e->type_id) : std::nullopt;
     }
     // Element-typed tensor read: nullopt unless the STORED dtype matches T —
     // the producer/consumer contract stays as honest as every typed getter.
@@ -950,6 +986,46 @@ public:
         if (!hnd) return false;
         push_extern_(key, PackTag::Tensor, uint16_t(dtype), hnd,
                      w, h, c, uint32_t(bytes));
+        return true;
+    }
+    // Adopt an ALREADY-pooled handle (zero-copy) as a TENSOR entry — addref so
+    // the pack becomes a co-owner. This is the zero-copy chain the v3 door's
+    // get_tensor enables (its view carries the backing handle): consume a
+    // tensor from one pack, adopt it into the next, no element copy. Fails
+    // closed (false, nothing added, no addref) on a bad shape, a null/dead
+    // handle, or a pool buffer smaller than the logical w*h*c*elem_size bytes
+    // the shape claims — an adopted tensor can never surface a short span.
+    bool adopt_tensor(std::string_view key, int32_t w, int32_t h, int32_t c,
+                      PackDtype dtype, xi_image_handle handle) {
+        assert(!sealed_ && "add after seal");
+        if (w <= 0 || h <= 0 || c <= 0 || !handle) return false;
+        const uint64_t bytes =
+            uint64_t(w) * uint64_t(h) * uint64_t(c) * pack_dtype_elem_size(dtype);
+        if (bytes > uint64_t(INT32_MAX)) return false;
+        auto v = pack_pool::view(handle);          // {} for a dead handle
+        if (v.size() < size_t(bytes)) return false;
+        pack_pool::addref(handle);
+        push_extern_(key, PackTag::Tensor, uint16_t(dtype), handle,
+                     w, h, c, uint32_t(bytes));
+        return true;
+    }
+    // Adopt an ALREADY-pooled handle (zero-copy) as a Bin entry — the honest
+    // sibling of adopt_image for byte payloads (historically a producer had to
+    // masquerade a byte buffer as an Image entry with fake dims to get
+    // zero-copy adoption). type_id is 0 (plain bin) or the caller's user blob
+    // type (>= kPackTypeUserBase) — the zero-copy sibling of add_blob. The
+    // entry's logical length is the pool buffer's full byte size. Fails closed
+    // on a null/dead handle or a reserved (non-zero, sub-user-base) type_id.
+    bool adopt_bin(std::string_view key, uint16_t type_id,
+                   xi_image_handle handle) {
+        assert(!sealed_ && "add after seal");
+        if (!handle) return false;
+        if (type_id != 0 && type_id < kPackTypeUserBase) return false;
+        auto v = pack_pool::view(handle);          // {} for a dead handle
+        if (v.empty() || v.size() > size_t(INT32_MAX)) return false;
+        pack_pool::addref(handle);
+        push_extern_(key, PackTag::Bin, type_id, handle,
+                     int32_t(v.size()), 1, 1, uint32_t(v.size()));
         return true;
     }
     // Typed blob hook (future custom payloads): a Bin-tagged pooled entry

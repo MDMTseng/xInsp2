@@ -143,7 +143,7 @@ inline std::string prov_append(std::string parent, std::string_view hop) {
 //
 // Returns a fresh sealed handle (refcount 1, CALLER owns) or XI_PACK_NULL on
 // a host without the pack plane. Cheap by design: four small str entries +
-// one i64 in a fresh arena — no image/bin payload is carried (a poisoned
+// one i64 in a fresh slab — no image/bin payload is carried (a poisoned
 // frame's payload is exactly what downstream must NOT consume).
 inline xi_pack_handle propagate_fault(const xi_pack_v1* fi, xi_pack_handle in,
                                       const char* hop) {

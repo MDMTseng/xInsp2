@@ -259,6 +259,60 @@ static void test_canonical_enforcement() {
 }
 
 // ---------------------------------------------------------------------------
+// (4b) xi.pack@3 on the script SDK (pack-v3): add_tensor/add_blob through
+//      ScriptPackBuilder, read back through ScriptPack::get_tensor/get_blob/
+//      type_id_* — the same fail-closed discipline as every typed accessor.
+// ---------------------------------------------------------------------------
+static void test_script_pack_v3() {
+    SECTION("script SDK v3: tensor + user-typed blob round-trip");
+    size_t base_frames = xi::PackRegistry::instance().live_frames();
+    int    base_pool   = pool_live();
+    {
+        xi::ScriptPackBuilder b;
+        CHECK(b.valid());
+        uint16_t u16[4] = { 100, 200, 300, 400 };            // 2x2x1 U16
+        const uint8_t payload[3] = { 7, 8, 9 };
+        CHECK(b.add_i64("seq", 1));
+        CHECK(b.add_tensor("depth", 2, 2, 1, XI_PACK_DTYPE_U16, u16));
+        CHECK(!b.add_tensor("bad", 2, 2, 1, 99, u16));       // bad dtype refused
+        CHECK(!b.add_tensor("bad", 0, 2, 1, XI_PACK_DTYPE_U16, u16));
+        CHECK(b.add_blob("roi", XI_PACK_TYPE_USER_BASE + 1, payload, 3));
+        CHECK(!b.add_blob("bad", 5, payload, 3));            // reserved type_id refused
+
+        xi::ScriptPack sp = b.seal();
+        CHECK(sp.valid());
+        CHECK(sp.count() == 3);                              // refused adds landed nothing
+
+        auto t = sp.get_tensor("depth");
+        CHECK(t.has_value());
+        if (t) {
+            CHECK(t->width == 2 && t->height == 2 && t->channels == 1);
+            CHECK(t->dtype == XI_PACK_DTYPE_U16 && t->elem_size == 2);
+            CHECK(t->bytes.size() == 8 &&
+                  std::memcmp(t->bytes.data(), u16, 8) == 0);
+        }
+        CHECK(!sp.get_tensor("seq"));                        // fail-closed: not a tensor
+        CHECK(!sp.get_bin("depth"));                         // v1 getter stays fail-closed
+        CHECK(sp.tag_of("depth") == XI_PACK_TAG_TENSOR);     // generic walker sees the tag
+
+        auto bl = sp.get_blob("roi");
+        CHECK(bl.has_value());
+        if (bl) {
+            CHECK(bl->type_id == XI_PACK_TYPE_USER_BASE + 1);
+            CHECK(bl->bytes.size() == 3 && bl->bytes[2] == 9);
+        }
+        CHECK(sp.type_id_of("roi") == XI_PACK_TYPE_USER_BASE + 1);
+        CHECK(sp.type_id_of("depth") == XI_PACK_DTYPE_U16);  // tensor: dtype rides type_id
+        CHECK(sp.type_id_of("seq") == 0);
+        CHECK(sp.type_id_of("nope") == -1);
+        CHECK(sp.type_id_at(1) == XI_PACK_DTYPE_U16);        // insertion ordinal
+        CHECK(sp.type_id_at(99) == -1);
+    }
+    CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
+    CHECK(pool_live() == base_pool);                          // tensor+blob buffers freed
+}
+
+// ---------------------------------------------------------------------------
 // (5) Lifecycle: seal-consumes, abandon, refcount balance.
 // ---------------------------------------------------------------------------
 static void test_lifecycle() {
@@ -329,6 +383,7 @@ int main() {
 
     test_build_read_canonical();
     test_canonical_enforcement();
+    test_script_pack_v3();
     test_lifecycle();
 
     if (g_failures == 0) {

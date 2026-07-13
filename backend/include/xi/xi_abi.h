@@ -350,11 +350,28 @@ enum {
     XI_PACK_TAG_BOOL  = 6,  /* appended (pack-plane hardening) — earlier values frozen */
     XI_PACK_TAG_TENSOR = 7  /* appended (pack-v3 slab migration): typed element
                              * buffer — logical shape {w,h,c} + dtype (see
-                             * xi::PackDtype). No xi_pack_v1 accessor exists for
-                             * it; a v1-era generic walker sees the tag value
-                             * and must skip the entry (planned xi.pack@3 door
-                             * surfaces it). */
+                             * XI_PACK_DTYPE_*). No xi_pack_v1 accessor exists
+                             * for it; a v1-era generic walker sees the tag
+                             * value and must skip the entry. The xi.pack@3
+                             * door (xi_pack_v3 below) surfaces it. */
 };
+
+/* Tensor element dtypes carried across the ABI. Values MATCH xi::PackDtype
+ * (xi_pack.hpp) 1:1 and are FROZEN — new dtypes are appended, never renumbered. */
+enum {
+    XI_PACK_DTYPE_U8  = 0,   /* 1 byte  */
+    XI_PACK_DTYPE_U16 = 1,   /* 2 bytes */
+    XI_PACK_DTYPE_I32 = 2,   /* 4 bytes */
+    XI_PACK_DTYPE_F32 = 3,   /* 4 bytes */
+    XI_PACK_DTYPE_F64 = 4    /* 8 bytes */
+};
+
+/* The entry type_id space (mirrors xi::kPackTypeUserBase): 0 = "the tag speaks
+ * for itself"; a Tensor entry carries its XI_PACK_DTYPE_* here; values >=
+ * XI_PACK_TYPE_USER_BASE are the producer's user-typed-blob space (a private
+ * producer<->consumer payload contract the host never interprets). Values in
+ * (0, XI_PACK_TYPE_USER_BASE) are RESERVED for the pack plane. */
+#define XI_PACK_TYPE_USER_BASE 0x100
 
 /* A borrowed image view returned by xi_pack_v1.get_image — dimensions +
  * a zero-copy span over the pool buffer's pixels. Valid for the lifetime of
@@ -371,7 +388,7 @@ typedef struct xi_pack_image {
  * sealed one, manage its refcount, and emit it into host dispatch. Every
  * getter returns 1 on success and 0 when the key is absent OR its stored tag
  * differs from the requested type (fail-closed — no silent coercion). str/bin/
- * mp/image payloads are borrowed spans into the pack's arena / pool buffer,
+ * mp/image payloads are borrowed spans into the pack's slab / pool buffer,
  * valid until the caller releases the handle. Field order frozen forever; a
  * change ships as xi_pack_v2. */
 typedef struct xi_pack_v1 {
@@ -398,7 +415,7 @@ typedef struct xi_pack_v1 {
     /* ---- accessors (consume a sealed pack) ---- */
     int32_t     (*count)(xi_pack_handle f);
     /* i-th key in insertion order — a BORROWED span (ptr+len via *len), NOT
-     * NUL-terminated (pack keys live raw in the arena). NULL / *len=0 if OOB.
+     * NUL-terminated (pack keys live raw in the slab). NULL / *len=0 if OOB.
      * The generic-enumeration primitive (expose/record_save walk count()+key_at). */
     const char* (*key_at)(xi_pack_handle f, int32_t i, int32_t* len);
     int32_t     (*tag_at)(xi_pack_handle f, int32_t i);   /* XI_PACK_TAG_*, -1 if OOB */
@@ -424,14 +441,111 @@ typedef struct xi_pack_v1 {
     /* ---- additive tail (pre-cutover, polaris2 line): the BOOL entry type.
      * Appended AFTER every original field so no existing offset moves — an
      * in-tree consumer built against the shorter v1 sees an identical prefix.
-     * (xi.pack@1 has not shipped beyond this line; once it does, further
-     * growth ships as xi_pack_v2 per the freeze doctrine above.) A canonical
+     * (xi.pack@1 is FROZEN at this line: all later growth shipped as the
+     * xi_pack_v3 supplement below, per the freeze doctrine above.) A canonical
      * bool entry is the single msgpack byte 0xc2/0xc3, tag XI_PACK_TAG_BOOL.
      * v is 0/1; get_bool writes 0/1 and stays fail-closed on tag mismatch
      * (an i64 0/1 entry is NOT a bool). NULL-check these on a foreign table. */
     void    (*builder_add_bool)(xi_pack_builder b, const char* key, int32_t v);
     int32_t (*get_bool)(xi_pack_handle f, const char* key, int32_t* out);
 } xi_pack_v1;
+
+/* ------------------------------------------------------------------ */
+/* xi.pack@3 (HOST door) — the slab-generation EXTENSION vtable        */
+/* (pack-v3 migration). ADDITIVE: xi.pack@1 stays published and fully  */
+/* functional; @3 is a SUPPLEMENT a consumer resolves ALONGSIDE v1     */
+/* (lifetime, scalar entries, emit, walk all stay v1 verbs — @3 adds   */
+/* only what v1's shape cannot express). The version number matches    */
+/* the pack container generation (there was never an xi.pack@2).      */
+/* It surfaces:                                                        */
+/*   • TENSOR entries (XI_PACK_TAG_TENSOR): dtype-aware add/adopt/get. */
+/*   • USER-TYPED BLOBS: Bin entries carrying a producer-declared      */
+/*     type_id (>= XI_PACK_TYPE_USER_BASE) — a private payload         */
+/*     contract v1's get_bin flattened to anonymous bytes.             */
+/*   • adopt_bin — zero-copy adoption of a pooled BYTE buffer with the */
+/*     honest BIN tag (historically a producer had to masquerade bytes */
+/*     as an Image entry with fake dims to get zero-copy adoption).    */
+/*   • ordinal-explicit iteration: type_id_at + entry_at (one call per */
+/*     index instead of v1's key_at+tag_at pair; same insertion order).*/
+/* ------------------------------------------------------------------ */
+
+/* A borrowed tensor view returned by xi_pack_v3.get_tensor — logical shape +
+ * dtype + a zero-copy span over the pool buffer's element bytes. Valid until
+ * the caller's last release of the pack handle. `handle` is the BACKING pool
+ * buffer, BORROWED (not addref'd): pass it to builder_adopt_tensor /
+ * builder_adopt_bin (which addref) for a zero-copy producer chain, or
+ * image_addref it yourself to hold it past the pack. */
+typedef struct xi_pack_tensor {
+    int32_t         width;
+    int32_t         height;
+    int32_t         channels;
+    int32_t         dtype;      /* XI_PACK_DTYPE_* */
+    int32_t         elem_size;  /* bytes per element (derived from dtype) */
+    int32_t         length;     /* byte length of data = w*h*c*elem_size */
+    const void*     data;       /* zero-copy pool bytes; NULL if unavailable */
+    xi_image_handle handle;     /* backing pool buffer (borrowed, NOT addref'd) */
+} xi_pack_tensor;
+
+/* One directory row of the ordinal walk (xi_pack_v3.entry_at) — everything a
+ * generic consumer needs per index in ONE call. `key` is a borrowed span into
+ * the pack slab (NOT NUL-terminated), valid until the caller's last release. */
+typedef struct xi_pack_entry {
+    const char* key;       /* borrowed, not NUL-terminated */
+    int32_t     key_len;
+    int32_t     tag;       /* XI_PACK_TAG_* */
+    int32_t     type_id;   /* 0 | XI_PACK_DTYPE_* (Tensor) | >= XI_PACK_TYPE_USER_BASE */
+    int32_t     external;  /* 1 = payload lives in a pool buffer, 0 = inline slab */
+} xi_pack_entry;
+
+/* xi.pack@3 — resolved via host_api.get_interface("xi.pack", 3); NULL on a
+ * host without the pack plane (or one predating @3 — a consumer null-checks
+ * and falls back to its v1-only behavior). Handles/builders are the SAME ids
+ * the v1 door mints: build one pack through both vtables freely. Every getter
+ * is fail-closed like v1 (1 = success, 0 = absent key / wrong tag / dead
+ * handle); every builder verb returns 1 = entry added, 0 = refused (bad args,
+ * bad dtype/type_id, dead builder or handle, pool exhausted) — nothing is
+ * added on 0. Field order frozen forever; a change ships as the next version. */
+typedef struct xi_pack_v3 {
+    /* ---- builder (the v1 builder id, extended) ---- */
+    /* Copy w*h*c elements of `dtype` into a fresh pack-owned pool buffer.
+     * dtype must be a defined XI_PACK_DTYPE_*. */
+    int32_t (*builder_add_tensor)(xi_pack_builder b, const char* key,
+                                  int32_t w, int32_t h, int32_t c,
+                                  int32_t dtype, const void* elems);
+    /* Zero-copy: adopt an already-pooled element buffer as a tensor entry
+     * (addref — the pack becomes a co-owner). Refused if the pool buffer is
+     * smaller than the w*h*c*elem_size bytes the shape claims. */
+    int32_t (*builder_adopt_tensor)(xi_pack_builder b, const char* key,
+                                    int32_t w, int32_t h, int32_t c,
+                                    int32_t dtype, xi_image_handle handle);
+    /* Copy `len` bytes into a pack-owned pool buffer as a USER-TYPED blob
+     * (tag BIN + type_id). type_id must be >= XI_PACK_TYPE_USER_BASE. */
+    int32_t (*builder_add_blob)(xi_pack_builder b, const char* key,
+                                int32_t type_id, const void* data, int32_t len);
+    /* Zero-copy: adopt an already-pooled byte buffer as a Bin entry (addref).
+     * type_id is 0 (a plain bin) or >= XI_PACK_TYPE_USER_BASE (a typed blob);
+     * the entry's length is the pool buffer's full byte size. */
+    int32_t (*builder_adopt_bin)(xi_pack_builder b, const char* key,
+                                 int32_t type_id, xi_image_handle handle);
+
+    /* ---- accessors (consume a sealed pack) ---- */
+    /* Tensor view: dims + dtype + zero-copy element bytes + backing handle.
+     * Fail-closed: 0 unless the entry exists AND is XI_PACK_TAG_TENSOR. */
+    int32_t (*get_tensor)(xi_pack_handle f, const char* key, xi_pack_tensor* out);
+    /* Blob read: any BIN entry together with its type_id (0 for a plain bin).
+     * Same borrowed-span rules as v1 get_bin. Out params are each optional. */
+    int32_t (*get_blob)(xi_pack_handle f, const char* key,
+                        int32_t* type_id, const void** ptr, int32_t* len);
+    /* type_id of a key's entry, or -1 if the key is absent. */
+    int32_t (*type_id_of)(xi_pack_handle f, const char* key);
+
+    /* ---- ordinal-explicit iteration (insertion order, like v1 key_at) ---- */
+    /* type_id of the i-th entry, or -1 if OOB. */
+    int32_t (*type_id_at)(xi_pack_handle f, int32_t i);
+    /* The i-th directory row in ONE call: key span + tag + type_id + storage.
+     * 1 on success, 0 if OOB/dead (out untouched). */
+    int32_t (*entry_at)(xi_pack_handle f, int32_t i, xi_pack_entry* out);
+} xi_pack_v3;
 
 /* xi.pack@1 (PLUGIN door) — pack-in/pack-out process, published by a
  * plugin through xi_plugin_get_interface (below). process receives a
@@ -662,6 +776,10 @@ typedef struct xi_host_api {
     /*   get_interface("xi.pack", 1)    -> const xi_pack_v1*  (the v3     */
     /*       keyed-buffer Pack data plane, polaris2 wave-2; NULL on a     */
     /*       host with no pack plane installed).                          */
+    /*   get_interface("xi.pack", 3)    -> const xi_pack_v3*  (the slab-  */
+    /*       generation SUPPLEMENT to @1: tensor entries, user-typed      */
+    /*       blobs, adopt_bin, type_id/entry ordinal iteration. NULL      */
+    /*       likewise; there was never an xi.pack@2).                     */
     /*   get_interface("xi.cap", 1)     -> const xi_cap_v1*  (the         */
     /*       capability consumer funnel, docs/new_gen/14; NULL when no    */
     /*       capability plane is installed).                              */

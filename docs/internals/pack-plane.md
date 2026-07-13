@@ -50,9 +50,10 @@ contiguous slab** + N pool-backed EXTERN buffers, resolved behind one API (D1
   pool buffer, via `add_tensor` / `get_tensor` / `get_tensor_of<T>` (dtype
   mismatch fails closed); and `add_blob(type_id)` user blobs (`type_id ≥
   kPackTypeUserBase`), read back like any bin plus `type_id_at`. There is
-  deliberately **no `xi_pack_v1` door accessor for Tensor** — that surface is
-  reserved for the clean `xi.pack@3` door (in flight on the packv3 line;
-  documented in `c-abi.md` when it lands).
+  deliberately **no `xi_pack_v1` door accessor for Tensor** — that surface
+  ships on the clean **`xi.pack@3` door** (additive vtable alongside the
+  frozen v1: dtype tensors, typed blobs, `adopt_bin`, ordinal iteration —
+  see `c-abi.md` §6.1b).
 
 ### ImagePool pixel storage — the size-class recycler (`pixpool`)
 
@@ -105,14 +106,17 @@ were spliced verbatim onto the wire) is pinned in its new form by
 `plugins/xex1_v2_identity_test.cpp`: **`canonical_value` == an independent
 `xi::mp::Writer` re-encode == the XEX1-v3 encoder's wire bytes == disk**.
 Consequently `raw_at(i)` now returns the entry's RAW stored payload (empty for
-EXTERN entries), and `arena_bytes()` became `slab_bytes()`.
+EXTERN entries — a fast in-process read, not wire bytes), and `arena_bytes()`
+became `slab_bytes()`.
 
 ### One container, one read path
 
 - **`Pack` / `PackBuilder`** — the dynamic, string-keyed container (generic
-  walkers, ad-hoc producers, ingress-canonicalized foreign maps). Lookup is a
-  binary search on the slab's hash-sorted directory (memcmp-verified; the
-  pre-slab hybrid "linear ≤ 24 / `unordered_map` at seal" scheme is gone).
+  walkers, ad-hoc producers, ingress-canonicalized foreign maps). Lookup is
+  ONE path for every size: binary search on the hash-sorted slab directory
+  (collision runs memcmp-verified; duplicate keys first-inserted-wins) — no
+  side index, no per-pack map (the pre-slab hybrid "linear ≤ 24 /
+  `unordered_map` at seal" scheme is gone).
 
 > **Retired 2026-07-11 (contraction, commit `cba51fe`):** the second in-process
 > container — `TypedPack<Schema>` / `TypedPackBuilder` over a `PackSchema` CRTP
@@ -149,7 +153,12 @@ A plugin in another DLL can never see the container's layout. The pack crosses
 as an **opaque `xi_pack_handle`** plus the accessor C functions of `xi_pack_v1`
 (spans in / spans out) — resolved once via `host->get_interface("xi.pack", 1)`.
 The exact vtable (including the additive bool tail and its growth doctrine) is
-documented in [`../reference/c-abi.md`](../reference/c-abi.md).
+documented in [`../reference/c-abi.md`](../reference/c-abi.md). Since the
+pack-v3 slab migration the **`xi.pack@3` supplement** (`xi_pack_v3`, resolved
+alongside @1 via `get_interface("xi.pack", 3)`) surfaces what v1's shape could
+not: dtype-aware tensor entries, user-typed blobs (`type_id`), zero-copy
+`adopt_bin`/`adopt_tensor`, and ordinal-explicit iteration
+(`type_id_at`/`entry_at`) — see c-abi.md §6.1b.
 
 Host-side, **`PackRegistry`** is the handle table: a sealed pack is single-owner
 in C++ but **refcounted across the ABI** (the dispatch event and the emitter can
@@ -160,17 +169,22 @@ table at refcount 1.
 ### Owner-tagged refs + the owner sweep
 
 The ImagePool sweeps leaked image handles per owner on instance destroy; the
-pack registry has the exact analogue. Every ref acquired under an ImagePool
-owner context (a seal or retain inside the adapter's `OwnerGuard`) is tagged in
-a small per-slot ledger; `release_all_for(owner)` drops precisely that owner's
-outstanding refs on teardown (adapter dtor, script unload) and reports the
-"swept N leaked pack ref(s)" diagnostic. Framework-transient refs (the dispatch
-event's ref taken in `emit_pack`) are deliberately **untagged** — they are
-released from other threads with no owner context and must never be charged to
-(or swept with) the emitting plugin. Release reconciliation keeps the invariant
-`sum(ledger) ≤ rc`, so a sweep can never free a pack out from under a live
-co-owner. Late-teardown paths are guarded by `g_pack_registry_alive` so a pack
-destroyed during static destruction never touches a dead singleton.
+pack registry has the analogue, on the **single-creator-tag** model (the
+counted per-owner ledger's replacement): the only owner-tracked ref is the
+**creator's one seal ref** — `seal()` stamps the slot with the sealing
+thread's ImagePool owner. Every other ref (a consumer's retain, the dispatch
+event's `emit_pack` ref) is an **untracked** `++rc`, a consumer's own
+responsibility — never charged to (or swept with) the emitting plugin.
+`release_all_for(owner)` (teardown: adapter dtor, script unload) drops **at
+most that one seal ref per slot**, and only iff still outstanding (the creator
+releasing its own ref clears the tag; a handoff clears it via `untag` without
+touching rc) — so a sweep is mathematically incapable of over-releasing: a
+pack a consumer still holds survives, a leaked seal ref is reclaimed and
+reported ("swept N leaked pack ref(s)"). A consumer-retain leak is DIAGNOSED
+(`live_frames()`), never swept — the registry fails toward leak, never toward
+UAF. Late teardown needs no liveness guard: the registry singleton is
+intentionally leaked (mirroring `ImagePool::instance`), so a static-destruction
+retain/release can always touch it.
 
 ## The fault + provenance contract (`xi_pack_contract.hpp`)
 
@@ -186,7 +200,7 @@ inline code is correct on every side). Implementation of
 | `$src` | immediate producer (instance name) |
 | `$prov` | hop chain, `/`-joined, oldest→newest |
 | `$seq` | ordering identity (copied forward on propagation so a fault stays correlatable with its frame) |
-| `$channel` | routing channel — the established expose/XEX1 sink-lane convention (defined as `xi::Record::kChannelKey` in `xi_record.hpp`, not in the contract header; listed here because pack sinks honour it) |
+| `$channel` | routing channel — the established expose/XEX1 sink-lane convention (`pack_contract::kChannel`; the v12 replacement for the deleted `xi::Record::kChannelKey`) |
 
 A **fault is a normal sealed pack** carrying `$fault` — never `XI_PACK_NULL`,
 which stays reserved for hard internal failure — so the caller always gets a

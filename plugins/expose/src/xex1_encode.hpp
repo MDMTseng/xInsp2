@@ -137,11 +137,12 @@ inline std::vector<uint8_t> encode_frame(
 // ---------------------------------------------------------------------------
 
 // One entry to dump. For a scalar/str/bin/mp entry, `value` is its ALREADY-
-// CANONICAL msgpack bytes (one complete value) — the small-plane bytes as they
-// live in the pack arena (host side: xi::Pack::raw_at) OR re-encoded from the
-// door's typed accessors (plugin side: a temp xi::mp::Writer). Either way they
-// are byte-identical, because the arena and the Writer speak the same canonical
-// profile. For an image entry (tag == XI_PACK_TAG_IMAGE) `value` is empty and
+// CANONICAL msgpack bytes (one complete value) — the canonical walk's emit
+// (host side: xi::Pack::canonical_value; the slab stores scalars raw, so
+// raw_at is NOT wire bytes anymore) OR re-encoded from the door's typed
+// accessors (plugin side: a temp xi::mp::Writer). Either way they are
+// byte-identical, because the walk and the Writer are one canonical-encode
+// truth. For an image entry (tag == XI_PACK_TAG_IMAGE) `value` is empty and
 // the pixels are inlined from {w,h,c,px} as a `bin` (doc 07 D2 export rule).
 struct V3Entry {
     std::string          key;

@@ -3,7 +3,7 @@
 // xi_pack_abi.hpp — the HOST side of the xi.pack@1 data-plane door (polaris2
 // wave-2, docs/new_gen/07-uniform-keyed-buffer-plane.md + 08 Wave 2).
 //
-// The Pack value type (xi_pack.hpp) is a C++ container that OWNS an arena and
+// The Pack value type (xi_pack.hpp) is a C++ container that OWNS a slab and
 // pool handles; a plugin in another DLL cannot touch its layout. So the pack
 // crosses the ABI as an OPAQUE HANDLE (xi_pack_handle) plus the accessor C
 // functions in `xi_pack_v1` (xi_abi.h) — spans in / spans out, never raw
@@ -285,7 +285,7 @@ inline int32_t f_count(xi_pack_handle f) {
 inline const char* f_key_at(xi_pack_handle f, int32_t i, int32_t* len) {
     Pack* fr = PackRegistry::instance().pack(f);
     if (!fr || i < 0 || (size_t)i >= fr->size()) { if (len) *len = 0; return nullptr; }
-    std::string_view k = fr->key_at((size_t)i);   // borrowed arena bytes, not NUL-terminated
+    std::string_view k = fr->key_at((size_t)i);   // borrowed slab bytes, not NUL-terminated
     if (len) *len = (int32_t)k.size();
     return k.data();
 }
@@ -363,6 +363,99 @@ inline int32_t f_get_mp(xi_pack_handle f, const char* key, const void** ptr, int
     if (!v) return 0;
     if (ptr) *ptr = v->data();
     if (len) *len = (int32_t)v->size();
+    return 1;
+}
+
+// ---- xi.pack@3 trampolines (the slab-generation supplement) -----------------
+// Same registry, same handle/builder ids as v1 — @3 only adds verbs. Builder
+// verbs return 1 = entry added, 0 = refused (fail-closed, nothing added);
+// getters follow v1's 1/0 discipline. dtype/type_id are range-checked HERE
+// (the container asserts compile out in Release; the door must stay honest
+// against a foreign caller).
+inline bool valid_dtype_(int32_t d) {
+    return d >= int32_t(PackDtype::U8) && d <= int32_t(PackDtype::F64);
+}
+inline int32_t f3_add_tensor(xi_pack_builder b, const char* key,
+                             int32_t w, int32_t h, int32_t c,
+                             int32_t dtype, const void* elems) {
+    if (!valid_dtype_(dtype)) return 0;
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return 0;
+    return fb->add_tensor(key ? key : "", w, h, c, PackDtype(dtype), elems) ? 1 : 0;
+}
+inline int32_t f3_adopt_tensor(xi_pack_builder b, const char* key,
+                               int32_t w, int32_t h, int32_t c,
+                               int32_t dtype, xi_image_handle handle) {
+    if (!valid_dtype_(dtype)) return 0;
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return 0;
+    return fb->adopt_tensor(key ? key : "", w, h, c, PackDtype(dtype), handle) ? 1 : 0;
+}
+inline int32_t f3_add_blob(xi_pack_builder b, const char* key,
+                           int32_t type_id, const void* data, int32_t len) {
+    if (type_id < XI_PACK_TYPE_USER_BASE || type_id > 0xFFFF || len <= 0) return 0;
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return 0;
+    return fb->add_blob(key ? key : "", uint16_t(type_id), data, size_t(len)) ? 1 : 0;
+}
+inline int32_t f3_adopt_bin(xi_pack_builder b, const char* key,
+                            int32_t type_id, xi_image_handle handle) {
+    if (type_id != 0 && (type_id < XI_PACK_TYPE_USER_BASE || type_id > 0xFFFF))
+        return 0;
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return 0;
+    return fb->adopt_bin(key ? key : "", uint16_t(type_id), handle) ? 1 : 0;
+}
+inline int32_t f3_get_tensor(xi_pack_handle f, const char* key, xi_pack_tensor* out) {
+    Pack* fr = PackRegistry::instance().pack(f);
+    if (!fr || !key) return 0;
+    auto v = fr->get_tensor(key);
+    if (!v) return 0;
+    if (out) {
+        out->width     = v->width;
+        out->height    = v->height;
+        out->channels  = v->channels;
+        out->dtype     = int32_t(v->dtype);
+        out->elem_size = int32_t(v->elem_size);
+        out->length    = int32_t(v->bytes.size());
+        out->data      = v->bytes.data();
+        out->handle    = v->handle;
+    }
+    return 1;
+}
+inline int32_t f3_get_blob(xi_pack_handle f, const char* key,
+                           int32_t* type_id, const void** ptr, int32_t* len) {
+    Pack* fr = PackRegistry::instance().pack(f);
+    if (!fr || !key) return 0;
+    auto v = fr->get_blob(key);
+    if (!v) return 0;
+    if (type_id) *type_id = int32_t(v->type_id);
+    if (ptr)     *ptr     = v->bytes.data();
+    if (len)     *len     = int32_t(v->bytes.size());
+    return 1;
+}
+inline int32_t f3_type_id_of(xi_pack_handle f, const char* key) {
+    Pack* fr = PackRegistry::instance().pack(f);
+    if (!fr || !key) return -1;
+    auto t = fr->type_id_of(key);
+    return t ? int32_t(*t) : -1;
+}
+inline int32_t f3_type_id_at(xi_pack_handle f, int32_t i) {
+    Pack* fr = PackRegistry::instance().pack(f);
+    if (!fr || i < 0 || (size_t)i >= fr->size()) return -1;
+    return int32_t(fr->type_id_at((size_t)i));
+}
+inline int32_t f3_entry_at(xi_pack_handle f, int32_t i, xi_pack_entry* out) {
+    Pack* fr = PackRegistry::instance().pack(f);
+    if (!fr || i < 0 || (size_t)i >= fr->size()) return 0;
+    Pack::EntryView e = fr->entry_at((size_t)i);
+    if (out) {
+        out->key      = e.key.data();
+        out->key_len  = int32_t(e.key.size());
+        out->tag      = int32_t(e.tag);
+        out->type_id  = int32_t(e.type_id);
+        out->external = e.external ? 1 : 0;
+    }
     return 1;
 }
 
@@ -453,12 +546,33 @@ inline const xi_pack_v1* pack_v1_iface() {
     return &iface;
 }
 
-// Publish the Pack data plane so host->get_interface("xi.pack", 1) resolves it,
-// and wire the dispatch releaser so a pack event's ref is dropped correctly.
+// The process-stable xi.pack@3 supplement (tensor / user blob / adopt_bin /
+// ordinal type_id+entry iteration). Same Meyers-singleton discipline as v1:
+// the address and every fn-pointer are stable for the host's life. A consumer
+// resolves it ALONGSIDE v1 — lifetime/scalars/emit stay v1 verbs.
+inline const xi_pack_v3* pack_v3_iface() {
+    static const xi_pack_v3 iface = {
+        &pack_abi_detail::f3_add_tensor,
+        &pack_abi_detail::f3_adopt_tensor,
+        &pack_abi_detail::f3_add_blob,
+        &pack_abi_detail::f3_adopt_bin,
+        &pack_abi_detail::f3_get_tensor,
+        &pack_abi_detail::f3_get_blob,
+        &pack_abi_detail::f3_type_id_of,
+        &pack_abi_detail::f3_type_id_at,
+        &pack_abi_detail::f3_entry_at,
+    };
+    return &iface;
+}
+
+// Publish the Pack data plane so host->get_interface("xi.pack", 1) resolves it
+// (and ("xi.pack", 3) the slab supplement), and wire the dispatch releaser so a
+// pack event's ref is dropped correctly.
 // Idempotent; call once next to install_trigger_hook (default_host_api / certify)
 // and in any test that builds a host_api it drives packs through.
 inline void install_pack_abi() {
     ImagePool::publish_pack_iface(pack_v1_iface());
+    ImagePool::publish_pack3_iface(pack_v3_iface());
     ImagePool::publish_pack_sweeper(&pack_abi_detail::f_sweep_packs_for);
     ImagePool::publish_pack_untagger(&pack_abi_detail::f_untag_pack_ref);
     TriggerBus::instance().set_pack_releaser(&pack_abi_detail::f_release_for_bus);
