@@ -1036,6 +1036,24 @@ if(NOT MSVC)
 endif()
 _xinsp_perf_gate(perf_pack bench_pack pack.txt)
 
+# --- proto/pack-c PROTOTYPE (design C, backend/include/xi/proto/xi_pack_c.hpp)
+# Experiment-only additions: a correctness net in the regular suite, and a
+# head-to-head bench (current Pack vs design C) that is runnable but NOT
+# perf-gated — no baseline, no _xinsp_perf_gate; its numbers feed the
+# migrate/don't-migrate judgment, not CI.
+add_executable(test_pack_c tests/test_pack_c.cpp)
+target_link_libraries(test_pack_c PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_pack_c PRIVATE pthread)
+endif()
+add_test(NAME pack_c COMMAND test_pack_c)
+
+add_executable(bench_pack_c tests/bench_pack_c.cpp)
+target_link_libraries(bench_pack_c PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(bench_pack_c PRIVATE pthread)
+endif()
+
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_IPP=1)
     target_include_directories(xinsp_backend PRIVATE ${IPP_INCLUDE_DIR})
