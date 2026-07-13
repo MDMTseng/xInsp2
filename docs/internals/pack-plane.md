@@ -14,20 +14,30 @@ canonical headers: `xi_pack.hpp` (container), `xi_pack_abi.hpp` (host door),
 ## The container memory model (`xi_pack.hpp`)
 
 A pack's storage has two planes, resolved behind one API (D1 "storage duality,
-API unity"):
+API unity"). **Since the pack-v3 slab migration (2026-07)** the small plane is
+a SLAB, not the old chunked arena:
 
-- **Arena** — a per-pack bump allocator that owns every *small* entry's bytes
-  (scalars, strings, inline binaries below the 4096-byte `kPackLargeThreshold`,
-  nested msgpack) **and** the interned key strings. Allocation is a pointer bump;
-  the common one-chunk pack keeps its chunk inline (no chunk-vector alloc), and
-  chunks are borrowed from / returned to a **thread-local `ArenaPool` freelist**,
-  so a steady stream of packs on one lane's thread stops heap-allocating
-  entirely — the ImagePool discipline in miniature. Destruction returns every
-  chunk in one shot ("the arena dies with the pack").
-- **Pool buffers** — large payloads (images; binaries ≥ threshold) do *not* live
-  in the arena. They are raw ImagePool buffers referenced by handle, minted
-  **only** through the typeless `pack_pool` facade (a typeless N-byte buffer is
-  an (N,1,1) image) — the privileged mint path of doc 07's ingress rule.
+- **Slab** — one contiguous, recycled buffer per sealed pack:
+  `PackHeader(64B) + DirEntry(32B)×n sorted by (key_hash, key, ordinal) +
+  ordinal→dir order table + bump-packed payload` (keys + entry bytes). It owns
+  every *small* entry's bytes (scalars, strings, inline binaries below the
+  4096-byte `kPackLargeThreshold`, nested msgpack) **and** the interned key
+  strings. Scalars are stored **RAW** (i64/f64 = 8 aligned bytes, bool = one
+  0/1 byte — a read is one load, zero decode); nested msgpack (`Mp`) rides as
+  its canonical bytes verbatim. Lookup is a binary search on the hash-sorted
+  directory (equal-hash runs memcmp-verified); **insertion order is
+  first-class** via the ordinal table (`key_at`/`for_each` — the walkers'
+  contract). Slab buffers recycle through a thread-local `SlabPool` freelist
+  (the old `ArenaPool`, honestly renamed) and builder staging through a
+  per-thread scratch pool, so a steady stream of packs on one lane's thread is
+  heap-free after warmup — the ImagePool discipline in miniature. Destruction
+  returns the slab in one shot ("the slab dies with the pack").
+- **Pool buffers** — large payloads (images; tensors; binaries ≥ threshold) do
+  *not* live in the slab. They are raw ImagePool buffers referenced by handle
+  (the slab holds a 24-byte `ExtRecord` — handle + logical shape + length —
+  per extern entry), minted **only** through the typeless `pack_pool` facade
+  (a typeless N-byte buffer is an (N,1,1) image) — the privileged mint path of
+  doc 07's ingress rule.
 
 ### ImagePool pixel storage — the size-class recycler (`pixpool`)
 
@@ -58,17 +68,24 @@ buffer from a size-class recycler** (`pixpool` in `xi_image_pool.hpp`):
   they go on free changed. Diagnostics: `ImagePool::pixel_alloc_stats()`
   (magazine/shelf hits, evictions); asserted by `test_image_pool_recycle`.
 
-Entry values are stored as their **canonical max-width msgpack encoding** (int64
-`0xd3`, float64 `0xcb`, bool `0xc2/0xc3`, str32/bin32), so `raw_at(i)` hands a
-generic dumper (XEX1-v3, `record_save`) the small plane *exactly as it lives in
-memory* — wire bytes equal memory bytes.
+**Wire ≠ memory since the slab (by design), one canonical seam.** Scalars live
+raw in the slab; the **canonical max-width msgpack encoding** (int64 `0xd3`,
+float64 `0xcb`, bool `0xc2/0xc3`, str32/bin32) is re-emitted at the WALK seam —
+`Pack::for_each_entry` / `Pack::canonical_value(i, mp::Writer&)` — through
+`xi::mp::Writer`, the one canonical-encode truth (ruling-1 NaN flatten
+included, applied already at `add_f64`). A generic dumper (XEX1-v3,
+`record_save`) splices those walk bytes onto the wire; they are byte-identical
+to what the old arena stored, so the wire/at-rest format is UNCHANGED.
+`raw_at(i)` now returns the raw stored payload (a fast in-process read, not
+wire bytes).
 
 ### One container, one read path
 
 - **`Pack` / `PackBuilder`** — the dynamic, string-keyed container (generic
   walkers, ad-hoc producers, ingress-canonicalized foreign maps). Lookup is
-  hybrid by measurement: ≤ 24 entries → a linear memcmp scan over the contiguous
-  table (no index allocated); larger packs build an `unordered_map` once at seal.
+  ONE path for every size: binary search on the hash-sorted slab directory
+  (collision runs memcmp-verified; duplicate keys first-inserted-wins) — no
+  side index, no per-pack map.
 
 > **Retired 2026-07-11 (contraction, commit `cba51fe`):** the second in-process
 > container — `TypedPack<Schema>` / `TypedPackBuilder` over a `PackSchema` CRTP
@@ -101,7 +118,12 @@ A plugin in another DLL can never see the container's layout. The pack crosses
 as an **opaque `xi_pack_handle`** plus the accessor C functions of `xi_pack_v1`
 (spans in / spans out) — resolved once via `host->get_interface("xi.pack", 1)`.
 The exact vtable (including the additive bool tail and its growth doctrine) is
-documented in [`../reference/c-abi.md`](../reference/c-abi.md).
+documented in [`../reference/c-abi.md`](../reference/c-abi.md). Since the
+pack-v3 slab migration the **`xi.pack@3` supplement** (`xi_pack_v3`, resolved
+alongside @1 via `get_interface("xi.pack", 3)`) surfaces what v1's shape could
+not: dtype-aware tensor entries, user-typed blobs (`type_id`), zero-copy
+`adopt_bin`/`adopt_tensor`, and ordinal-explicit iteration
+(`type_id_at`/`entry_at`) — see c-abi.md §6.1b.
 
 Host-side, **`PackRegistry`** is the handle table: a sealed pack is single-owner
 in C++ but **refcounted across the ABI** (the dispatch event and the emitter can
@@ -112,17 +134,22 @@ table at refcount 1.
 ### Owner-tagged refs + the owner sweep
 
 The ImagePool sweeps leaked image handles per owner on instance destroy; the
-pack registry has the exact analogue. Every ref acquired under an ImagePool
-owner context (a seal or retain inside the adapter's `OwnerGuard`) is tagged in
-a small per-slot ledger; `release_all_for(owner)` drops precisely that owner's
-outstanding refs on teardown (adapter dtor, script unload) and reports the
-"swept N leaked pack ref(s)" diagnostic. Framework-transient refs (the dispatch
-event's ref taken in `emit_pack`) are deliberately **untagged** — they are
-released from other threads with no owner context and must never be charged to
-(or swept with) the emitting plugin. Release reconciliation keeps the invariant
-`sum(ledger) ≤ rc`, so a sweep can never free a pack out from under a live
-co-owner. Late-teardown paths are guarded by `g_pack_registry_alive` so a pack
-destroyed during static destruction never touches a dead singleton.
+pack registry has the analogue, on the **single-creator-tag** model (the
+counted per-owner ledger's replacement): the only owner-tracked ref is the
+**creator's one seal ref** — `seal()` stamps the slot with the sealing
+thread's ImagePool owner. Every other ref (a consumer's retain, the dispatch
+event's `emit_pack` ref) is an **untracked** `++rc`, a consumer's own
+responsibility — never charged to (or swept with) the emitting plugin.
+`release_all_for(owner)` (teardown: adapter dtor, script unload) drops **at
+most that one seal ref per slot**, and only iff still outstanding (the creator
+releasing its own ref clears the tag; a handoff clears it via `untag` without
+touching rc) — so a sweep is mathematically incapable of over-releasing: a
+pack a consumer still holds survives, a leaked seal ref is reclaimed and
+reported ("swept N leaked pack ref(s)"). A consumer-retain leak is DIAGNOSED
+(`live_frames()`), never swept — the registry fails toward leak, never toward
+UAF. Late teardown needs no liveness guard: the registry singleton is
+intentionally leaked (mirroring `ImagePool::instance`), so a static-destruction
+retain/release can always touch it.
 
 ## The fault + provenance contract (`xi_pack_contract.hpp`)
 
@@ -138,7 +165,7 @@ inline code is correct on every side). Implementation of
 | `$src` | immediate producer (instance name) |
 | `$prov` | hop chain, `/`-joined, oldest→newest |
 | `$seq` | ordering identity (copied forward on propagation so a fault stays correlatable with its frame) |
-| `$channel` | routing channel — the established expose/XEX1 sink-lane convention (defined as `xi::Record::kChannelKey` in `xi_record.hpp`, not in the contract header; listed here because pack sinks honour it) |
+| `$channel` | routing channel — the established expose/XEX1 sink-lane convention (`pack_contract::kChannel`; the v12 replacement for the deleted `xi::Record::kChannelKey`) |
 
 A **fault is a normal sealed pack** carrying `$fault` — never `XI_PACK_NULL`,
 which stays reserved for hard internal failure — so the caller always gets a

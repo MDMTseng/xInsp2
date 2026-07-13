@@ -11,17 +11,22 @@
 //
 // This is the doc-07 claim made an EXECUTABLE ASSERTION. It builds a real
 // xi::Pack (the host-side v3 container), seals it, dumps it to an XEX1-v3 frame
-// (the canonical frame dump), and proves three equalities on the small plane:
+// (the canonical frame dump), and proves three equalities on the small plane.
 //
-//   1. memory  == canonical : each entry's stored arena bytes ARE already
-//      canonical msgpack — re-encoding the same value through xi::mp::Writer
-//      yields byte-identical bytes. The pack does not hold a private layout it
-//      must transcode; it holds the wire encoding.
-//   2. wire     == memory   : the XEX1-v3 dump splices those arena bytes onto the
-//      wire VERBATIM (Writer::raw_canonical), so each entry's memory bytes appear
-//      as a contiguous slice of the emitted pack. Boundaries are copies, not
-//      transformations.
-//   3. disk     == wire      : the emitted frame written to a file and read back
+// SLAB UPDATE (pack-v3 migration): the container now stores scalars RAW in the
+// slab (memory != wire for scalars, by design) — the canonical plane is the
+// WALK seam, Pack::canonical_value, which re-emits each entry's canonical
+// msgpack bytes through xi::mp::Writer. The three identities survive with the
+// canonical walk standing where raw arena bytes used to:
+//
+//   1. walk    == canonical : each entry's canonical_value bytes are byte-
+//      identical to an independent re-encode of the same logical value through
+//      xi::mp::Writer — ONE canonical-encode truth, no private wire dialect.
+//   2. wire    == walk      : the XEX1-v3 dump splices those walk bytes onto the
+//      wire VERBATIM (Writer::raw_canonical), so each entry's canonical bytes
+//      appear as a contiguous slice of the emitted pack. Boundaries are copies,
+//      not transformations.
+//   3. disk    == wire      : the emitted frame written to a file and read back
 //      is byte-identical (a record_save-style dump is a byte copy, not a
 //      re-serialization).
 //
@@ -99,11 +104,11 @@ int main() {
     }
     CHECK(pack.size() == 6);
 
-    // ---- host-side generic dump: read arena bytes VERBATIM into V3Entry --------
-    // (the same walk expose does across the door, but here in-process we can read
-    // the arena bytes directly and prove they flow to the wire unchanged.)
+    // ---- host-side generic dump: the canonical WALK bytes into V3Entry --------
+    // (the same walk expose does across the door: canonical_value is the one
+    // serialization seam — the slab's raw scalar storage never leaks to wire.)
     std::vector<xi::xex1::V3Entry> entries;
-    std::vector<std::vector<uint8_t>> memory_planes;   // per-entry arena bytes (non-image)
+    std::vector<std::vector<uint8_t>> walk_planes;   // per-entry canonical bytes (non-image)
     uint64_t seq = 0;
     for (size_t i = 0; i < pack.size(); ++i) {
         std::string_view key = pack.key_at(i);
@@ -118,15 +123,17 @@ int main() {
             e.w = im.width; e.h = im.height; e.c = im.channels;
             e.px = im.pixels.data(); e.px_len = im.pixels.size();
         } else {
-            std::span<const uint8_t> raw = pack.raw_at(i);   // the memory plane
-            std::vector<uint8_t> mem(raw.begin(), raw.end());
+            xi::mp::Writer cw;                        // the canonical walk seam
+            CHECK(pack.canonical_value(i, cw));
+            std::vector<uint8_t> mem = cw.take();
 
-            // (1) memory == canonical: the arena bytes ARE canonical msgpack.
+            // (1) walk == canonical: the walk emits exactly what an independent
+            // canonical re-encode of the same logical value produces.
             std::vector<uint8_t> canon = reencode(pack, key, tag);
             CHECK(mem == canon);
 
-            e.value = mem;                 // splice the arena bytes onto the wire
-            memory_planes.push_back(mem);
+            e.value = mem;                 // splice the walk bytes onto the wire
+            walk_planes.push_back(mem);
         }
         entries.push_back(std::move(e));
     }
@@ -138,8 +145,8 @@ int main() {
     CHECK(wire[0] == 'X' && wire[1] == 'E' && wire[2] == 'X' && wire[3] == '1');
     CHECK(xi::mp::validate(wire.data() + 4, wire.size() - 4) == xi::mp::Status::Ok);
 
-    SECTION("(2) each entry's memory plane appears VERBATIM in the wire bytes");
-    for (const auto& mem : memory_planes)
+    SECTION("(2) each entry's canonical walk bytes appear VERBATIM in the wire");
+    for (const auto& mem : walk_planes)
         CHECK(contains(wire, mem));
     // The pooled image pixels are inlined as bin and appear verbatim too.
     CHECK(contains(wire, pixels));

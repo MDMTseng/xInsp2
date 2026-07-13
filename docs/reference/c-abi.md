@@ -212,7 +212,7 @@ carved `get_interface` interfaces, not new struct fields (§6).
 | Instance | `instance_folder(name, buf, len)` | Per-instance scratch dir, created before `create()`; never auto-deleted. |
 | Binary push (v8) | `emit_binary(data, len)` | Push an opaque binary frame straight to connected WS clients. The host is a dumb byte pipe — the **frame format is the plugin's contract with its UI** (self-describe: channel/key + payload). Intended for the `expose` plugin shipping one atomic `XEX1` frame (values + JPEG images) per channel (no base64, no poll). Thread-safe from a worker; null on a pre-v8 host. SDK: `xi::Plugin::emit_binary(...)`. See `plugins/expose`. |
 | Compress cache (v9) | `compress_image(px, w, h, c, quality, out, cap)` | JPEG-encode an image **through a host-side N-rotate cache** keyed by a content hash: the same frame compressed by several plugins (or repeatedly) is encoded ONCE globally. Lets the `expose` plugin avoid linking opencv/turbojpeg and gives free global dedup. Returns bytes written / `-needed` / 0. Pair with `emit_binary` to push the result. |
-| Capability door (v10) | `get_interface(id, version)` | Resolve a carved, independently-frozen interface (`xi.pack` / `xi.imaging` / `xi.imaging_rw` / `xi.emit` / `xi.log` / `xi.preview` @1) or the capability planes (§6). The v12 data plane + dispatch verb both ride this door, not a struct field. |
+| Capability door (v10) | `get_interface(id, version)` | Resolve a carved, independently-frozen interface (`xi.pack` / `xi.imaging` / `xi.imaging_rw` / `xi.emit` / `xi.log` / `xi.preview` @1, plus the `xi.pack`@3 slab supplement — §6.1b) or the capability planes (§6). The v12 data plane + dispatch verb both ride this door, not a struct field. |
 
 **Dispatch (the pack plane, not a struct field).** A source emits a frame with
 `xi_pack_v1::emit_pack(emitter, id, pack, ts)` — the one dispatch verb, on the
@@ -344,8 +344,11 @@ raw struct layout. Two handle types:
   `builder_abandon` drops an unsealed one (releasing any handles it minted).
 
 Entry type tags cross as `XI_PACK_TAG_*` and match `xi::PackTag` 1:1 — values
-frozen: `I64`=0, `F64`=1, `STR`=2, `BIN`=3, `IMAGE`=4, `MP`=5, and `BOOL`=6
-(**appended**, pack-plane hardening — earlier values never move).
+frozen: `I64`=0, `F64`=1, `STR`=2, `BIN`=3, `IMAGE`=4, `MP`=5, `BOOL`=6
+(**appended**, pack-plane hardening — earlier values never move), and
+`TENSOR`=7 (**appended**, pack-v3 slab migration — v1 has no accessor for it; a
+v1-era generic walker sees the tag value and skips the entry. The `xi.pack@3`
+supplement, §6.1b, surfaces it).
 
 ```c
 typedef struct xi_pack_v1 {
@@ -412,12 +415,12 @@ Contract points:
 - **The additive tail + growth doctrine.** `builder_add_bool`/`get_bool` are
   appended **after** every original field, so no existing offset moves — a
   consumer built against the shorter v1 sees an identical prefix. This was
-  legal only because `xi.pack@1` had not shipped beyond the tree; **once it
-  has, further growth ships as `xi_pack_v2`** per the freeze doctrine (field
-  order frozen forever within a published version). NULL-check the tail
-  entries when consuming a foreign table. A canonical bool entry is the single
-  msgpack byte `0xc2`/`0xc3` (tag `XI_PACK_TAG_BOOL`); `v` is 0/1 and
-  `get_bool` writes 0/1.
+  legal only because `xi.pack@1` had not shipped beyond the tree; `xi.pack@1`
+  is now **frozen at that tail** — all later growth shipped as the
+  `xi.pack@3` supplement (§6.1b) per the freeze doctrine (field order frozen
+  forever within a published version). NULL-check the tail entries when
+  consuming a foreign table. A canonical bool entry is the single msgpack byte
+  `0xc2`/`0xc3` (tag `XI_PACK_TAG_BOOL`); `v` is 0/1 and `get_bool` writes 0/1.
 - **Reserved `$`-keys.** `$fault`/`$fault_key`/`$fault_detail` (fail-loud
   contract failures), `$src`/`$prov` (provenance), `$seq` (ordering identity),
   `$channel` (routing) — one home in `xi_pack_contract.hpp`; semantics in
@@ -430,6 +433,81 @@ ownership of. `XI_PACK_NULL` signals hard internal failure only; a contract
 failure is a normal sealed `$fault` pack. Authored via
 `process(PackIn&, PackOut&)` + `XI_PLUGIN_PACK_DOOR` — see
 [`../guides/write-a-plugin.md`](../guides/write-a-plugin.md).
+
+### 6.1b `xi.pack@3` (host door) — the slab-generation supplement
+
+`host->get_interface("xi.pack", 3)` → `const xi_pack_v3*`; NULL on a host
+without the pack plane or one predating @3 (null-check and fall back to
+v1-only behavior; **there was never an `xi.pack@2`** — the version number
+matches the pack container generation). **Additive supplement, not a
+replacement**: resolve it *alongside* v1 — lifetime (`retain`/`release`),
+scalar entries, `emit_pack`, and the generic `count`/`key_at`/`tag_at` walk
+all stay v1 verbs, and both vtables operate on the **same** builder/handle
+ids. SDK plumbing: `xi::Plugin::pack3_iface()`, the `PackIn`/`PackOut` v3
+verbs, and script-side `ScriptPack::get_tensor`/`get_blob` +
+`ScriptPackBuilder::add_tensor`/`add_blob` all null-check it for you.
+
+```c
+typedef struct xi_pack_v3 {
+    /* builder (the v1 builder id, extended) */
+    int32_t (*builder_add_tensor)(xi_pack_builder b, const char* key,
+                                  int32_t w, int32_t h, int32_t c,
+                                  int32_t dtype, const void* elems);
+    int32_t (*builder_adopt_tensor)(xi_pack_builder b, const char* key,
+                                    int32_t w, int32_t h, int32_t c,
+                                    int32_t dtype, xi_image_handle handle);
+    int32_t (*builder_add_blob)(xi_pack_builder b, const char* key,
+                                int32_t type_id, const void* data, int32_t len);
+    int32_t (*builder_adopt_bin)(xi_pack_builder b, const char* key,
+                                 int32_t type_id, xi_image_handle handle);
+
+    /* accessors (consume a sealed pack) */
+    int32_t (*get_tensor)(xi_pack_handle f, const char* key, xi_pack_tensor* out);
+    int32_t (*get_blob)(xi_pack_handle f, const char* key,
+                        int32_t* type_id, const void** ptr, int32_t* len);
+    int32_t (*type_id_of)(xi_pack_handle f, const char* key);   /* -1 if absent */
+
+    /* ordinal-explicit iteration (insertion order, like v1 key_at) */
+    int32_t (*type_id_at)(xi_pack_handle f, int32_t i);          /* -1 if OOB */
+    int32_t (*entry_at)(xi_pack_handle f, int32_t i, xi_pack_entry* out);
+} xi_pack_v3;
+```
+
+What it adds over v1 (and why v1's shape could not express it):
+
+- **Tensor entries** (`XI_PACK_TAG_TENSOR`) — dtype-aware typed element
+  buffers. `builder_add_tensor` copies `w*h*c` elements of `dtype`
+  (`XI_PACK_DTYPE_U8/U16/I32/F32/F64` — values match `xi::PackDtype`, frozen)
+  into a pack-owned pool buffer; `get_tensor` fills an `xi_pack_tensor`
+  (dims + dtype + `elem_size` + zero-copy `data`/`length` + the **backing
+  pool `handle`**, borrowed/not addref'd). `builder_adopt_tensor` closes the
+  zero-copy chain: adopt the handle a `get_tensor` view carries into the next
+  pack (the pack addrefs — co-ownership), refused if the pool buffer is
+  smaller than the claimed `w*h*c*elem_size`.
+- **User-typed blobs** — a Bin entry carrying a producer-declared `type_id`
+  (`>= XI_PACK_TYPE_USER_BASE`, 0x100; the range below is reserved — a Tensor
+  entry's `type_id` is its dtype). `builder_add_blob` writes one;
+  `get_blob` reads **any** Bin entry together with its `type_id` (0 = plain
+  bin), so a v3 consumer recovers the payload contract that v1's `get_bin`
+  flattened to anonymous bytes. v1 `get_bin` still resolves a blob's bytes
+  (compat — it just cannot see the type).
+- **`builder_adopt_bin`** — zero-copy adoption of a pooled **byte** buffer
+  with the honest `BIN` tag (`type_id` 0 or a user type). Historically v1's
+  only zero-copy adopt was `adopt_image`, so byte payloads had to masquerade
+  as Image entries with fake dims. The entry's length is the pool buffer's
+  full byte size.
+- **Ordinal-explicit iteration** — `type_id_at(i)` and `entry_at(i)` (the
+  whole directory row — borrowed non-NUL-terminated key span, `tag`,
+  `type_id`, `external` storage flag — in **one** call per index; same
+  insertion order as v1 `key_at`/`tag_at`).
+
+Contract points: every getter is fail-closed like v1 (1 = success, 0 = absent
+key / wrong tag / dead handle); every builder verb **returns** 1 = entry
+added, 0 = refused (bad shape, unknown `dtype`, reserved `type_id`, dead
+builder/handle, pool exhausted) — nothing is added on 0, so a refused typed
+payload can never silently ride as something else. Borrowed spans follow v1's
+rule: valid until the caller's last `release` of the pack handle. Field order
+frozen forever; a change ships as the next version.
 
 ### 6.2 The capability plane — `xi.cap@1` / `xi.cap.provider@1`
 

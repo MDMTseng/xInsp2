@@ -171,7 +171,11 @@ private:
 class PackOut {
 public:
     PackOut() = default;
-    explicit PackOut(const xi_pack_v1* fi) : fi_(fi) {
+    // fi3 (the xi.pack@3 slab supplement) is OPTIONAL: null on an older host —
+    // the v1 adders below work regardless; the v3 adders (tensor/blob/
+    // adopt_bin) then fail closed (return false, nothing added).
+    explicit PackOut(const xi_pack_v1* fi, const xi_pack_v3* fi3 = nullptr)
+        : fi_(fi), fi3_(fi3) {
         if (fi_) b_ = fi_->builder_new();
     }
     ~PackOut() { if (fi_ && b_ && !sealed_) fi_->builder_abandon(b_); }
@@ -218,6 +222,47 @@ public:
         if (valid()) { touched_ = true; fi_->builder_add_mp(b_, k, d, (int32_t)n); }
         return *this;
     }
+
+    // ---- xi.pack@3 adders (pack-v3). Unlike the chainable v1 adders these
+    // return bool — the v3 verbs are refusable (bad dtype/type_id, pool
+    // exhausted, no @3 on this host), and a typed payload silently missing
+    // from the output would poison the consumer's contract. false = nothing
+    // was added.
+    // Typed tensor entry: copies w*h*c elements of `dtype` into a pack-owned
+    // pool buffer (XI_PACK_DTYPE_*).
+    bool tensor(const char* k, int32_t w, int32_t h, int32_t c,
+                int32_t dtype, const void* elems) {
+        if (!valid() || !fi3_ || !fi3_->builder_add_tensor) return false;
+        if (fi3_->builder_add_tensor(b_, k, w, h, c, dtype, elems) != 1) return false;
+        touched_ = true;
+        return true;
+    }
+    // Zero-copy tensor adoption of an already-pooled element buffer (e.g. the
+    // handle a PackIn::tensor() view carries) — the pack addrefs it.
+    bool adopt_tensor(const char* k, int32_t w, int32_t h, int32_t c,
+                      int32_t dtype, xi_image_handle handle) {
+        if (!valid() || !fi3_ || !fi3_->builder_adopt_tensor) return false;
+        if (fi3_->builder_adopt_tensor(b_, k, w, h, c, dtype, handle) != 1) return false;
+        touched_ = true;
+        return true;
+    }
+    // User-typed blob: a Bin entry carrying the producer's declared type_id
+    // (>= XI_PACK_TYPE_USER_BASE) — a private payload contract the host never
+    // interprets. Read back via PackIn::blob().
+    bool blob(const char* k, int32_t type_id, const void* d, size_t n) {
+        if (!valid() || !fi3_ || !fi3_->builder_add_blob) return false;
+        if (fi3_->builder_add_blob(b_, k, type_id, d, (int32_t)n) != 1) return false;
+        touched_ = true;
+        return true;
+    }
+    // Zero-copy Bin adoption of an already-pooled byte buffer (honest Bin tag
+    // — no more Image-dims masquerade). type_id 0 = plain bin.
+    bool adopt_bin(const char* k, int32_t type_id, xi_image_handle handle) {
+        if (!valid() || !fi3_ || !fi3_->builder_adopt_bin) return false;
+        if (fi3_->builder_adopt_bin(b_, k, type_id, handle) != 1) return false;
+        touched_ = true;
+        return true;
+    }
     // Pack-shaped fail-loud: stamp the reason codes and return. The pack is
     // still a valid, sealed pack the caller routes to a verdict.
     PackOut& fault(const char* code, const char* key, std::string_view detail = {}) {
@@ -260,16 +305,19 @@ public:
     }
 
     const xi_pack_v1* iface() const { return fi_; }
+    const xi_pack_v3* iface3() const { return fi3_; }
 
 private:
     void reset_() { if (fi_ && b_ && !sealed_) fi_->builder_abandon(b_); }
     void move_from(PackOut&& o) noexcept {
-        fi_ = o.fi_; b_ = o.b_; sealed_ = o.sealed_;
+        fi_ = o.fi_; fi3_ = o.fi3_; b_ = o.b_; sealed_ = o.sealed_;
         src_stamped_ = o.src_stamped_; prov_stamped_ = o.prov_stamped_;
         touched_ = o.touched_;
-        o.fi_ = nullptr; o.b_ = XI_PACK_BUILDER_NULL; o.sealed_ = true;
+        o.fi_ = nullptr; o.fi3_ = nullptr;
+        o.b_ = XI_PACK_BUILDER_NULL; o.sealed_ = true;
     }
-    const xi_pack_v1* fi_ = nullptr;
+    const xi_pack_v1* fi_  = nullptr;
+    const xi_pack_v3* fi3_ = nullptr;   // xi.pack@3 supplement; null pre-@3
     xi_pack_builder   b_  = XI_PACK_BUILDER_NULL;
     bool               sealed_ = false;
     bool               src_stamped_  = false;   // plugin called src() explicitly
@@ -281,7 +329,11 @@ private:
 // NOT own the handle (the host does); borrowed spans are valid for the call.
 class PackIn {
 public:
-    PackIn(const xi_pack_v1* fi, xi_pack_handle h) : fi_(fi), h_(h) {}
+    // fi3 (the xi.pack@3 slab supplement) is OPTIONAL: null on an older host —
+    // every v1 reader works regardless; the v3 readers (tensor/blob/type_id_*/
+    // entry_at) then report absence.
+    PackIn(const xi_pack_v1* fi, xi_pack_handle h, const xi_pack_v3* fi3 = nullptr)
+        : fi_(fi), h_(h), fi3_(fi3) {}
 
     bool valid() const { return fi_ && h_ != XI_PACK_NULL; }
     xi_pack_handle handle() const { return h_; }
@@ -292,7 +344,7 @@ public:
     // Generic index walk — the count()+key_at()+tag_at() primitives a SINK
     // (expose, record_save) enumerates a sealed pack with WITHOUT any producer
     // knowledge (doc 07 §2 self-description). key_at returns a borrowed,
-    // NON-nul-terminated view into the pack arena, valid until the host releases
+    // NON-nul-terminated view into the pack slab, valid until the host releases
     // the handle. tag_at is an XI_PACK_TAG_* value (-1 if out of range).
     std::optional<std::string_view> key_at(int i) const {
         if (!valid()) return std::nullopt;
@@ -304,7 +356,7 @@ public:
     int tag_at(int i) const { return valid() ? fi_->tag_at(h_, i) : -1; }
 
     // Walk every entry in insertion order as (key, XI_PACK_TAG_* tag) — the
-    // generic producer-agnostic path. The key is a borrowed arena view.
+    // generic producer-agnostic path. The key is a borrowed slab view.
     template <class Fn>
     void for_each(Fn&& fn) const {
         int n = count();
@@ -347,7 +399,7 @@ public:
         if (valid() && fi_->get_image(h_, k, &img)) return img;
         return std::nullopt;
     }
-    // Raw binary entry bytes — the host resolves inline-arena vs pool-buffer
+    // Raw binary entry bytes — the host resolves inline-slab vs pool-buffer
     // storage to one borrowed span (D1 storage duality). Valid for the call.
     std::optional<std::pair<const uint8_t*, int32_t>> bin(const char* k) const {
         const void* p; int32_t n;
@@ -363,6 +415,48 @@ public:
         return std::nullopt;
     }
 
+    // ---- xi.pack@3 readers (pack-v3). nullopt/-1 on absence, tag mismatch,
+    // or a host without the @3 supplement.
+    // Typed tensor view: dims + XI_PACK_DTYPE_* + zero-copy element bytes +
+    // the backing pool handle (borrowed — adopt it via PackOut::adopt_tensor
+    // for a zero-copy chain).
+    std::optional<xi_pack_tensor> tensor(const char* k) const {
+        xi_pack_tensor t{};
+        if (valid() && fi3_ && fi3_->get_tensor && fi3_->get_tensor(h_, k, &t))
+            return t;
+        return std::nullopt;
+    }
+    // User-typed blob: any Bin entry together with its type_id (0 = plain bin,
+    // >= XI_PACK_TYPE_USER_BASE = the producer's declared payload type).
+    struct Blob {
+        int32_t        type_id = 0;
+        const uint8_t* data    = nullptr;
+        int32_t        len     = 0;
+    };
+    std::optional<Blob> blob(const char* k) const {
+        if (!valid() || !fi3_ || !fi3_->get_blob) return std::nullopt;
+        Blob b;
+        const void* p = nullptr;
+        if (fi3_->get_blob(h_, k, &b.type_id, &p, &b.len) != 1) return std::nullopt;
+        b.data = reinterpret_cast<const uint8_t*>(p);
+        return b;
+    }
+    // type_id by key / by ordinal (-1 if absent / OOB / no @3).
+    int32_t type_id_of(const char* k) const {
+        return (valid() && fi3_ && fi3_->type_id_of) ? fi3_->type_id_of(h_, k) : -1;
+    }
+    int32_t type_id_at(int i) const {
+        return (valid() && fi3_ && fi3_->type_id_at) ? fi3_->type_id_at(h_, i) : -1;
+    }
+    // The whole i-th directory row in ONE call (key + tag + type_id + storage)
+    // — the v3 walk primitive; insertion order, exactly like key_at/tag_at.
+    std::optional<xi_pack_entry> entry_at(int i) const {
+        xi_pack_entry e{};
+        if (valid() && fi3_ && fi3_->entry_at && fi3_->entry_at(h_, i, &e))
+            return e;
+        return std::nullopt;
+    }
+
     // Fail-loud helpers (the PackOut::fault convention, doc 15).
     bool is_fault() const { return has(pack_contract::kFault); }
     std::optional<std::string_view> fault_code() const { return str(pack_contract::kFault); }
@@ -373,10 +467,12 @@ public:
     std::optional<std::string_view> prov() const { return str(pack_contract::kProv); }
 
     const xi_pack_v1* iface() const { return fi_; }
+    const xi_pack_v3* iface3() const { return fi3_; }
 
 private:
     const xi_pack_v1* fi_;
     xi_pack_handle    h_;
+    const xi_pack_v3* fi3_ = nullptr;   // xi.pack@3 supplement; null pre-@3
 };
 
 // --- Plugin base class ---
@@ -502,8 +598,23 @@ public:
         }
         return pack_iface_;
     }
-    // Start building an output/emit pack (invalid if the host has no pack plane).
-    PackOut new_pack() const { return PackOut(pack_iface()); }
+    // Resolve the xi.pack@3 slab supplement ONCE (cached) — tensor entries,
+    // user-typed blobs, adopt_bin, ordinal type_id/entry iteration. Null on a
+    // host predating @3; the v1 surface keeps working either way (PackIn/
+    // PackOut v3 verbs fail closed on null).
+    const xi_pack_v3* pack3_iface() const {
+        if (!pack3_resolved_) {
+            pack3_resolved_ = true;
+            if (host_ && host_->get_interface)
+                pack3_iface_ = static_cast<const xi_pack_v3*>(
+                    host_->get_interface("xi.pack", 3));
+        }
+        return pack3_iface_;
+    }
+    // Start building an output/emit pack (invalid if the host has no pack
+    // plane). Carries the @3 supplement when the host publishes it, so
+    // out.tensor()/blob()/adopt_bin() work out of the box.
+    PackOut new_pack() const { return PackOut(pack_iface(), pack3_iface()); }
 
     // Source side: seal + emit a pack to host dispatch. Consumes `out`. The host
     // takes its own ref for the async event, so we drop ours right after. No-op
@@ -536,8 +647,8 @@ public:
     xi_pack_handle pack_door_abi(xi_pack_handle in) {
         const xi_pack_v1* fi = pack_iface();
         if (!fi) return XI_PACK_NULL;
-        PackIn  view(fi, in);
-        PackOut out(fi);
+        PackIn  view(fi, in, pack3_iface());
+        PackOut out(fi, pack3_iface());
         process(view, out);
         // U1 provenance (doc 15): every NON-EMPTY door output — result or
         // plugin-minted $fault pack alike — carries producer identity ($src =
@@ -697,6 +808,8 @@ private:
     mutable const xi_log_v1*     log_              = nullptr;
     mutable bool                 pack_resolved_   = false;
     mutable const xi_pack_v1*   pack_iface_            = nullptr;   // xi.pack@1 (wave-2)
+    mutable bool                 pack3_resolved_  = false;
+    mutable const xi_pack_v3*   pack3_iface_           = nullptr;   // xi.pack@3 (pack-v3)
 };
 
 

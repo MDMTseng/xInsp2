@@ -29,9 +29,9 @@
 //   }
 //
 // WHY A DOOR, NOT THE C++ PackBuilder DIRECTLY: a script is a separate
-// JIT-compiled DLL. The Pack container (xi_pack.hpp) owns an arena + pool
+// JIT-compiled DLL. The Pack container (xi_pack.hpp) owns a slab + pool
 // handles minted host-side, and its inline singletons (PackRegistry,
-// pack_pool, the per-thread ArenaPool) are PER-DLL — a script-instantiated
+// pack_pool, the per-thread SlabPool) are PER-DLL — a script-instantiated
 // PackBuilder would build into the WRONG pool/registry and its pack could
 // never cross back to the host. So the builder lives host-side behind the
 // process-stable xi_pack_v1 vtable (the exact same door plugins build
@@ -69,7 +69,7 @@
 // LIFETIME: seal() consumes the builder (the host builder id is dead after,
 // further add_* return false). The returned ScriptPack's keepalive owns the
 // seal's refcount-1: the last ScriptPack copy to drop releases the host pack,
-// which frees its arena and pool handles. A builder abandoned without seal()
+// which frees its slab and pool handles. A builder abandoned without seal()
 // (scope exit, early return, exception) tells the host to drop the
 // half-built pack — no leak (xi_pack_v1.builder_abandon).
 //
@@ -94,17 +94,21 @@ public:
         if (!host || !host->get_interface) return;
         fi_ = static_cast<const xi_pack_v1*>(host->get_interface("xi.pack", 1));
         if (!fi_ || !fi_->builder_new) { fi_ = nullptr; return; }
+        // The xi.pack@3 slab supplement (tensor / user-typed blob adders).
+        // OPTIONAL: null on a host predating @3 — the v1 adders work
+        // regardless; add_tensor/add_blob then fail closed (return false).
+        fi3_ = static_cast<const xi_pack_v3*>(host->get_interface("xi.pack", 3));
         b_ = fi_->builder_new();
     }
 
     // Move-only (like the host PackBuilder): exactly one owner of the
     // host-side builder id, so scope exit abandons it exactly once.
     ScriptPackBuilder(ScriptPackBuilder&& o) noexcept
-        : fi_(o.fi_), b_(o.b_) { o.b_ = XI_PACK_BUILDER_NULL; }
+        : fi_(o.fi_), fi3_(o.fi3_), b_(o.b_) { o.b_ = XI_PACK_BUILDER_NULL; }
     ScriptPackBuilder& operator=(ScriptPackBuilder&& o) noexcept {
         if (this != &o) {
             abandon();
-            fi_ = o.fi_; b_ = o.b_;
+            fi_ = o.fi_; fi3_ = o.fi3_; b_ = o.b_;
             o.b_ = XI_PACK_BUILDER_NULL;
         }
         return *this;
@@ -120,7 +124,7 @@ public:
 
     // ---- typed adds (canonical encoding happens host-side) -----------------
     // Every add returns true iff the entry was accepted. Keys are copied by
-    // the host (arena-interned), so a temporary key string is fine.
+    // the host (slab-interned), so a temporary key string is fine.
 
     bool add_i64(const char* key, int64_t v) {
         if (!valid() || !key || !fi_->builder_add_i64) return false;
@@ -182,6 +186,27 @@ public:
         return add_image(key, img.width, img.height, img.channels, img.read());
     }
 
+    // ---- xi.pack@3 typed adds (pack-v3). false on a host without the @3
+    // supplement, bad args, or pool exhaustion — nothing is added on false,
+    // exactly the fail-closed discipline of every add above.
+    // Typed tensor entry: w*h*c elements of XI_PACK_DTYPE_* are COPIED into a
+    // fresh host pool buffer (the same copy-only discipline as add_image — a
+    // script cannot adopt pool handles).
+    bool add_tensor(const char* key, int32_t w, int32_t h, int32_t c,
+                    int32_t dtype, const void* elems) {
+        if (!valid() || !key || !fi3_ || !fi3_->builder_add_tensor) return false;
+        if (w <= 0 || h <= 0 || c <= 0 || !elems) return false;
+        return fi3_->builder_add_tensor(b_, key, w, h, c, dtype, elems) == 1;
+    }
+    // User-typed blob: a Bin entry carrying a script-declared type_id
+    // (>= XI_PACK_TYPE_USER_BASE) — a private producer<->consumer payload
+    // contract; read back via ScriptPack::get_blob / PackIn::blob.
+    bool add_blob(const char* key, int32_t type_id, const void* data, size_t n) {
+        if (!valid() || !key || !fi3_ || !fi3_->builder_add_blob) return false;
+        if (!data || n == 0) return false;
+        return fi3_->builder_add_blob(b_, key, type_id, data, (int32_t)n) == 1;
+    }
+
     // Nested canonical msgpack value (ONE complete scalar / str / bin / map /
     // array subtree). THE CANONICAL GATE: the bytes are validated AND
     // normalized through xi::mp::canonicalize with the reject-all ext policy
@@ -230,7 +255,7 @@ public:
     // as a first-class ScriptPack — the SAME type t.pack() yields, so a
     // script-built pack flows anywhere a trigger pack does. The ScriptPack's
     // keepalive owns the seal ref (host refcount 1): copies share it, and the
-    // last copy to drop releases the host pack (arena freed, pool handles
+    // last copy to drop releases the host pack (slab freed, pool handles
     // released). Empty ScriptPack on an invalid/already-sealed builder.
     ScriptPack seal() {
         if (!valid() || !fi_->builder_seal) return ScriptPack{};
@@ -261,7 +286,8 @@ private:
         }
     };
 
-    const xi_pack_v1* fi_ = nullptr;
+    const xi_pack_v1* fi_  = nullptr;
+    const xi_pack_v3* fi3_ = nullptr;   // xi.pack@3 supplement; null pre-@3
     xi_pack_builder   b_  = XI_PACK_BUILDER_NULL;
 };
 
