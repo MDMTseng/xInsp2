@@ -200,8 +200,14 @@ static xi::mp::Bytes region_mp(int64_t seq) {
 }
 
 // (b) PACK container (xi_pack.hpp) — PackBuilder + seal + read M (O(1) sealed
-//     accessors) + drop. The task's named "PackBuilder+seal+read+drop": arena
-//     bump BUILD (C1), sealed O(1) READ (C3), one-shot FREE (C2). No hop.
+//     accessors) + drop. The task's named "PackBuilder+seal+read+drop": bump
+//     BUILD (C1), sealed O(1) READ (C3), one-shot FREE (C2). No hop.
+//     METRIC MEANING CHANGE (slab migration): the container now stores scalars
+//     RAW in one slab (build no longer msgpack-encodes scalars; seal adds a
+//     hash-sort + one slab write; reads are raw 8-byte loads via binary
+//     search). GATE frame_micro_framebuilder_ns therefore measures the slab
+//     build/read/free cost — compare against pre-migration baselines with that
+//     in mind. The mp-plane hop metric below is unchanged (pure xi_mp).
 static double micro_frame_builder() {
     return best_us([&] {
         xi::PackBuilder b;

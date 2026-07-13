@@ -347,7 +347,13 @@ enum {
     XI_PACK_TAG_BIN   = 3,
     XI_PACK_TAG_IMAGE = 4,
     XI_PACK_TAG_MP    = 5,
-    XI_PACK_TAG_BOOL  = 6   /* appended (pack-plane hardening) — earlier values frozen */
+    XI_PACK_TAG_BOOL  = 6,  /* appended (pack-plane hardening) — earlier values frozen */
+    XI_PACK_TAG_TENSOR = 7  /* appended (pack-v3 slab migration): typed element
+                             * buffer — logical shape {w,h,c} + dtype (see
+                             * xi::PackDtype). No xi_pack_v1 accessor exists for
+                             * it; a v1-era generic walker sees the tag value
+                             * and must skip the entry (planned xi.pack@3 door
+                             * surfaces it). */
 };
 
 /* A borrowed image view returned by xi_pack_v1.get_image — dimensions +

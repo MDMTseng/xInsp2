@@ -123,10 +123,17 @@ static void test_bool_entry() {
     // Fail-closed BOTH directions: no silent bool<->i64 coercion.
     CHECK(!f.get_i64("pass").has_value(), "bool entry refuses an i64 read");
     CHECK(!f.get_bool("one").has_value(), "i64 entry refuses a bool read");
-    // The stored small-plane bytes ARE the canonical msgpack bool — the single
-    // 0xc2/0xc3 byte a generic dumper splices to the wire verbatim (memory==wire).
-    CHECK(f.raw_at(0).size() == 1 && f.raw_at(0)[0] == 0xc3, "canonical true byte 0xc3");
-    CHECK(f.raw_at(1).size() == 1 && f.raw_at(1)[0] == 0xc2, "canonical false byte 0xc2");
+    // SLAB representation: raw_at is the RAW stored byte (0/1) now; the wire
+    // bytes come from the canonical walk. Check both planes: raw storage and
+    // the canonical emission a generic dumper splices to the wire (0xc2/0xc3).
+    CHECK(f.raw_at(0).size() == 1 && f.raw_at(0)[0] == 1, "raw true byte 1");
+    CHECK(f.raw_at(1).size() == 1 && f.raw_at(1)[0] == 0, "raw false byte 0");
+    {
+        xi::mp::Writer w;
+        CHECK(f.canonical_value(0, w) && f.canonical_value(1, w), "canonical_value emits bools");
+        CHECK(w.size() == 2 && w.bytes()[0] == 0xc3 && w.bytes()[1] == 0xc2,
+              "canonical walk emits 0xc3/0xc2 (wire parity)");
+    }
     int bools = 0;
     f.for_each([&](std::string_view, PackTag t) { if (t == PackTag::Bool) ++bools; });
     CHECK(bools == 2, "generic walk reports the Bool tag");
@@ -307,10 +314,138 @@ static void test_bin_pool_exhaustion_no_null_span() {
     for (xi_image_handle h : hog) xi::ImagePool::instance().release(h);
 }
 
+// ------------------------------------------------------------------
+// Canonical-walk parity: the walk API (canonical_value) must emit, per entry,
+// the exact bytes xi::mp::Writer produces for the same value — the wire/at-rest
+// container is unchanged by the slab migration, and this equality is what the
+// record/expose serialization sites port onto. Includes ruling-1 NaN flatten.
+// ------------------------------------------------------------------
+static void test_canonical_walk_parity() {
+    const double nan_payload = []{
+        uint64_t bits = 0xfff800000000beefull;   // sign+payload NaN, must flatten
+        double d; std::memcpy(&d, &bits, sizeof d); return d;
+    }();
+    uint8_t bin[3] = {9, 8, 7};
+    xi::mp::Writer nested;
+    nested.map(1); nested.key("x"); nested.int_(4);
+
+    PackBuilder b;
+    b.add_i64("i", -12345);
+    b.add_f64("f", 2.75);
+    b.add_f64("nan", nan_payload);
+    b.add_bool("t", true);
+    b.add_str("s", "walkme");
+    b.add_bin("bin", bin, sizeof bin);
+    b.add_mp("m", nested.bytes().data(), nested.bytes().size());
+    Pack f = b.seal();
+
+    // The expected wire, built directly with the canonical writer.
+    xi::mp::Writer want;
+    want.int_(-12345);
+    want.float_(2.75);
+    want.float_(nan_payload);      // Writer flattens NaN — the reference emit
+    want.boolean(true);
+    want.str("walkme");
+    want.bin(bin, sizeof bin);
+    want.raw_canonical(nested.bytes().data(), nested.bytes().size());
+
+    xi::mp::Writer got;
+    for (size_t i = 0; i < f.size(); ++i)
+        CHECK(f.canonical_value(i, got), "canonical_value succeeds for every inline tag");
+    CHECK(got.size() == want.size() &&
+          std::memcmp(got.bytes().data(), want.bytes().data(), want.size()) == 0,
+          "canonical walk is byte-identical to xi::mp::Writer (incl. NaN flatten)");
+
+    // get_f64 of the NaN observes the FLATTENED pattern (add-time ruling 1),
+    // matching what the old arena decode returned.
+    uint64_t bits; double d = f.get_f64("nan").value();
+    std::memcpy(&bits, &d, sizeof bits);
+    CHECK(bits == 0x7ff8000000000000ull, "stored NaN is the canonical quiet pattern");
+
+    // Image entries have no single canonical value — the walk refuses them.
+    PackBuilder b2;
+    std::vector<uint8_t> px(4 * 4, 1);
+    b2.add_image("img", 4, 4, 1, px.data());
+    Pack f2 = b2.seal();
+    xi::mp::Writer w2;
+    CHECK(!f2.canonical_value(0, w2) && w2.size() == 0,
+          "canonical_value refuses an image entry, writer untouched");
+}
+
+// ------------------------------------------------------------------
+// The entry-view walk: insertion order, typed detail, extern descriptors.
+// ------------------------------------------------------------------
+static void test_for_each_entry_walk() {
+    const int base = pool_live();
+    std::vector<uint8_t> px(8 * 8 * 3, 5);
+    {
+        PackBuilder b;
+        b.add_i64("first", 1);
+        b.add_image("img", 8, 8, 3, px.data());
+        b.add_str("last", "z");
+        Pack f = b.seal();
+        size_t seen = 0;
+        f.for_each_entry([&](const Pack::EntryView& e) {
+            if (e.ordinal == 0) {
+                CHECK(e.key == "first" && e.tag == PackTag::I64 && !e.external,
+                      "entry 0 is the inline i64");
+                CHECK(e.raw.size() == 8, "raw scalar is the 8-byte value");
+            } else if (e.ordinal == 1) {
+                CHECK(e.key == "img" && e.tag == PackTag::Image && e.external,
+                      "entry 1 is the extern image");
+                CHECK(e.w == 8 && e.h == 8 && e.c == 3 && e.ext_len == 8 * 8 * 3,
+                      "extern descriptor carries the logical shape");
+                CHECK(e.handle != XI_IMAGE_NULL, "extern view exposes the pool handle");
+            } else {
+                CHECK(e.key == "last" && e.tag == PackTag::Str, "entry 2 is the str");
+            }
+            ++seen;
+        });
+        CHECK(seen == 3, "for_each_entry visits every entry in insertion order");
+    }
+    CHECK(pool_live() == base, "walked pack balances the pool on drop");
+}
+
+// ------------------------------------------------------------------
+// Tensor entries (slab-native typed buffers): dtype + logical shape round-trip,
+// element-typed read is dtype-checked, pool balance holds.
+// ------------------------------------------------------------------
+static void test_tensor_entry() {
+    const int base = pool_live();
+    {
+        std::vector<float> elems(6 * 2 * 1);
+        for (size_t i = 0; i < elems.size(); ++i) elems[i] = float(i) * 0.5f;
+        PackBuilder b;
+        CHECK(b.add_tensor("depth", 6, 2, 1, xi::PackDtype::F32, elems.data()),
+              "f32 tensor mints");
+        Pack f = b.seal();
+        CHECK(f.tag_of("depth") == PackTag::Tensor, "tensor entry stores the Tensor tag");
+        CHECK(f.handle_count() == 1, "tensor is pooled");
+
+        auto tv = f.get_tensor("depth");
+        CHECK(tv && tv->width == 6 && tv->height == 2 && tv->channels == 1,
+              "tensor logical shape round-trips");
+        CHECK(tv && tv->dtype == xi::PackDtype::F32 && tv->elem_size == 4,
+              "tensor dtype rides the entry");
+        CHECK(tv && tv->bytes.size() == elems.size() * 4, "tensor byte length");
+
+        auto ft = f.get_tensor_of<float>("depth");
+        CHECK(ft && ft->count == elems.size() && ft->data[3] == 1.5f,
+              "element-typed read yields typed elements");
+        CHECK(!f.get_tensor_of<uint8_t>("depth").has_value(),
+              "wrong-dtype element read is nullopt (fail-closed)");
+        CHECK(!f.get_image("depth").has_value(), "tensor is not readable as image");
+    }
+    CHECK(pool_live() == base, "tensor pack balances the pool on drop");
+}
+
 int main() {
     std::printf("test_xi_pack\n");
     test_lifecycle_and_contract_layer();
     test_bool_entry();
+    test_canonical_walk_parity();
+    test_for_each_entry_walk();
+    test_tensor_entry();
     test_offset_index_at_scale();
     test_seal_semantics();
     test_pooled_handle_balance();

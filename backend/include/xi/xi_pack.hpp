@@ -1,83 +1,106 @@
 #pragma once
 //
-// xi_pack.hpp — the v3 uniform keyed-buffer pack container (polaris2 wave-1).
+// xi_pack.hpp — the v3 uniform keyed-buffer pack container, SLAB representation
+// (pack-v3 migration; design C, validated by backend/include/xi/proto/
+// xi_pack_c.hpp + bench_pack_c.cpp — the proto stays as the experiment record).
 //
 // A pack is ONE thing:  key(string) -> entry, where an entry is
 // (type tag, const-span bytes). There is no image/metadata split — an image
 // is simply an entry whose tag says "image" and whose pixels live in a pool
 // buffer. See docs/new_gen/07-uniform-keyed-buffer-plane.md for the decision.
 //
-// This header implements the CONTAINER SEMANTICS only:
-//   * Arena     — per-pack bump allocator; owns every small entry's bytes;
-//                 one-shot free at pack end. Its chunks RECYCLE through a
-//                 per-thread freelist (ArenaPool), so a steady stream of packs
-//                 on one lane's thread stops heap-allocating a fresh chunk per
-//                 pack — the ImagePool discipline in miniature (see below).
-//   * Builder   — pre-seal, insertion-ordered entry table; the only way to
-//                 add entries. A pack under construction is never shareable.
-//   * seal()    — flips the pack immutable and (for the dynamic, string-keyed
-//                 path) builds the key index; only a sealed Pack crosses to
-//                 consumers.
-//   * Pack     — an immutable, single-owner value: borrowed const views out,
-//                 arena freed + pool handles released on destruction. Drop-on-
-//                 crash is EXACTLY destruction (no reconciliation, no COW).
+// REPRESENTATION (what changed from the Arena+msgpack-entry container):
 //
-// THE CONTAINER (doc 07 §profile-1):
+//   One sealed pack = ONE contiguous SLAB + N pool-backed EXTERN buffers.
 //
-//   * Pack / PackBuilder — the DYNAMIC, string-keyed path, for undeclared or
-//     runtime keys (generic walkers, ad-hoc producers, ingress-canonicalized
-//     foreign maps). Its index is HYBRID by measurement: a small pack (the hot
-//     path) is a linear memcmp scan over the contiguous entry table — which
-//     beats a hash map for a handful of keys and allocates NO index nodes — and
-//     only a large pack builds an unordered_map to keep lookups O(1) at scale.
+//   Slab layout (all offsets slab-relative):
+//     [ PackHeader 64B ]
+//     [ DirEntry * n, 32B each, sorted by (key_hash, key bytes, ordinal) ]
+//     [ order table: uint32_t * n — order[ordinal] = directory index ]
+//     [ payload: keys + entry bytes, bump-packed, per-entry aligned ]
 //
-// The msgpack codec is xi_mp.hpp — the ONE canonical-encode truth. This file's
-// `pack_mp_detail` is not a second encoder: it is a set of thin arena-side
-// adapters over xi_mp.hpp's canonical forms (the swap the old "SWAP TARGET"
-// banner promised, done in place so the arena fast path survives). The Pack
-// API above it is unchanged.
+//   * Lookup is a binary search on the hash-sorted directory; an equal-hash
+//     run is memcmp-verified against the actual key bytes (collisions are
+//     handled, never assumed away). No side index, no hash map, no per-entry
+//     heap nodes — small AND large packs share one O(log n) path.
+//   * INSERTION ORDER IS FIRST-CLASS: every DirEntry carries its insertion
+//     ordinal and the slab carries the ordinal->dir-index order table, so
+//     key_at/tag_at/for_each present exactly the order entries were added —
+//     the contract the expose/record walkers depend on. Hash order is an
+//     internal detail nothing outside find() sees.
+//   * INLINE entries store scalars RAW (i64/f64 = 8 aligned bytes: a read is
+//     one pointer add + one 8-byte load, zero msgpack decode; bool = 1 byte
+//     0/1), strings/small bins as raw bytes (length lives in the DirEntry),
+//     and nested msgpack (Mp) as its canonical bytes verbatim.
+//   * EXTERN entries (Image, Tensor, Bin >= kPackLargeThreshold) live in the
+//     production ImagePool exactly as before — owner-neutral mint through
+//     pack_pool below, pack co-owns via the pool refcount, frozen image ABI
+//     untouched. The slab payload holds a 24-byte ExtRecord {handle, logical
+//     shape w/h/c, byte length} per EXTERN entry; the DirEntry points at it.
+//   * The slab buffer RECYCLES through the same per-thread freelist the old
+//     arena chunks used (pack_detail::SlabPool — the previous ArenaPool with
+//     the honest name), and the builder's staging vectors recycle through a
+//     per-thread scratch pool, so a steady stream of packs on one lane's
+//     thread is heap-free after warmup — the ImagePool discipline preserved.
 //
-// Large payloads (images, big binaries) do NOT live in the arena: they are
-// raw pool buffers referenced by a handle. The handle mechanics are the
-// EXISTING lock-free refcounted ImagePool (xi_image_pool.hpp), reached here
-// through a thin TYPELESS facade (`pack_pool`, task 1e). Handles are minted
-// ONLY by this pack layer — the privileged ext path of doc 07's ingress rule.
+// WIRE / AT-REST FORMAT: UNCHANGED. The canonical msgpack container (doc 07
+// max-width profile via xi_mp.hpp) remains the serialization truth for this
+// migration; scalars are raw ONLY in memory. The walk API below
+// (for_each_entry / canonical_value) re-emits each entry's canonical bytes —
+// through xi::mp::Writer, the ONE canonical-encode truth, so ruling 1's NaN
+// flatten and the max-width markers are byte-identical to what the old arena
+// stored. (Slab-verbatim wire, as the prototype's serialize() showed, is a
+// follow-up candidate, NOT this migration.)
+//
+// SEMANTICS KEPT: Pack is move-only, sealed-immutable, single-owner; borrowed
+// views (get_str/get_bin/get_mp/raw_at spans, key_at string_views) are valid
+// for the life of the owning Pack — the slab is a stable heap block, so views
+// survive a Pack move, exactly like the old arena chunks. Drop-on-crash is
+// EXACTLY destruction: the directory walk releases each pool handle once and
+// the slab returns to the recycle pool; a moved-from Pack owns nothing.
+//
+// API DELTAS from the arena representation (recorded for downstream agents):
+//   * raw_at(i) now returns the entry's RAW stored payload (raw 8-byte scalar,
+//     raw string bytes, canonical msgpack only for Mp) instead of "canonical
+//     msgpack bytes for every inline entry". Memory != wire for scalars now;
+//     use canonical_value(i, writer) to get the wire bytes (byte-identical to
+//     what raw_at used to return).
+//   * arena_bytes() is gone; slab_bytes() reports the slab footprint.
+//   * NEW: first-class typed tensors — PackTag::Tensor entries carry a dtype
+//     (PackDtype in DirEntry::type_id) + logical shape {w,h,c}; see
+//     add_tensor / get_tensor / get_tensor_of<T>. Images stay the u8 (w,h,c)
+//     entries they always were. DirEntry::type_id is also the future custom-
+//     blob type space (>= kPackTypeUserBase via add_blob).
 //
 
 #include "xi_abi.h"
 #include "xi_image_pool.hpp"
 #include "xi_mp.hpp"
 
-#include <array>
+#include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 namespace xi {
 
 // ===================================================================
-// pack_mp_detail — arena-side adapters over the canonical codec (xi_mp.hpp).
+// pack_mp_detail — adapters over the canonical codec (xi_mp.hpp).
 //
-//   xi::mp::Writer is the ONE canonical-encode truth. The pack path writes
-//   into a bump-arena at fixed offsets rather than a growing vector, so this
-//   namespace adapts rather than duplicates:
-//
-//     * write_i64 / write_f64 route through a reused thread-local Writer and
-//       memcpy its 9 fixed bytes into the arena — every VALUE TRANSFORM is
-//       xi_mp's own code, never a copy of it. In particular ruling 1's NaN
-//       flatten (any NaN -> 0x7ff8000000000000) now applies on this path too;
-//       the old hand-rolled write_f64 stored raw NaN bits, a canonicality bug.
-//     * write_bool / write_str / write_bin have NO value transform — they are
-//       pure header composition (a xi::mp::tag byte + big-endian length) plus
-//       a single memcpy of the payload straight into the arena (no double
-//       copy through a vector), byte-identical to Writer::boolean/str/bin.
+//   xi::mp::Writer is the ONE canonical-encode truth. Scalars now live RAW in
+//   the slab, so these fixed-offset forms are no longer the pack's storage
+//   encoding — they are the WIRE forms: the canonical walk (canonical_value)
+//   emits through xi::mp::Writer itself, and these readers/writers remain for
+//   the fixed-offset consumers (bench_pack's offset-table reads, the XEX1
+//   parse/dump helpers) that decode canonical bytes at known offsets.
 //
 //   Fixed-width forms only (int64 0xd3, float64 0xcb, str32 0xdb, bin32 0xc6)
 //   — the canonical max-width profile of doc 07. Everything is 100% standard
@@ -107,9 +130,7 @@ inline size_t str_size(size_t n) { return 5 + n; }  // 0xdb + 4 len + bytes
 inline size_t bin_size(size_t n) { return 5 + n; }  // 0xc6 + 4 len + bytes
 
 // The scalar encode scratch: one Writer per thread, CLEARED (capacity kept)
-// per call, so after the first scalar on a thread this allocates nothing —
-// the arena fast path stays heap-free. Same thread-local discipline as the
-// ArenaPool below (a pack is built within one lane worker's thread).
+// per call, so after the first scalar on a thread this allocates nothing.
 inline xi::mp::Writer& scalar_writer() {
     thread_local xi::mp::Writer w;
     w.clear();
@@ -125,7 +146,7 @@ inline void write_i64(uint8_t* out, int64_t v) {
 inline void write_f64(uint8_t* out, double v) {
     xi::mp::Writer& w = scalar_writer();
     w.float_(v);                            // canonical float64 (0xcb) — flattens
-    assert(w.size() == kF64Size);           // every NaN per ruling 1 (bug fix)
+    assert(w.size() == kF64Size);           // every NaN per ruling 1
     std::memcpy(out, w.bytes().data(), kF64Size);
 }
 inline void write_bool(uint8_t* out, bool v) {
@@ -142,18 +163,15 @@ inline void write_bin(uint8_t* out, const void* data, size_t n) {
     if (n) std::memcpy(out + 5, data, n);
 }
 
-// Readers stay LOCAL by design: these decode TRUSTED bytes the pack itself
-// wrote (canonical by construction), at a known fixed offset, on the C3 fast
-// read path — assert-only tag checks, zero validation cost, zero-copy views.
-// xi::mp::Reader is the wrong shape for that job (a bounded VALIDATING pull
-// decoder with an Element out-param, built for foreign input); there is no
-// shared fixed-offset read form in xi_mp.hpp to fold these into.
+// Fixed-offset readers over TRUSTED canonical bytes (assert-only tag checks,
+// zero validation cost, zero-copy views) — the C3 fast read path for callers
+// that hold canonical wire bytes (offset-table reads, the XEX1 loaders).
 inline int64_t read_i64(const uint8_t* p) {
-    assert(p[0] == xi::mp::tag::Int64 && "pack entry is not a canonical int64");
+    assert(p[0] == xi::mp::tag::Int64 && "bytes are not a canonical int64");
     return int64_t(get_u64_be(p + 1));
 }
 inline double read_f64(const uint8_t* p) {
-    assert(p[0] == xi::mp::tag::Float64 && "pack entry is not a canonical float64");
+    assert(p[0] == xi::mp::tag::Float64 && "bytes are not a canonical float64");
     uint64_t bits = get_u64_be(p + 1);
     double v;
     std::memcpy(&v, &bits, sizeof v);
@@ -161,17 +179,16 @@ inline double read_f64(const uint8_t* p) {
 }
 inline bool read_bool(const uint8_t* p) {
     assert((p[0] == xi::mp::tag::False || p[0] == xi::mp::tag::True) &&
-           "pack entry is not a canonical bool");
+           "bytes are not a canonical bool");
     return p[0] == xi::mp::tag::True;
 }
-// str/bin readers return a view straight into the arena payload region.
 inline std::string_view read_str(const uint8_t* p) {
-    assert(p[0] == xi::mp::tag::Str32 && "pack entry is not a canonical str32");
+    assert(p[0] == xi::mp::tag::Str32 && "bytes are not a canonical str32");
     uint32_t n = get_u32_be(p + 1);
     return std::string_view(reinterpret_cast<const char*>(p + 5), n);
 }
 inline std::span<const uint8_t> read_bin(const uint8_t* p) {
-    assert(p[0] == xi::mp::tag::Bin32 && "pack entry is not a canonical bin32");
+    assert(p[0] == xi::mp::tag::Bin32 && "bytes are not a canonical bin32");
     uint32_t n = get_u32_be(p + 1);
     return std::span<const uint8_t>(p + 5, n);
 }
@@ -181,162 +198,73 @@ inline std::span<const uint8_t> read_bin(const uint8_t* p) {
 namespace pack_detail {
 
 // ===================================================================
-// ArenaPool — a per-thread freelist of recyclable arena buffers.
+// SlabPool — a per-thread freelist of recyclable slab buffers.
 //
-// A pack's arena chunks are BORROWED here and RETURNED here when the pack is
-// destroyed, so a steady stream of packs built and dropped on one thread reuses
-// the same handful of buffers instead of hitting the heap allocator per pack
-// (the third cost the wave-1 verdict named: "a fresh heap arena chunk per
-// pack"). It is scoped THREAD-LOCAL — the "per-lane arena cache" the task
-// blesses: a pack is built, sealed, read, and dropped within one lane worker's
-// thread (see doc 07's dispatch), so the recycle needs no lock. A pack that
-// legitimately outlives its producer thread still frees correctly — its buffers
-// simply return to whichever thread's pool drops it, or, if that pool is full,
-// free outright. The retained set is bounded (kMaxFree) so an idle thread does
-// not hoard memory.
+// This IS the old ArenaPool with the honest post-migration name: a sealed
+// pack's slab is BORROWED here at seal() and RETURNED here when the pack is
+// destroyed, so a steady stream of packs built and dropped on one thread
+// reuses the same handful of buffers instead of hitting the heap allocator
+// per pack. Scoped THREAD-LOCAL (the per-lane cache: a pack is built, sealed,
+// read, and dropped within one lane worker's thread), so the recycle needs no
+// lock. A pack that legitimately outlives its producer thread still frees
+// correctly — its slab simply returns to whichever thread's pool drops it,
+// or, if that pool is full, frees outright. Bounded (kMaxFree) so an idle
+// thread does not hoard memory.
+//
+// DECISION (migration ruling 7): the slab source stays this existing
+// per-thread freelist rather than the prototype's magazine+overflow-shelf
+// size-class allocator — the freelist already gives steady-state heap-free
+// builds with best-fit reuse (cap >= need), is the smaller diff, and EXTERN
+// buffers get their size-class recycling from the production ImagePool.
 // ===================================================================
-struct ArenaBuf {
+struct SlabBuf {
     std::unique_ptr<uint8_t[]> data;
     size_t cap = 0;
 };
 
-class ArenaPool {
+class SlabPool {
 public:
     // Hand out a buffer with capacity >= need. Prefer a pooled one (LIFO — the
     // hottest in cache); otherwise allocate one of at least the default chunk.
-    ArenaBuf acquire(size_t need, size_t default_cap) {
+    SlabBuf acquire(size_t need, size_t default_cap) {
         for (size_t i = free_.size(); i-- > 0;) {
             if (free_[i].cap >= need) {
-                ArenaBuf b = std::move(free_[i]);
+                SlabBuf b = std::move(free_[i]);
                 free_[i] = std::move(free_.back());
                 free_.pop_back();
                 return b;
             }
         }
         size_t cap = need > default_cap ? need : default_cap;
-        return ArenaBuf{std::unique_ptr<uint8_t[]>(new uint8_t[cap]), cap};
+        return SlabBuf{std::unique_ptr<uint8_t[]>(new uint8_t[cap]), cap};
     }
     // Take a buffer back for reuse; drop it (free) if the pool is already full.
-    void release(ArenaBuf&& b) {
+    void release(SlabBuf&& b) {
         if (b.data && free_.size() < kMaxFree) free_.push_back(std::move(b));
     }
 
 private:
     static constexpr size_t kMaxFree = 32;
-    std::vector<ArenaBuf> free_;
+    std::vector<SlabBuf> free_;
 };
 
-inline ArenaPool& arena_pool() {
-    thread_local ArenaPool p;
+inline SlabPool& slab_pool() {
+    thread_local SlabPool p;
     return p;
+}
+
+// FNV-1a 64 over the key bytes — the directory sort/search key. Collisions
+// are handled (equal-hash runs are memcmp-verified), never assumed away.
+inline uint64_t hash_key(std::string_view s) {
+    uint64_t h = 1469598103934665603ull;
+    for (char c : s) { h ^= uint8_t(c); h *= 1099511628211ull; }
+    return h;
 }
 
 } // namespace pack_detail
 
 // ===================================================================
-// Arena — per-pack bump allocator (pool-backed chunks, one-shot free).
-//
-// Owns every small entry's bytes AND the interned key strings (dynamic path).
-// Allocation is a pointer bump within the current chunk; growth borrows another
-// chunk from the per-thread ArenaPool. The COMMON case — a pack that fits in
-// one chunk — keeps its chunk INLINE (head_), so a small pack touches the heap
-// allocator zero times (no chunk alloc, no chunk-vector alloc): its buffer came
-// from the recycle pool. Destruction returns every chunk to the pool in one
-// shot (the pack's "arena dies with the pack" discipline). Move-only: moving a
-// pack moves the chunk(s), and because each chunk is a stable heap block, every
-// span/string_view handed out into the arena stays valid across the move.
-// ===================================================================
-class Arena {
-public:
-    Arena() = default;
-    Arena(Arena&& o) noexcept { move_from(std::move(o)); }
-    Arena& operator=(Arena&& o) noexcept {
-        if (this != &o) { recycle(); move_from(std::move(o)); }
-        return *this;
-    }
-    Arena(const Arena&) = delete;
-    Arena& operator=(const Arena&) = delete;
-    ~Arena() { recycle(); }
-
-    uint8_t* alloc(size_t n, size_t align = 8) {
-        if (n == 0) n = 1;  // keep every entry's ptr distinct + dereferenceable
-        if (extra_.empty()) {
-            if (head_.data) {
-                size_t off = align_up(head_used_, align);
-                if (off + n <= head_.cap) {
-                    uint8_t* p = head_.data.get() + off;
-                    head_used_ = off + n;
-                    used_total_ += n;
-                    return p;
-                }
-            } else {
-                head_ = pack_detail::arena_pool().acquire(n, kChunk);
-                head_used_ = n;
-                used_total_ += n;
-                return head_.data.get();
-            }
-        } else {
-            Chunk& c = extra_.back();
-            size_t off = align_up(c.used, align);
-            if (off + n <= c.buf.cap) {
-                uint8_t* p = c.buf.data.get() + off;
-                c.used = off + n;
-                used_total_ += n;
-                return p;
-            }
-        }
-        // Current chunk is full: borrow another from the pool (cap >= n).
-        pack_detail::ArenaBuf b = pack_detail::arena_pool().acquire(n, kChunk);
-        uint8_t* p = b.data.get();
-        extra_.push_back(Chunk{std::move(b), n});
-        used_total_ += n;
-        return p;
-    }
-
-    // Copy s into the arena and return a stable view of the copy.
-    std::string_view intern(std::string_view s) {
-        uint8_t* p = alloc(s.size(), 1);
-        if (!s.empty()) std::memcpy(p, s.data(), s.size());
-        return std::string_view(reinterpret_cast<const char*>(p), s.size());
-    }
-
-    size_t bytes_used()  const { return used_total_; }
-    size_t chunk_count() const { return (head_.data ? 1 : 0) + extra_.size(); }
-
-private:
-    struct Chunk {
-        pack_detail::ArenaBuf buf;
-        size_t used = 0;
-    };
-    static constexpr size_t kChunk = 4096;
-    static size_t align_up(size_t v, size_t a) { return (v + (a - 1)) & ~(a - 1); }
-
-    void recycle() {
-        auto& pool = pack_detail::arena_pool();
-        if (head_.data) pool.release(std::move(head_));
-        for (auto& c : extra_) pool.release(std::move(c.buf));
-        head_ = {};
-        head_used_ = 0;
-        extra_.clear();
-        used_total_ = 0;
-    }
-    void move_from(Arena&& o) noexcept {
-        head_      = std::move(o.head_);
-        head_used_ = o.head_used_;
-        extra_     = std::move(o.extra_);
-        used_total_ = o.used_total_;
-        o.head_used_  = 0;
-        o.used_total_ = 0;
-    }
-
-    pack_detail::ArenaBuf head_;        // inline first chunk (no vector alloc)
-    size_t head_used_ = 0;
-    std::vector<Chunk> extra_;           // spill chunks (only if head overflows)
-    size_t used_total_ = 0;
-};
-
-// ===================================================================
-// pack_pool — thin TYPELESS facade over ImagePool (task 1e).
+// pack_pool — thin TYPELESS facade over ImagePool (unchanged boundary).
 //
 // The pool is image-shaped (create(w,h,ch)); a typeless large buffer of N
 // bytes is just a (N,1,1) entry whose pixels ARE the bytes, and an image is a
@@ -346,27 +274,24 @@ private:
 // allocator". See docs/new_gen/09-bufferpool-audit.md for the reuse verdict.
 //
 // OWNER-NEUTRAL MINT (cross-plane owner-sweep data-loss fix). A buffer minted
-// INTO a pack is governed by the pack alone: the builder/pack `handles_`
-// ledger releases it exactly once on destruction, and a LEAKED pack is
-// reclaimed by the PACK registry's own owner sweep (sweep_packs_for -> pack
-// destroy -> handle release). Tagging it with the producing INSTANCE's
-// ImagePool owner (current_owner()) was therefore redundant AND harmful:
-// PackRegistry::retain bumps only the pack-registry rc, never the pool rc, so
-// the buffer stayed at pool rc 1 — and the instance's image-plane sweep
-// (ImagePool::release_all_for on producer teardown) freed it out from under a
-// co-owner still holding the PACK (cache/buffer_replay retain pack-level).
-// The pack survived (the registry's R1 guard is correct) but get_image then
-// returned an empty span — silent data loss. Minting owner-0 makes the image
-// sweep skip pack buffers (owner != instance) so the pack solely governs
-// them. Standalone mints (host->image_create / xi::Image) keep the instance
-// owner and are still leak-swept; the ADOPT path (adopt_image: pool addref ->
-// rc 2 -> spared+orphaned by the sweep) was already correct. Diagnostic-only
-// side effect: stats_by_owner attributes pack buffers to owner 0.
+// INTO a pack is governed by the pack alone: the pack's directory walk
+// releases it exactly once on destruction, and a LEAKED pack is reclaimed by
+// the PACK registry's own owner sweep (sweep_packs_for -> pack destroy ->
+// handle release). Tagging it with the producing INSTANCE's ImagePool owner
+// (current_owner()) was therefore redundant AND harmful: PackRegistry::retain
+// bumps only the pack-registry rc, never the pool rc, so the buffer stayed at
+// pool rc 1 — and the instance's image-plane sweep (ImagePool::release_all_for
+// on producer teardown) freed it out from under a co-owner still holding the
+// PACK. Minting owner-0 makes the image sweep skip pack buffers so the pack
+// solely governs them. Standalone mints keep the instance owner and are still
+// leak-swept; the ADOPT path (adopt_image: pool addref -> rc 2 -> spared+
+// orphaned by the sweep) was already correct. Diagnostic-only side effect:
+// stats_by_owner attributes pack buffers to owner 0.
 // ===================================================================
 namespace pack_pool {
 
 // Mint a typeless buffer of n bytes and copy src into it. 0 on failure
-// (n==0, over the pool's 1 GiB per-buffer cap, or pool exhausted).
+// (n==0, over the pool's per-buffer cap, or pool exhausted).
 inline xi_image_handle alloc_bytes(const void* src, size_t n) {
     if (n == 0 || n > size_t(INT32_MAX)) return XI_IMAGE_NULL;
     ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
@@ -404,14 +329,34 @@ inline std::span<const uint8_t> view(xi_image_handle h) {
 } // namespace pack_pool
 
 // ===================================================================
-// Entry type tags. The tag is the entry's stored type; the bytes are its
-// canonical-profile encoding (scalars/str/bin inline in the arena) or a
-// pool-buffer reference (Bin above threshold, Image). Unknown/opaque nested
-// msgpack rides as Mp — forward compatibility by construction (doc 07 §2).
+// Entry type tags. The tag is the entry's stored type; the payload is raw
+// in-memory bytes (scalars/str/bin) or canonical msgpack (Mp), or an EXTERN
+// pool-buffer reference (Bin above threshold, Image, Tensor). Unknown/opaque
+// nested msgpack rides as Mp — forward compatibility by construction.
+// Values are FROZEN 1:1 against XI_PACK_TAG_* in xi_abi.h; Tensor is APPENDED
+// (=7) exactly as Bool (=6) was.
 // ===================================================================
-// Bool is APPENDED (=6) so every pre-existing tag keeps its ABI value
-// (XI_PACK_TAG_* in xi_abi.h matches 1:1 — the json_source bool-entry gap fix).
-enum class PackTag : uint8_t { I64, F64, Str, Bin, Image, Mp, Bool };
+enum class PackTag : uint8_t { I64, F64, Str, Bin, Image, Mp, Bool, Tensor };
+
+// Element dtype for Tensor entries — rides in DirEntry::type_id.
+enum class PackDtype : uint16_t { U8 = 0, U16 = 1, I32 = 2, F32 = 3, F64 = 4 };
+inline constexpr uint32_t pack_dtype_elem_size(PackDtype d) {
+    constexpr uint32_t k[] = {1, 2, 4, 4, 8};
+    return k[uint16_t(d)];
+}
+// C++ element type -> PackDtype (drives get_tensor_of<T>). Unsupported T = no
+// specialization = compile error, so a bogus element type can't slip through.
+template <class T> struct pack_dtype_of;                  // intentionally undefined
+template <> struct pack_dtype_of<uint8_t>  { static constexpr PackDtype value = PackDtype::U8;  };
+template <> struct pack_dtype_of<uint16_t> { static constexpr PackDtype value = PackDtype::U16; };
+template <> struct pack_dtype_of<int32_t>  { static constexpr PackDtype value = PackDtype::I32; };
+template <> struct pack_dtype_of<float>    { static constexpr PackDtype value = PackDtype::F32; };
+template <> struct pack_dtype_of<double>   { static constexpr PackDtype value = PackDtype::F64; };
+
+// DirEntry::type_id space: 0 = "the tag speaks for itself"; Tensor entries
+// carry their PackDtype here; values >= kPackTypeUserBase are the caller's
+// typed-blob space (add_blob) for future custom payloads.
+inline constexpr uint16_t kPackTypeUserBase = 0x100;
 
 // A borrowed const view of an image entry: dimensions + a zero-copy span over
 // the pool buffer's pixels. Valid for the lifetime of the owning Pack.
@@ -422,40 +367,141 @@ struct PackImageView {
     std::span<const uint8_t> pixels;
 };
 
-// Bytes at/above this size go to a pool buffer instead of the arena (D1
+// A borrowed const view of a tensor entry: logical shape {w,h,c} + dtype +
+// a zero-copy span over the pool buffer's element bytes.
+struct PackTensorView {
+    int32_t  width    = 0;
+    int32_t  height   = 0;
+    int32_t  channels = 0;
+    PackDtype dtype   = PackDtype::U8;
+    uint32_t elem_size = 1;              // bytes per element
+    std::span<const uint8_t> bytes;      // w*h*c*elem_size raw element bytes
+};
+
+// Element-typed tensor view — get_tensor_of<T>: same buffer, but `data`
+// already carries the element type and `count` is in ELEMENTS.
+template <class T>
+struct PackTensorOf {
+    const T* data = nullptr;
+    size_t   count = 0;                  // elements, not bytes
+    int32_t  width = 0, height = 0, channels = 0;
+    bool ok() const { return data != nullptr; }
+};
+
+// Bytes at/above this size go to a pool buffer instead of the slab (D1
 // storage duality). Small enough that scalars/short strings stay inline;
 // large enough that kilobyte metadata does not churn the pool.
 inline constexpr size_t kPackLargeThreshold = 4096;
 
 namespace pack_detail {
-// One table row for the dynamic, string-keyed path. Insertion-ordered; the key
-// is a view into the arena.
-struct Entry {
-    std::string_view key;
-    PackTag tag = PackTag::I64;
-    bool     pooled = false;              // storage lives in a pool buffer
-    const uint8_t* inl = nullptr;         // arena payload (inline forms)
-    uint32_t inl_len = 0;                 // arena payload byte length
-    xi_image_handle handle = XI_IMAGE_NULL;  // pool buffer (pooled forms)
-    int32_t  w = 0, h = 0, c = 0;         // image descriptor dims
+
+// ---- slab layout structs (POD, live inside the slab) ----------------------
+inline constexpr uint32_t kPackMagic   = 0x334B5058u;  // 'XPK3' little-endian
+inline constexpr uint32_t kPackVersion = 1;
+
+inline constexpr uint8_t kStorageInline = 0;
+inline constexpr uint8_t kStorageExtern = 1;
+
+struct PackHeader {                  // 64 bytes exactly
+    uint32_t magic;                  // 'XPK3'
+    uint32_t version;
+    uint32_t entry_count;
+    uint32_t ext_count;              // entries holding a LIVE pool handle
+    uint32_t dir_offset;             // == 64
+    uint32_t order_offset;           // == 64 + 32*n (the ordinal->dir table)
+    uint32_t payload_offset;         // 8-aligned
+    uint32_t flags;                  // 0
+    uint64_t slab_bytes;             // logical slab size (<= SlabBuf cap)
+    uint64_t pack_id;                // monotonic mint counter (diagnostics)
+    int64_t  ts_us;                  // 0 unless a caller stamps it at seal
+    uint8_t  pad[8];
 };
+static_assert(sizeof(PackHeader) == 64, "PackHeader must be 64 bytes");
+
+// One directory row. Sorted by (key_hash, key bytes, ordinal) so lookup is a
+// binary search and duplicate keys keep first-inserted-wins semantics.
+struct DirEntry {                    // 32 bytes exactly
+    uint64_t key_hash;
+    uint32_t key_off;                // slab-relative offset of the key bytes
+    uint32_t key_len;
+    uint32_t ordinal;                // insertion index (0-based)
+    uint32_t off;                    // payload: inline bytes, or the ExtRecord
+    uint32_t len;                    // inline byte length / sizeof(ExtRecord)
+    uint8_t  tag;                    // PackTag
+    uint8_t  storage;                // kStorageInline | kStorageExtern
+    uint16_t type_id;                // 0 | PackDtype (Tensor) | user blob type
+};
+static_assert(sizeof(DirEntry) == 32, "DirEntry must be 32 bytes");
+
+// The EXTERN side-record, stored 8-aligned in the payload: the pool handle +
+// the entry's LOGICAL shape/length (the pool's own dims are the storage shape
+// — (n,1,1) for bins/tensors — so the logical shape lives here).
+struct ExtRecord {                   // 24 bytes
+    xi_image_handle handle;          // XI_IMAGE_NULL if the mint failed
+    int32_t  w, h, c;                // logical shape (bin: {n,1,1})
+    uint32_t len;                    // logical byte length
+};
+static_assert(sizeof(ExtRecord) == 24, "ExtRecord must be 24 bytes");
+
+// ---- builder staging -------------------------------------------------------
+struct TmpEntry {
+    uint64_t hash;
+    uint32_t key_off, key_len;       // payload-relative (rebased at seal)
+    uint32_t off, len;               // payload-relative
+    uint8_t  tag, storage;
+    uint16_t type_id;
+    xi_image_handle handle;          // EXTERN: the ref this builder owns
+};
+
+// Staging (payload bytes + entry rows) lives in a per-thread SCRATCH recycle,
+// so a steady stream of builds on one thread is heap-free after warmup — the
+// same discipline SlabPool gives the sealed slabs.
+struct BuilderScratch {
+    std::vector<uint8_t>  payload;
+    std::vector<TmpEntry> entries;
+    void clear() { payload.clear(); entries.clear(); }   // capacity kept
+};
+
+// ONE pool function, shared by get and put — two separate thread_locals here
+// would silently defeat the recycle.
+inline std::vector<std::unique_ptr<BuilderScratch>>& scratch_pool_() {
+    thread_local std::vector<std::unique_ptr<BuilderScratch>> pool;
+    return pool;
+}
+inline BuilderScratch* scratch_get() {
+    auto& pool = scratch_pool_();
+    if (!pool.empty()) {
+        BuilderScratch* s = pool.back().release();
+        pool.pop_back();
+        return s;
+    }
+    return new BuilderScratch();
+}
+inline void scratch_put(BuilderScratch* s) {
+    s->clear();
+    auto& pool = scratch_pool_();
+    if (pool.size() < 8) pool.emplace_back(s);
+    else delete s;
+}
+
 } // namespace pack_detail
 
 class PackBuilder;
 
 // ===================================================================
-// Pack — a sealed, immutable, single-owner keyed buffer (dynamic path).
+// Pack — a sealed, immutable, single-owner keyed buffer over one slab.
 //
 // Only produced by PackBuilder::seal(); there is no public constructor, so a
 // pre-seal (mutable) pack can never be handed out as a Pack. Move-only:
 // exactly one owner at a time, whose destruction is the whole lifecycle end —
-// arena freed in one shot, every pool handle released once. A moved-from Pack
-// owns nothing and releases nothing, so a drop can never double-release.
+// directory walked once to release every pool handle, slab returned to the
+// per-thread recycle pool. A moved-from Pack owns nothing and releases
+// nothing, so a drop can never double-release.
 //
-// LOOKUP is hybrid (measured honesty, doc 07 §profile-1 "small maps often beat
-// hash with a linear memcmp scan"): a small pack scans the contiguous entry
-// table (no index nodes allocated at all); a large pack builds an
-// unordered_map so lookups stay O(1) at scale.
+// LOOKUP: binary search on the hash-sorted directory (equal-hash runs
+// memcmp-verified, first-inserted wins on duplicate keys). ITERATION
+// (key_at/tag_at/for_each/for_each_entry) is INSERTION order via the slab's
+// ordinal->dir order table.
 // ===================================================================
 class Pack {
 public:
@@ -469,151 +515,304 @@ public:
     Pack& operator=(const Pack&) = delete;
     ~Pack() { destroy(); }
 
-    // Above this entry count seal() builds an unordered_map; at or below it the
-    // pack linear-scans its contiguous table (fewer keys than this, a memcmp
-    // scan is faster than a hash lookup AND allocates no index).
-    static constexpr size_t kLinearMax = 24;
-
     // ---- structure ---------------------------------------------------
-    size_t size()  const { return entries_.size(); }
-    bool   empty() const { return entries_.empty(); }
+    size_t size()  const { return slab_.data ? header()->entry_count : 0; }
+    bool   empty() const { return size() == 0; }
     bool   has(std::string_view key) const { return find(key) != nullptr; }
 
     std::optional<PackTag> tag_of(std::string_view key) const {
         const auto* e = find(key);
-        return e ? std::optional<PackTag>(e->tag) : std::nullopt;
+        return e ? std::optional<PackTag>(PackTag(e->tag)) : std::nullopt;
     }
 
     // Insertion-ordered key walk — the generic-plugin path (record_save,
     // expose): visit every entry without knowing its producer.
     template <class Fn>
     void for_each(Fn&& fn) const {
-        for (const auto& e : entries_) fn(e.key, e.tag);
+        const size_t n = size();
+        for (size_t i = 0; i < n; ++i) {
+            const pack_detail::DirEntry& e = dir_at(i);
+            fn(key_of(e), PackTag(e.tag));
+        }
     }
 
-    // Insertion-ordered index accessors — the O(1) primitives the C-ABI generic
-    // walk (xi_pack_v1.key_at/tag_at) is built on, so a foreign consumer can
-    // enumerate entries without a producer-supplied key list. UB if i >= size().
-    std::string_view key_at(size_t i) const { return entries_[i].key; }
-    PackTag         tag_at(size_t i) const { return entries_[i].tag; }
+    // Insertion-ordered index accessors — the O(1) primitives the C-ABI
+    // generic walk (key_at/tag_at) is built on. UB if i >= size().
+    std::string_view key_at(size_t i) const { return key_of(dir_at(i)); }
+    PackTag          tag_at(size_t i) const { return PackTag(dir_at(i).tag); }
+    // The DirEntry::type_id extension: 0, a PackDtype (Tensor), or a user
+    // blob type (>= kPackTypeUserBase). UB if i >= size().
+    uint16_t         type_id_at(size_t i) const { return dir_at(i).type_id; }
 
-    // Raw stored bytes of the i-th entry's INLINE canonical value — the small-
-    // plane bytes exactly as they live in the arena (I64/F64/Str/inline-Bin/Mp).
-    // This is the memory plane a generic dumper (expose XEX1-v2, record_save)
-    // splices to the wire verbatim, so the wire's small plane EQUALS memory
-    // byte-for-byte (doc 07). Empty for a POOLED entry (Image, or a Bin above
-    // kPackLargeThreshold) whose payload is a pool buffer — resolve those with
-    // get_image / get_bin. UB if i >= size().
+    // RAW stored payload bytes of the i-th entry (insertion order). SEMANTICS
+    // CHANGED from the arena representation: scalars are the raw 8-byte value
+    // (Bool: one 0/1 byte), Str/small-Bin the raw bytes, Mp the canonical
+    // msgpack bytes verbatim. Empty for an EXTERN entry (Image/Tensor, or a
+    // Bin above kPackLargeThreshold) — resolve those with get_image /
+    // get_tensor / get_bin. For the entry's CANONICAL WIRE bytes (what raw_at
+    // used to return for every inline entry) use canonical_value(i, writer).
+    // UB if i >= size().
     std::span<const uint8_t> raw_at(size_t i) const {
-        const auto& e = entries_[i];
-        if (e.pooled) return {};
-        return std::span<const uint8_t>(e.inl, e.inl_len);
+        const pack_detail::DirEntry& e = dir_at(i);
+        if (e.storage != pack_detail::kStorageInline) return {};
+        return std::span<const uint8_t>(slab() + e.off, e.len);
     }
 
-    // ---- typed borrowed reads ----------------------------------------
+    // ================= serialization walk API =========================
+    // The port surface for the record/expose/ingress call sites: walk every
+    // entry in INSERTION order with full typed detail, and re-emit any
+    // non-pixel entry's canonical msgpack value byte-identically to the old
+    // arena bytes (max-width profile, ruling-1 NaN flatten — the emit goes
+    // through xi::mp::Writer / pack_mp_detail, the one canonical truth).
+    // No slab internals leak through this surface.
+    struct EntryView {
+        size_t           ordinal = 0;      // insertion index
+        std::string_view key;
+        PackTag          tag = PackTag::I64;
+        uint16_t         type_id = 0;      // dtype for Tensor; user blob type
+        bool             external = false; // payload lives in a pool buffer
+        // INLINE entries: the raw stored bytes (== raw_at(ordinal)).
+        std::span<const uint8_t> raw;
+        // EXTERN entries: logical shape + length + the pool handle (borrowed,
+        // NOT addref'd — pair with pack_pool::addref to keep it past the pack).
+        int32_t          w = 0, h = 0, c = 0;
+        size_t           ext_len = 0;
+        xi_image_handle  handle = XI_IMAGE_NULL;
+    };
+
+    // Visit every entry, insertion order, with an EntryView. The view's spans
+    // borrow from the slab (valid while the Pack lives).
+    template <class Fn>
+    void for_each_entry(Fn&& fn) const {
+        const size_t n = size();
+        for (size_t i = 0; i < n; ++i) fn(entry_at(i));
+    }
+    EntryView entry_at(size_t i) const {   // UB if i >= size()
+        const pack_detail::DirEntry& e = dir_at(i);
+        EntryView v;
+        v.ordinal  = i;
+        v.key      = key_of(e);
+        v.tag      = PackTag(e.tag);
+        v.type_id  = e.type_id;
+        v.external = e.storage == pack_detail::kStorageExtern;
+        if (v.external) {
+            const pack_detail::ExtRecord& r = ext_of(e);
+            v.w = r.w; v.h = r.h; v.c = r.c;
+            v.ext_len = r.len;
+            v.handle  = r.handle;
+        } else {
+            v.raw = std::span<const uint8_t>(slab() + e.off, e.len);
+        }
+        return v;
+    }
+
+    // Append the i-th entry's ONE canonical msgpack value to `w` — the exact
+    // wire bytes today's container serialization carries for that entry:
+    //   I64 -> int64 0xd3        F64 -> float64 0xcb (NaN already flattened)
+    //   Bool -> 0xc2/0xc3        Str -> str32 0xdb
+    //   Bin (inline OR pooled) -> bin32 0xc6 over the payload bytes
+    //   Mp  -> the stored canonical bytes VERBATIM (raw_canonical splice)
+    // Image/Tensor entries have NO single canonical scalar form (the wire
+    // shape — descriptor map + pixel bin — is the dumper's contract, built
+    // from get_image/get_tensor): returns false, writer untouched. Also false
+    // for a pooled Bin whose pool buffer died (never emits a poisoned value).
+    bool canonical_value(size_t i, xi::mp::Writer& w) const {
+        const pack_detail::DirEntry& e = dir_at(i);
+        const uint8_t* p = slab() + e.off;
+        switch (PackTag(e.tag)) {
+            case PackTag::I64: {
+                int64_t v; std::memcpy(&v, p, 8); w.int_(v); return true;
+            }
+            case PackTag::F64: {
+                double v; std::memcpy(&v, p, 8); w.float_(v); return true;
+            }
+            case PackTag::Bool: w.boolean(p[0] != 0); return true;
+            case PackTag::Str:
+                w.str(std::string_view(reinterpret_cast<const char*>(p), e.len));
+                return true;
+            case PackTag::Mp:  w.raw_canonical(p, e.len); return true;
+            case PackTag::Bin: {
+                if (e.storage == pack_detail::kStorageInline) {
+                    w.bin(p, e.len);
+                    return true;
+                }
+                const pack_detail::ExtRecord& r = ext_of(e);
+                auto v = pack_pool::view(r.handle);
+                if (!r.handle || v.size() < r.len) return false;   // F1 guard
+                w.bin(v.data(), r.len);
+                return true;
+            }
+            case PackTag::Image:
+            case PackTag::Tensor:
+            default:
+                return false;
+        }
+    }
+
+    // ---- typed borrowed reads (raw slab loads — zero decode) ----------
     std::optional<int64_t> get_i64(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != PackTag::I64) return std::nullopt;
-        return pack_mp_detail::read_i64(e->inl);
+        if (!e || PackTag(e->tag) != PackTag::I64) return std::nullopt;
+        int64_t v;
+        std::memcpy(&v, slab() + e->off, 8);
+        return v;
     }
     std::optional<double> get_f64(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != PackTag::F64) return std::nullopt;
-        return pack_mp_detail::read_f64(e->inl);
+        if (!e || PackTag(e->tag) != PackTag::F64) return std::nullopt;
+        double v;
+        std::memcpy(&v, slab() + e->off, 8);
+        return v;
     }
     std::optional<bool> get_bool(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != PackTag::Bool) return std::nullopt;
-        return pack_mp_detail::read_bool(e->inl);
+        if (!e || PackTag(e->tag) != PackTag::Bool) return std::nullopt;
+        return slab()[e->off] != 0;
     }
     std::optional<std::string_view> get_str(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != PackTag::Str) return std::nullopt;
-        return pack_mp_detail::read_str(e->inl);
+        if (!e || PackTag(e->tag) != PackTag::Str) return std::nullopt;
+        return std::string_view(reinterpret_cast<const char*>(slab() + e->off),
+                                e->len);
     }
-    // Binary: resolves storage duality — inline arena bytes OR a pool buffer,
+    // Binary: resolves storage duality — inline slab bytes OR a pool buffer,
     // both surfaced as one const span (D1 "storage duality, API unity").
     std::optional<std::span<const uint8_t>> get_bin(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != PackTag::Bin) return std::nullopt;
-        if (e->pooled) {
-            // Guard the pooled span: a null handle (pool exhaustion at build)
-            // or an under-sized pool view would make `.first(inl_len)` violate
-            // std::span::first's precondition and surface a {nullptr, inl_len}
-            // span — an ABI success-with-null OOB read (F1). Report absence
-            // (nullopt -> f_get_bin rc=0) instead of a poisoned span.
-            auto v = pack_pool::view(e->handle);
-            if (!e->handle || v.size() < e->inl_len) return std::nullopt;
-            return v.first(e->inl_len);
+        if (!e || PackTag(e->tag) != PackTag::Bin) return std::nullopt;
+        if (e->storage == pack_detail::kStorageExtern) {
+            // Guard the pooled span (F1): a null handle (pool exhaustion at
+            // build) or an under-sized pool view must report absence, never a
+            // poisoned {nullptr, n} span.
+            const pack_detail::ExtRecord& r = ext_of(*e);
+            auto v = pack_pool::view(r.handle);
+            if (!r.handle || v.size() < r.len) return std::nullopt;
+            return v.first(r.len);
         }
-        return pack_mp_detail::read_bin(e->inl);
+        return std::span<const uint8_t>(slab() + e->off, e->len);
     }
     // Image descriptor + zero-copy pixel span over the pool buffer.
     std::optional<PackImageView> get_image(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != PackTag::Image) return std::nullopt;
-        return PackImageView{e->w, e->h, e->c, pack_pool::view(e->handle)};
+        if (!e || PackTag(e->tag) != PackTag::Image) return std::nullopt;
+        const pack_detail::ExtRecord& r = ext_of(*e);
+        return PackImageView{r.w, r.h, r.c, pack_pool::view(r.handle)};
+    }
+    // Tensor: logical shape + dtype + zero-copy element bytes.
+    std::optional<PackTensorView> get_tensor(std::string_view key) const {
+        const auto* e = find(key);
+        if (!e || PackTag(e->tag) != PackTag::Tensor) return std::nullopt;
+        const pack_detail::ExtRecord& r = ext_of(*e);
+        auto v = pack_pool::view(r.handle);
+        if (!r.handle || v.size() < r.len) return std::nullopt;    // F1 guard
+        PackTensorView t;
+        t.width = r.w; t.height = r.h; t.channels = r.c;
+        t.dtype = PackDtype(e->type_id);
+        t.elem_size = pack_dtype_elem_size(t.dtype);
+        t.bytes = v.first(r.len);
+        return t;
+    }
+    // Element-typed tensor read: nullopt unless the STORED dtype matches T —
+    // the producer/consumer contract stays as honest as every typed getter.
+    template <class T>
+    std::optional<PackTensorOf<T>> get_tensor_of(std::string_view key) const {
+        constexpr PackDtype want = pack_dtype_of<T>::value;
+        auto v = get_tensor(key);
+        if (!v || v->dtype != want) return std::nullopt;
+        PackTensorOf<T> t;
+        t.data  = reinterpret_cast<const T*>(v->bytes.data());
+        t.count = v->bytes.size() / sizeof(T);
+        t.width = v->width; t.height = v->height; t.channels = v->channels;
+        return t;
     }
     // Opaque nested msgpack pass-through (unknown type tags, arrays, maps).
     std::optional<std::span<const uint8_t>> get_mp(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || e->tag != PackTag::Mp) return std::nullopt;
-        return std::span<const uint8_t>(e->inl, e->inl_len);
+        if (!e || PackTag(e->tag) != PackTag::Mp) return std::nullopt;
+        return std::span<const uint8_t>(slab() + e->off, e->len);
     }
 
     // Doc-flavored get<i64>/get<f64> aliases (the _keys.h accessor style).
     template <class T> std::optional<T> get(std::string_view key) const;
 
-    // ---- diagnostics -------------------------------------------------
-    size_t arena_bytes()   const { return arena_.bytes_used(); }
-    size_t handle_count()  const { return handles_.size(); }
+    // ---- diagnostics / ABI hooks ---------------------------------------
+    // Slab footprint (header + directory + order table + payload).
+    size_t slab_bytes()   const { return slab_.data ? size_t(header()->slab_bytes) : 0; }
+    // LIVE pool handles this pack owns (failed mints excluded — same count
+    // the old handle ledger reported).
+    size_t handle_count() const { return slab_.data ? header()->ext_count : 0; }
+    // The raw slab (header/dir/order/payload) — the stable block the ABI door
+    // may point into. Valid for the Pack's life; STABLE ACROSS Pack MOVES
+    // (the slab is one heap allocation the move merely re-owns).
+    const uint8_t* slab_data() const { return slab_.data.get(); }
 
 private:
     friend class PackBuilder;
-    using Entry = pack_detail::Entry;
 
-    Pack(Arena&& arena, std::vector<Entry>&& entries,
-          std::vector<xi_image_handle>&& handles)
-        : arena_(std::move(arena)), entries_(std::move(entries)),
-          handles_(std::move(handles)) {
-        // Only a large pack pays for a hash index; small packs scan (below).
-        if (entries_.size() > kLinearMax) {
-            index_.reserve(entries_.size());
-            for (size_t i = 0; i < entries_.size(); ++i)
-                index_.emplace(entries_[i].key, i);
-        }
+    Pack(pack_detail::SlabBuf&& slab) noexcept : slab_(std::move(slab)) {}
+
+    const uint8_t* slab() const { return slab_.data.get(); }
+    const pack_detail::PackHeader* header() const {
+        return reinterpret_cast<const pack_detail::PackHeader*>(slab());
+    }
+    const pack_detail::DirEntry* dir() const {
+        return reinterpret_cast<const pack_detail::DirEntry*>(slab() + header()->dir_offset);
+    }
+    const uint32_t* order() const {
+        return reinterpret_cast<const uint32_t*>(slab() + header()->order_offset);
+    }
+    // The i-th entry in INSERTION order (via the ordinal->dir table).
+    const pack_detail::DirEntry& dir_at(size_t ordinal) const {
+        return dir()[order()[ordinal]];
+    }
+    std::string_view key_of(const pack_detail::DirEntry& e) const {
+        return std::string_view(reinterpret_cast<const char*>(slab() + e.key_off),
+                                e.key_len);
+    }
+    const pack_detail::ExtRecord& ext_of(const pack_detail::DirEntry& e) const {
+        return *reinterpret_cast<const pack_detail::ExtRecord*>(slab() + e.off);
     }
 
-    const Entry* find(std::string_view key) const {
-        if (index_.empty()) {                 // small pack -> linear scan
-            for (const auto& e : entries_)
-                if (e.key == key) return &e;
-            return nullptr;
+    // Binary search on the hash-sorted directory; equal-hash runs are
+    // memcmp-verified. Duplicate keys: the run is (hash, key, ordinal)-sorted,
+    // so the first key match is the FIRST-INSERTED entry (behavior preserved).
+    const pack_detail::DirEntry* find(std::string_view key) const {
+        if (!slab_.data) return nullptr;
+        const pack_detail::DirEntry* d = dir();
+        const uint32_t n = header()->entry_count;
+        const uint64_t h = pack_detail::hash_key(key);
+        uint32_t lo = 0, hi = n;
+        while (lo < hi) {
+            uint32_t mid = (lo + hi) / 2;
+            if (d[mid].key_hash < h) lo = mid + 1; else hi = mid;
         }
-        auto it = index_.find(key);           // large pack -> O(1) hash lookup
-        return it == index_.end() ? nullptr : &entries_[it->second];
+        for (; lo < n && d[lo].key_hash == h; ++lo) {
+            if (d[lo].key_len == key.size() &&
+                std::memcmp(slab() + d[lo].key_off, key.data(), key.size()) == 0)
+                return &d[lo];
+        }
+        return nullptr;
     }
 
     void destroy() {
-        // Drop-on-crash == this exact path: release each pool handle exactly
-        // once (single owner), then the arena frees in one shot as members die.
-        for (xi_image_handle h : handles_) pack_pool::release(h);
-        handles_.clear();
+        // Drop-on-crash == this exact path: walk the directory, release each
+        // pool handle exactly once (single owner), return the slab to the
+        // per-thread recycle pool.
+        if (!slab_.data) return;
+        const pack_detail::DirEntry* d = dir();
+        const uint32_t n = header()->entry_count;
+        for (uint32_t i = 0; i < n; ++i)
+            if (d[i].storage == pack_detail::kStorageExtern)
+                pack_pool::release(ext_of(d[i]).handle);   // release(0) is a no-op
+        pack_detail::slab_pool().release(std::move(slab_));
+        slab_ = {};
     }
     void move_from(Pack&& o) noexcept {
-        arena_   = std::move(o.arena_);
-        entries_ = std::move(o.entries_);
-        handles_ = std::move(o.handles_);
-        index_   = std::move(o.index_);
-        o.entries_.clear();
-        o.handles_.clear();   // moved-from owns nothing → never double-releases
-        o.index_.clear();
+        slab_ = std::move(o.slab_);
+        o.slab_ = {};    // moved-from owns nothing → never double-releases
     }
 
-    Arena arena_;
-    std::vector<Entry> entries_;                 // insertion order
-    std::vector<xi_image_handle> handles_;       // the single owner's handles
-    std::unordered_map<std::string_view, size_t> index_;  // large packs only
+    pack_detail::SlabBuf slab_;
 };
 
 template <> inline std::optional<int64_t> Pack::get<int64_t>(std::string_view k) const { return get_i64(k); }
@@ -621,88 +820,111 @@ template <> inline std::optional<double>  Pack::get<double>(std::string_view k) 
 template <> inline std::optional<bool>    Pack::get<bool>(std::string_view k) const    { return get_bool(k); }
 
 // ===================================================================
-// PackBuilder — the pre-seal, insertion-ordered entry table (dynamic path).
+// PackBuilder — the pre-seal, insertion-ordered entry table.
 //
-// The ONLY way to populate a dynamic pack. add_* assert the builder is not yet
-// sealed (post-seal writes assert — doc 07 lifecycle step 2). seal() moves the
-// arena, table, and handle ledger into an immutable Pack and empties the
-// builder, so a builder can neither be sealed twice nor written after seal.
+// The ONLY way to populate a pack. add_* assert the builder is not yet sealed
+// (post-seal writes assert — doc 07 lifecycle step 2). Staging lives in the
+// per-thread scratch recycle; seal() sorts the directory, writes the slab in
+// one pass, and hands it to an immutable Pack. A builder abandoned without
+// seal() (a producer that faults mid-build) releases every pool handle it
+// minted or adopted — no leak on the error path.
 // ===================================================================
 class PackBuilder {
 public:
-    PackBuilder() = default;
-    PackBuilder(PackBuilder&&) = default;
-    PackBuilder& operator=(PackBuilder&&) = default;
+    PackBuilder() : s_(pack_detail::scratch_get()) {}
+    PackBuilder(PackBuilder&& o) noexcept : s_(o.s_), sealed_(o.sealed_) {
+        o.s_ = nullptr;
+        o.sealed_ = true;
+    }
+    PackBuilder& operator=(PackBuilder&& o) noexcept {
+        if (this != &o) {
+            abandon_();
+            s_ = o.s_; sealed_ = o.sealed_;
+            o.s_ = nullptr; o.sealed_ = true;
+        }
+        return *this;
+    }
     PackBuilder(const PackBuilder&) = delete;
     PackBuilder& operator=(const PackBuilder&) = delete;
-    ~PackBuilder() {
-        // A builder abandoned without seal() still owns any handles it minted
-        // (e.g. a producer that faults mid-build) — release them, no leak.
-        for (xi_image_handle h : handles_) pack_pool::release(h);
-    }
+    ~PackBuilder() { abandon_(); }
 
     bool sealed() const { return sealed_; }
 
     void add_i64(std::string_view key, int64_t v) {
-        Entry& e = begin_inline(key, PackTag::I64, pack_mp_detail::kI64Size);
-        pack_mp_detail::write_i64(const_cast<uint8_t*>(e.inl), v);
+        pack_detail::TmpEntry e = begin_(key, PackTag::I64);
+        e.off = bump_(8, 8);
+        e.len = 8;
+        std::memcpy(s_->payload.data() + e.off, &v, 8);
+        s_->entries.push_back(e);
     }
+    // NaN is flattened to the canonical quiet pattern AT ADD (ruling 1 —
+    // the same bit test xi::mp::Writer::float_ applies), so the raw stored
+    // double, get_f64, AND the canonical walk all agree byte-for-byte with
+    // what the old arena encoding stored.
     void add_f64(std::string_view key, double v) {
-        Entry& e = begin_inline(key, PackTag::F64, pack_mp_detail::kF64Size);
-        pack_mp_detail::write_f64(const_cast<uint8_t*>(e.inl), v);
+        uint64_t bits;
+        std::memcpy(&bits, &v, sizeof bits);
+        if ((bits & 0x7ff0000000000000ull) == 0x7ff0000000000000ull &&
+            (bits & 0x000fffffffffffffull) != 0) {
+            bits = 0x7ff8000000000000ull;
+            std::memcpy(&v, &bits, sizeof v);
+        }
+        pack_detail::TmpEntry e = begin_(key, PackTag::F64);
+        e.off = bump_(8, 8);
+        e.len = 8;
+        std::memcpy(s_->payload.data() + e.off, &v, 8);
+        s_->entries.push_back(e);
     }
     void add_bool(std::string_view key, bool v) {
-        Entry& e = begin_inline(key, PackTag::Bool, pack_mp_detail::kBoolSize);
-        pack_mp_detail::write_bool(const_cast<uint8_t*>(e.inl), v);
+        pack_detail::TmpEntry e = begin_(key, PackTag::Bool);
+        e.off = bump_(1, 1);
+        e.len = 1;
+        s_->payload[e.off] = v ? 1 : 0;
+        s_->entries.push_back(e);
     }
     void add_str(std::string_view key, std::string_view v) {
-        Entry& e = begin_inline(key, PackTag::Str, pack_mp_detail::str_size(v.size()));
-        pack_mp_detail::write_str(const_cast<uint8_t*>(e.inl), v);
+        pack_detail::TmpEntry e = begin_(key, PackTag::Str);
+        e.off = bump_(uint32_t(v.size()), 1);
+        e.len = uint32_t(v.size());
+        if (!v.empty()) std::memcpy(s_->payload.data() + e.off, v.data(), v.size());
+        s_->entries.push_back(e);
     }
-    // Binary: small stays inline (canonical bin32 in the arena); large is
-    // minted into a pool buffer (D1). Either way get_bin returns one span.
+    // Binary: small stays inline (raw bytes in the slab); large is minted into
+    // a pool buffer (D1). Either way get_bin returns one span.
     void add_bin(std::string_view key, const void* data, size_t n) {
         assert(!sealed_ && "add after seal");
         if (n >= kPackLargeThreshold) {
             xi_image_handle h = pack_pool::alloc_bytes(data, n);
             if (h) {
-                Entry e;
-                e.key = arena_.intern(key);
-                e.tag = PackTag::Bin;
-                e.pooled = true;
-                e.handle = h;
-                e.inl_len = uint32_t(n);   // logical byte length within the buffer
-                e.w = int32_t(n); e.h = 1; e.c = 1;
-                push(std::move(e), h);
+                push_extern_(key, PackTag::Bin, 0, h,
+                             int32_t(n), 1, 1, uint32_t(n));
                 return;
             }
-            // Pool exhausted / alloc failed (h==0). NEVER store a live-looking
-            // {pooled=true, handle=0, inl_len=n} entry — that is exactly the F1
-            // bug where get_bin surfaced a {nullptr, n} span. Fall back to
-            // INLINE arena storage so the bytes still ride, honestly (no silent
-            // data loss) — the inline encoding carries any n up to UINT32_MAX.
+            // Pool exhausted / alloc failed. NEVER store a live-looking extern
+            // entry with a null handle — that is the F1 bug where get_bin
+            // surfaced a {nullptr, n} span. Fall back to INLINE slab storage
+            // so the bytes still ride, honestly (no silent data loss).
             std::fprintf(stderr,
                 "[xinsp2] pack add_bin('%.*s'): pool alloc failed for %zu bytes; "
                 "storing inline\n",
                 int(key.size()), key.data(), n);
         }
-        Entry& e = begin_inline(key, PackTag::Bin, pack_mp_detail::bin_size(n));
-        pack_mp_detail::write_bin(const_cast<uint8_t*>(e.inl), data, n);
+        pack_detail::TmpEntry e = begin_(key, PackTag::Bin);
+        e.off = bump_(uint32_t(n), 1);
+        e.len = uint32_t(n);
+        if (n) std::memcpy(s_->payload.data() + e.off, data, n);
+        s_->entries.push_back(e);
     }
-    // Image: pixels always pooled (aligned raw buffer); descriptor is the
-    // dims carried on the entry. Copies the caller's pixels into a fresh
-    // pack-owned buffer.
+    // Image: pixels always pooled (aligned raw buffer); descriptor dims ride
+    // the entry's ExtRecord. Copies the caller's pixels into a fresh
+    // pack-owned buffer. A failed mint stores a null-handle entry (get_image
+    // reports empty pixels with the dims kept) — same behavior as before.
     void add_image(std::string_view key, int32_t w, int32_t h, int32_t c,
                    const void* pixels) {
         assert(!sealed_ && "add after seal");
         xi_image_handle handle = pack_pool::alloc_image(w, h, c, pixels);
-        Entry e;
-        e.key = arena_.intern(key);
-        e.tag = PackTag::Image;
-        e.pooled = true;
-        e.handle = handle;
-        e.w = w; e.h = h; e.c = c;
-        push(std::move(e), handle);
+        push_extern_(key, PackTag::Image, 0, handle, w, h, c,
+                     uint32_t(int64_t(w) * h * c));
     }
     // Adopt an ALREADY-pooled handle (zero-copy) as an image entry — addref so
     // the pack becomes a co-owner and releases its ref on drop.
@@ -710,15 +932,39 @@ public:
                      xi_image_handle handle) {
         assert(!sealed_ && "add after seal");
         pack_pool::addref(handle);
-        Entry e;
-        e.key = arena_.intern(key);
-        e.tag = PackTag::Image;
-        e.pooled = true;
-        e.handle = handle;
-        e.w = w; e.h = h; e.c = c;
-        push(std::move(e), handle);
+        push_extern_(key, PackTag::Image, 0, handle, w, h, c,
+                     uint32_t(int64_t(w) * h * c));
     }
-    // Opaque nested msgpack (already canonical): copied verbatim into the arena.
+    // Tensor: a first-class typed element buffer — logical shape {w,h,c},
+    // dtype in the DirEntry type_id, bytes = w*h*c*elem_size(dtype) copied
+    // into a pooled (typeless) buffer. Returns false on mint failure (pool
+    // exhausted / zero-sized) — nothing is added (unlike add_bin there is no
+    // honest inline fallback for a tensor's typed contract).
+    bool add_tensor(std::string_view key, int32_t w, int32_t h, int32_t c,
+                    PackDtype dtype, const void* elems) {
+        assert(!sealed_ && "add after seal");
+        if (w <= 0 || h <= 0 || c <= 0) return false;
+        const uint64_t bytes =
+            uint64_t(w) * uint64_t(h) * uint64_t(c) * pack_dtype_elem_size(dtype);
+        xi_image_handle hnd = pack_pool::alloc_bytes(elems, size_t(bytes));
+        if (!hnd) return false;
+        push_extern_(key, PackTag::Tensor, uint16_t(dtype), hnd,
+                     w, h, c, uint32_t(bytes));
+        return true;
+    }
+    // Typed blob hook (future custom payloads): a Bin-tagged pooled entry
+    // carrying a caller-declared type_id (>= kPackTypeUserBase) readable via
+    // type_id_at / EntryView::type_id. get_bin resolves it like any large bin.
+    bool add_blob(std::string_view key, uint16_t type_id,
+                  const void* data, size_t n) {
+        assert(!sealed_ && "add after seal");
+        assert(type_id >= kPackTypeUserBase && "user blob type_id below the user base");
+        xi_image_handle h = pack_pool::alloc_bytes(data, n);
+        if (!h) return false;
+        push_extern_(key, PackTag::Bin, type_id, h, int32_t(n), 1, 1, uint32_t(n));
+        return true;
+    }
+    // Opaque nested msgpack (already canonical): copied verbatim into the slab.
     //
     // GUARD: this is the path for INTERNAL producers whose bytes are canonical
     // BY CONSTRUCTION (they came out of xi::mp::Writer / a trusted plugin). It
@@ -729,40 +975,152 @@ public:
     // and refuses forged pool-handle ext BEFORE producing the canonical bytes
     // this method then stores. "The safe path is the only path" (doc 07 Ingress).
     void add_mp(std::string_view key, const void* mp, size_t n) {
-        Entry& e = begin_inline(key, PackTag::Mp, n);
-        if (n) std::memcpy(const_cast<uint8_t*>(e.inl), mp, n);
+        pack_detail::TmpEntry e = begin_(key, PackTag::Mp);
+        e.off = bump_(uint32_t(n), 8);
+        e.len = uint32_t(n);
+        if (n) std::memcpy(s_->payload.data() + e.off, mp, n);
+        s_->entries.push_back(e);
     }
 
-    // Flip immutable: hand arena/table/handles to a Pack, empty the builder.
-    Pack seal() {
+    // Flip immutable: sort the directory, write the slab in one pass, hand it
+    // to a Pack. The builder is spent afterwards (scratch recycled).
+    Pack seal(int64_t ts_us = 0) {
         assert(!sealed_ && "double seal");
         sealed_ = true;
-        return Pack(std::move(arena_), std::move(entries_), std::move(handles_));
+        auto& sc = *s_;
+        const uint32_t n = uint32_t(sc.entries.size());
+        const uint32_t dir_off     = uint32_t(sizeof(pack_detail::PackHeader));
+        const uint32_t order_off   = dir_off + n * uint32_t(sizeof(pack_detail::DirEntry));
+        const uint32_t payload_off = (order_off + n * 4u + 7u) & ~7u;   // 8-aligned
+        const uint64_t slab_bytes  = payload_off + sc.payload.size();
+
+        pack_detail::SlabBuf slab =
+            pack_detail::slab_pool().acquire(size_t(slab_bytes), kDefaultSlab);
+        uint8_t* base = slab.data.get();
+
+        // Directory order: (key_hash, key bytes, ordinal) — deterministic,
+        // binary-searchable, collision runs adjacent, first-inserted-wins on
+        // duplicate keys. The sort permutes an index array; TmpEntry order in
+        // the scratch stays insertion order (their index IS the ordinal).
+        sort_idx_.resize(n);
+        for (uint32_t i = 0; i < n; ++i) sort_idx_[i] = i;
+        const uint8_t* pay = sc.payload.data();
+        const pack_detail::TmpEntry* te = sc.entries.data();
+        std::sort(sort_idx_.begin(), sort_idx_.end(),
+                  [pay, te](uint32_t ia, uint32_t ib) {
+                      const auto& a = te[ia]; const auto& b = te[ib];
+                      if (a.hash != b.hash) return a.hash < b.hash;
+                      const uint32_t m = a.key_len < b.key_len ? a.key_len : b.key_len;
+                      int c = m ? std::memcmp(pay + a.key_off, pay + b.key_off, m) : 0;
+                      if (c != 0) return c < 0;
+                      if (a.key_len != b.key_len) return a.key_len < b.key_len;
+                      return ia < ib;                    // stable: ordinal
+                  });
+
+        pack_detail::PackHeader hd{};
+        hd.magic          = pack_detail::kPackMagic;
+        hd.version        = pack_detail::kPackVersion;
+        hd.entry_count    = n;
+        hd.ext_count      = ext_live_;
+        hd.dir_offset     = dir_off;
+        hd.order_offset   = order_off;
+        hd.payload_offset = payload_off;
+        hd.flags          = 0;
+        hd.slab_bytes     = slab_bytes;
+        hd.pack_id        = next_pack_id_().fetch_add(1, std::memory_order_relaxed);
+        hd.ts_us          = ts_us;
+        std::memcpy(base, &hd, sizeof hd);
+
+        auto* dir   = reinterpret_cast<pack_detail::DirEntry*>(base + dir_off);
+        auto* order = reinterpret_cast<uint32_t*>(base + order_off);
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t ord = sort_idx_[i];
+            const pack_detail::TmpEntry& t = te[ord];
+            pack_detail::DirEntry d{};
+            d.key_hash = t.hash;
+            d.key_off  = t.key_off + payload_off;      // rebase payload -> slab
+            d.key_len  = t.key_len;
+            d.ordinal  = ord;
+            d.off      = t.off + payload_off;
+            d.len      = t.len;
+            d.tag      = t.tag;
+            d.storage  = t.storage;
+            d.type_id  = t.type_id;
+            std::memcpy(&dir[i], &d, sizeof d);
+            order[ord] = i;
+        }
+        if (!sc.payload.empty())
+            std::memcpy(base + payload_off, sc.payload.data(), sc.payload.size());
+
+        // The pool handles now belong to the pack (its destroy walks the dir).
+        sc.entries.clear();
+        pack_detail::scratch_put(s_);
+        s_ = nullptr;
+        ext_live_ = 0;
+        return Pack(std::move(slab));
     }
 
 private:
-    using Entry = pack_detail::Entry;
+    static constexpr size_t kDefaultSlab = 4096;
 
-    // Reserve `n` arena bytes for an inline entry, register it, return the row
-    // (its `inl` points at the reserved bytes for the caller to fill).
-    Entry& begin_inline(std::string_view key, PackTag tag, size_t n) {
+    static std::atomic<uint64_t>& next_pack_id_() {
+        static std::atomic<uint64_t> id{1};
+        return id;
+    }
+
+    pack_detail::TmpEntry begin_(std::string_view key, PackTag tag) {
         assert(!sealed_ && "add after seal");
-        Entry e;
-        e.key = arena_.intern(key);
-        e.tag = tag;
-        e.inl = arena_.alloc(n);
-        e.inl_len = uint32_t(n);
-        entries_.push_back(std::move(e));
-        return entries_.back();
+        pack_detail::TmpEntry e{};
+        e.hash    = pack_detail::hash_key(key);
+        e.key_off = bump_(uint32_t(key.size()), 1);
+        e.key_len = uint32_t(key.size());
+        if (!key.empty())
+            std::memcpy(s_->payload.data() + e.key_off, key.data(), key.size());
+        e.tag     = uint8_t(tag);
+        e.storage = pack_detail::kStorageInline;
+        e.handle  = XI_IMAGE_NULL;
+        return e;
     }
-    void push(Entry&& e, xi_image_handle owned) {
-        if (owned) handles_.push_back(owned);
-        entries_.push_back(std::move(e));
+    // Register an EXTERN entry: its ExtRecord goes into the payload now (the
+    // slab copy at seal carries it verbatim); the handle also rides the
+    // TmpEntry so an abandoned builder can release it.
+    void push_extern_(std::string_view key, PackTag tag, uint16_t type_id,
+                      xi_image_handle handle, int32_t w, int32_t h, int32_t c,
+                      uint32_t len) {
+        pack_detail::TmpEntry e = begin_(key, tag);
+        e.storage = pack_detail::kStorageExtern;
+        e.type_id = type_id;
+        e.handle  = handle;
+        e.off     = bump_(uint32_t(sizeof(pack_detail::ExtRecord)), 8);
+        e.len     = uint32_t(sizeof(pack_detail::ExtRecord));
+        pack_detail::ExtRecord r{handle, w, h, c, len};
+        std::memcpy(s_->payload.data() + e.off, &r, sizeof r);
+        if (handle) ++ext_live_;
+        s_->entries.push_back(e);
+    }
+    // Bump-allocate n payload bytes at `align`; returns the payload-relative
+    // offset. payload_offset is 8-aligned in the slab, so payload-relative
+    // alignment survives the rebase for align <= 8.
+    uint32_t bump_(uint32_t n, uint32_t align) {
+        size_t off = (s_->payload.size() + (align - 1)) & ~size_t(align - 1);
+        s_->payload.resize(off + n);
+        return uint32_t(off);
+    }
+    void abandon_() {
+        if (!s_) return;
+        // A builder abandoned without seal() still owns any handles it minted
+        // (e.g. a producer that faults mid-build) — release them, no leak.
+        for (const auto& e : s_->entries)
+            if (e.storage == pack_detail::kStorageExtern)
+                pack_pool::release(e.handle);
+        pack_detail::scratch_put(s_);
+        s_ = nullptr;
+        ext_live_ = 0;
     }
 
-    Arena arena_;
-    std::vector<Entry> entries_;
-    std::vector<xi_image_handle> handles_;
+    pack_detail::BuilderScratch* s_ = nullptr;
+    std::vector<uint32_t> sort_idx_;   // seal-time permutation (reused capacity)
+    uint32_t ext_live_ = 0;            // live (non-null) handles this builder owns
     bool sealed_ = false;
 };
 

@@ -65,15 +65,18 @@ void* g_trigger_leader_fn_  = nullptr;
 
 static int pool_live() { return xi::ImagePool::instance().cumulative().live_now; }
 
-// Byte-compare a pack entry's stored arena bytes against an expected canonical
-// encoding. Host-role: dereference the registry to reach Pack::raw_at.
+// Byte-compare a pack entry's CANONICAL wire bytes against an expected
+// canonical encoding. Host-role: dereference the registry and emit through the
+// slab pack's canonical walk (Pack::canonical_value) — the slab stores scalars
+// raw, so canonical parity is now proven at the walk seam, not raw_at.
 static bool raw_equals(const xi::ScriptPack& sp, size_t idx,
                        const uint8_t* want, size_t want_n) {
     xi::Pack* p = xi::PackRegistry::instance().pack(sp.handle());
     if (!p || idx >= p->size()) return false;
-    auto got = p->raw_at(idx);
-    return got.size() == want_n &&
-           (want_n == 0 || std::memcmp(got.data(), want, want_n) == 0);
+    xi::mp::Writer w;
+    if (!p->canonical_value(idx, w)) return false;
+    return w.size() == want_n &&
+           (want_n == 0 || std::memcmp(w.bytes().data(), want, want_n) == 0);
 }
 
 // ---------------------------------------------------------------------------
