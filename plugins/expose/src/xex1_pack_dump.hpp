@@ -34,8 +34,9 @@ namespace xex1 {
 
 // Walk a sealed input pack and dump it to the canonical XEX1-v3 frame bytes.
 // Scalars/str/bin are re-encoded through xi::mp::Writer (byte-identical to the
-// pack arena — same canonical profile), nested msgpack rides verbatim, images
-// inline their raw pool pixels as `bin` (doc 07 D2 export rule). The reserved
+// pack arena — same canonical profile), nested msgpack rides verbatim, BLOBS
+// (spec 30 — xi/image included) inline their ENTIRE self-describing buffer as
+// one `bin` (memory == wire). The reserved
 // $channel/$seq keys are LIFTED to the frame's top-level fields, not dumped as
 // entries — the caller passes them in (already read from the pack).
 // `has_channel`/`has_seq` (default true) forward to encode_frame_v3: they let a
@@ -88,15 +89,20 @@ inline std::vector<uint8_t> encode_pack_v3(const xi::PackIn& in,
                 if (m) e.value.assign(m->first, m->first + m->second);
                 break;
             }
-            case XI_PACK_TAG_IMAGE: {
-                auto im = in.image(key.c_str());
-                if (!im || !im->pixels) continue;
-                e.w = im->width; e.h = im->height; e.c = im->channels;
-                e.px = static_cast<const uint8_t*>(im->pixels);
-                e.px_len = im->length > 0 ? (size_t)im->length : 0;
+            case XI_PACK_TAG_BLOB: {
+                // Self-describing blob (spec 30): emit the ENTIRE buffer verbatim
+                // (magic + desc + pad + payload) as one `bin` — memory == wire.
+                // The descriptor + payload spans are contiguous in the pool
+                // buffer: desc sits at buffer+8, payload at buffer+payload_off, so
+                // the whole buffer runs [desc-8 .. payload+payload_len).
+                auto bl = in.blob(key.c_str());
+                if (!bl || !bl->desc || !bl->payload) continue;
+                const uint8_t* buf = bl->desc - 8;
+                e.blob     = buf;
+                e.blob_len = (size_t)((bl->payload + bl->payload_len) - buf);
                 break;
             }
-            default: continue;   // unknown tag: skip (opaque forward-compat)
+            default: continue;   // unknown tag (incl. the retired IMAGE): skip (opaque forward-compat)
         }
         entries.push_back(std::move(e));
     }

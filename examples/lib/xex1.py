@@ -99,9 +99,34 @@ def _restore_nonfinite(v: Any) -> Any:
 
 
 # The pack-plane entry tag vocabulary (XI_PACK_TAG_* in xi_abi.h). v3 carries
-# every frame entry as [tag, value], so an image descriptor is identified by
-# ITS TAG — never by shape (the v2 draft's ambiguity fix).
-TAG_IMAGE = 4
+# every frame entry as [tag, value], so an entry's type is identified by ITS TAG
+# — never by shape. The retired IMAGE(4)/TENSOR(7) tags are permanent gaps; every
+# non-scalar payload is now a self-describing BLOB (spec 30).
+TAG_BLOB = 8
+
+# The self-describing blob head (spec 30): 'XBD1' magic (LE) + u32 desc_len (LE)
+# + canonical-msgpack descriptor map + zero pad + 64B-aligned payload.
+BLOB_MAGIC = b"XBD1"
+
+
+def _parse_blob_buffer(buf: bytes) -> dict:
+    """Validate + split a self-describing blob buffer into its descriptor (decoded
+    msgpack map) + payload. Fail-loud (Xex1Error) on a bad head — the same
+    discipline the C++ blob_head_validate seam enforces at ingress."""
+    if len(buf) < 8 or buf[0:4] != BLOB_MAGIC:
+        raise Xex1Error("bad blob magic (not an 'XBD1' buffer)")
+    desc_len = struct.unpack_from("<I", buf, 4)[0]
+    if 8 + desc_len > len(buf):
+        raise Xex1Error("blob desc_len overruns the buffer")
+    payload_off = (8 + desc_len + 63) & ~63    # align_up(8 + desc_len, 64)
+    if payload_off > len(buf):
+        raise Xex1Error("blob payload_off past the buffer end")
+    desc_bytes = buf[8:8 + desc_len]
+    desc, _ = _mp(desc_bytes, 0)               # canonical descriptor map
+    if not isinstance(desc, dict):
+        raise Xex1Error("blob descriptor is not a msgpack map")
+    return {"t": desc.get("t"), "desc": desc, "desc_bytes": bytes(desc_bytes),
+            "payload": bytes(buf[payload_off:])}
 
 
 def jpeg_dims(data: bytes) -> tuple[int, int] | None:
@@ -137,37 +162,56 @@ def jpeg_dims(data: bytes) -> tuple[int, int] | None:
 
 def _decode_xex1_v3(body: dict) -> dict:
     """Normalize an XEX1-v3 canonical frame dump {v:3, channel, seq,
-    frame:{key: [tag, value], ...}} into {v, channel, seq, values, images}.
-    tag 4 (image descriptor {w,h,c,px}) -> images[key] = {w,h,c,pixels}; every
-    other tag -> values. v3 is lossless (raw pixels as msgpack bin), no JPEG.
+    frame:{key: [tag, value], ...}} into {v, channel, seq, values, images, blobs}.
+    tag 8 (BLOB, spec 30) -> blobs[key] = {t, desc, desc_bytes, payload}; an
+    'xi/image' blob ALSO surfaces as images[key] = {w,h,c,pixels,...}; every other
+    tag -> values. v3 is lossless (blobs ride as the entire self-describing buffer).
 
-    E2: an image descriptor MAY additionally carry a nested `preview` map
-    { w,h,c, enc:"jpeg", q, data:<jpeg bytes> } — expose's WS-SEND-only
-    full-resolution compressed substitution (the raw `px` is then empty on the
-    wire). When present it surfaces as images[key]["preview"]; the raw-pixel
-    fields stay for decoders that ignore it (record_save/disk always ship raw)."""
+    A BLOB value is EITHER:
+      * bytes  — the entire self-describing buffer verbatim (record_save/disk +
+        the non-preview WS path). Head-validated + split here.
+      * a map { desc:<bytes>, preview:{enc:"jpeg", q, data:<jpeg bytes>} } —
+        expose's WS-SEND-only full-resolution compressed substitution for an
+        xi/image blob (never persisted). Surfaces the preview under images[key]."""
     frame = body.get("frame") or {}
     values: dict = {}
     images: dict = {}
+    blobs: dict = {}
     for k, e in frame.items():
         if not (isinstance(e, list) and len(e) == 2):
             continue   # not a [tag, value] pair
         tag, v = e
-        if tag == TAG_IMAGE and isinstance(v, dict):
-            entry = {"w": v.get("w"), "h": v.get("h"), "c": v.get("c"),
-                     "pixels": bytes(v.get("px") or b"")}
-            pv = v.get("preview")
-            if isinstance(pv, dict) and pv.get("data") is not None:
-                entry["preview"] = {
-                    "w": pv.get("w"), "h": pv.get("h"), "c": pv.get("c"),
-                    "enc": pv.get("enc"), "q": pv.get("q"),
-                    "data": bytes(pv.get("data") or b""),
-                }
+        if tag != TAG_BLOB:
+            values[k] = v
+            continue
+        if isinstance(v, (bytes, bytearray)):
+            b = _parse_blob_buffer(bytes(v))
+            blobs[k] = b
+            if b["t"] == "xi/image" and isinstance(b["desc"], dict):
+                d = b["desc"]
+                images[k] = {"t": "xi/image", "w": d.get("w"), "h": d.get("h"),
+                             "c": d.get("c"), "dt": d.get("dt"),
+                             "pixels": b["payload"], "desc": d}
+        elif isinstance(v, dict) and "preview" in v:
+            # WS-SEND preview arm (never persisted). desc carries the type/dims.
+            desc_bytes = bytes(v.get("desc") or b"")
+            desc: dict = {}
+            if desc_bytes:
+                dv, _ = _mp(desc_bytes, 0)
+                if isinstance(dv, dict):
+                    desc = dv
+            pv = v["preview"]
+            entry = {"t": desc.get("t"), "desc": desc,
+                     "w": desc.get("w"), "h": desc.get("h"), "c": desc.get("c"),
+                     "dt": desc.get("dt"),
+                     "preview": {"enc": pv.get("enc"), "q": pv.get("q"),
+                                 "data": bytes(pv.get("data") or b"")}}
             images[k] = entry
+            blobs[k] = entry
         else:
             values[k] = v
     return {"v": 3, "channel": body.get("channel"), "seq": body.get("seq"),
-            "values": values, "images": images, "frame": frame}
+            "values": values, "images": images, "blobs": blobs, "frame": frame}
 
 
 def decode_xex1(data: bytes) -> dict:

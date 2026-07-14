@@ -347,7 +347,10 @@ private:
                     vals.set(key.c_str(), in.boolean(key.c_str()).value_or(false)); break;
                 case XI_PACK_TAG_STR:
                     vals.set(key.c_str(), std::string(in.str(key.c_str()).value_or(""))); break;
-                case XI_PACK_TAG_IMAGE: {
+                case XI_PACK_TAG_BLOB: {
+                    // xi/image blobs (spec 30) get the legacy v1 JPEG treatment;
+                    // in.image() parses an xi/image blob via the @1 adapter and
+                    // returns nullopt for any other blob type (no v1 display form).
                     auto im = in.image(key.c_str());
                     if (!im || !im->pixels) break;
                     std::vector<uint8_t> jpeg = compress_px_(
@@ -355,7 +358,7 @@ private:
                     if (!jpeg.empty()) images.push_back({key, std::move(jpeg)});
                     break;
                 }
-                default: break;  // bin/mp: no v1 display form
+                default: break;  // non-image blobs / bin / mp: no v1 display form
             }
         }
         return xi::xex1::encode_frame(channel, seq, vals.dump(), images);
