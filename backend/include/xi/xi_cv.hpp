@@ -14,12 +14,14 @@
 // does #include <xi/xi.hpp> compiles with OpenCV OFF the include path.
 //
 #include "xi_image.hpp"
+#include "xi_image_blob.hpp"   // xi::ImageBlobView + read_image_blob (CV-free)
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace xi {
@@ -116,16 +118,60 @@ inline cv::Mat to_cv(const Image& img) { return as_cv_mat(img).clone(); }
 // Naming-symmetric alias of from_cv_mat().
 inline Image to_image(const cv::Mat& m) { return from_cv_mat(m); }
 
-// TODO(selfdesc-D): the self-describing-blob plane (spec 30) makes `xi/image` a
-// convention type carried in a Pack Blob's descriptor. The consumer-side sugar
-// that wraps a Pack `xi/image` blob as a cv::Mat — reading w/h/c/dt from the
-// descriptor via xi::Pack::desc_find_str/desc_find_i64 over BlobView::desc and
-// viewing BlobView::payload — belongs here, but it couples <xi/xi_pack.hpp> +
-// OpenCV and has NO core consumer yet (the producer/consumer fleet migrates in
-// package D). The core descriptor builder + mint_image live in xi_pack.hpp
-// (xi::BlobDesc / xi::make_image_desc / xi::mint_image); package D adds the
-// cv accessors here on top of them. Nothing above operates on Pack blobs — the
-// as_cv_* helpers here are the SEPARATE xi::Image (plugin SDK) plane, untouched.
+// --- cv::Mat sugar over an `xi/image` self-describing blob (spec 30) ----------
+// The consumer counterpart to the xi::Image as_cv_* views above: wrap a Pack
+// `xi/image` blob (parsed by xi::read_image_blob into an ImageBlobView — see
+// <xi/xi_image_blob.hpp>, reached via PackIn::image_blob / ScriptPack::image_blob)
+// as a cv::Mat, typed by the descriptor's w/h/c/dt. No blob-head parsing here —
+// the descriptor already carries the shape and dtype.
+
+// Map an `xi/image` "dt" string to an OpenCV depth constant; -1 if the dtype has
+// no cv:: representation (fail-loud, never a silent reinterpret).
+inline int cv_depth_for_dt(std::string_view dt) {
+    if (dt == "u8")  return CV_8U;
+    if (dt == "u16") return CV_16U;
+    if (dt == "i32") return CV_32S;
+    if (dt == "f32") return CV_32F;
+    if (dt == "f64") return CV_64F;
+    return -1;
+}
+
+// READ view over a consumer's INPUT `xi/image` blob: a non-owning cv::Mat over
+// the blob payload, typed CV_MAKETYPE(depth(dt), channels), packed stride. Empty
+// Mat (a loud cv:: error downstream, not silent corruption) when the dtype is
+// unrepresentable or the view is malformed. The Mat must not outlive the pack the
+// blob was read from (its bytes alias pool memory). Like as_cv_read(Image), the
+// const& parameter is the "I am reading this" signal.
+inline cv::Mat as_cv_read(const ImageBlobView& b) {
+    const int depth = cv_depth_for_dt(b.dt);
+    if (depth < 0 || !b.ok()) return {};
+    const int type = CV_MAKETYPE(depth, b.channels);
+    return cv::Mat(b.height, b.width, type,
+                   const_cast<uint8_t*>(b.payload.data()),
+                   static_cast<size_t>(b.width) * b.channels * b.elem_size());
+}
+inline cv::Mat as_cv(const ImageBlobView& b) { return as_cv_read(b); }
+
+// WRITE view over a freshly MINTED `xi/image` blob payload — the producer's
+// zero-copy mint window. `payload` is the pointer blob_mint / mint_image handed
+// back; write the output pixels straight into the returned cv::Mat, then
+// adopt_blob and drop the mint ref. Empty Mat on an unrepresentable dtype or a
+// bad shape.
+//
+// CONTRACT (mirrors as_cv_write(Image), which returns empty on a non-writable
+// input view): call this ONLY on a payload you just minted and have NOT yet
+// adopted — a uniquely-owned (pool rc == 1) buffer. Once a blob is adopted/sealed
+// its buffer may be shared with other consumers; writing it then corrupts their
+// view. A raw payload pointer carries no writability flag, so this gate is the
+// caller's to keep — the mint→fill→adopt ordering enforces it structurally.
+inline cv::Mat as_cv_write_blob(void* payload, int32_t w, int32_t h, int32_t c,
+                                std::string_view dt) {
+    const int depth = cv_depth_for_dt(dt);
+    if (depth < 0 || !payload || w <= 0 || h <= 0 || c <= 0) return {};
+    const int type = CV_MAKETYPE(depth, c);
+    return cv::Mat(h, w, type, payload,
+                   static_cast<size_t>(w) * c * image_blob_dt_elem_size(dt));
+}
 
 // Encode an Image to a compressed buffer (".jpg"/".jpeg"/".png"). Bakes in the
 // RGB->BGR flip OpenCV's encoders expect, so an image built from an RGB overlay

@@ -23,6 +23,7 @@
 #include "xi_clock.hpp"
 #include "xi_pack_contract.hpp"  // reserved $-keys + fault/provenance helpers (U1, doc 15)
 #include "xi_image.hpp"
+#include "xi_image_blob.hpp"     // xi::ImageBlobView + read_image_blob (xi/image consumer)
 #include "xi_script.hpp"   // XI_SCRIPT_EXPORT (A4 entry export macro)
 
 #include <chrono>
@@ -316,6 +317,17 @@ public:
         return ScriptPackBlob{
             std::span<const uint8_t>(static_cast<const uint8_t*>(d), dl > 0 ? (size_t)dl : 0),
             std::span<const uint8_t>(static_cast<const uint8_t*>(p), pl > 0 ? (size_t)pl : 0) };
+    }
+    // Convenience consumer accessor for an `xi/image` self-describing blob (spec
+    // 30): parse the descriptor's {w,h,c,dt} + payload into an ImageBlobView in
+    // ONE fail-loud call (nullopt on absent key, non-blob entry, "t" != "xi/image",
+    // or a malformed/undersized descriptor). Carries the real dtype (get_image
+    // above is the u8-assuming xi/image accessor over the @1 adapter). Wrap it as
+    // a cv::Mat with xi::as_cv_read(ImageBlobView) from <xi/xi_cv.hpp>.
+    std::optional<ImageBlobView> image_blob(const char* key) const {
+        auto b = get_blob(key);
+        if (!b) return std::nullopt;
+        return read_image_blob(b->desc, b->payload);
     }
 
     // ---- U1 pack-plane error path + provenance (docs/new_gen/15) ------------

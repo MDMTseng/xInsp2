@@ -643,6 +643,16 @@ if(NOT MSVC)
 endif()
 add_test(NAME xi_pack COMMAND test_xi_pack)
 
+# Package E — the xi/image blob CONSUMER sugar (spec 30): xi::read_image_blob
+# (CV-free descriptor reader) + the cv::Mat wrappers over it. Links xi_core for
+# the OpenCV INTERFACE (the cv:: mapping under test lives in <xi/xi_cv.hpp>).
+add_executable(test_image_blob tests/test_image_blob.cpp)
+target_link_libraries(test_image_blob PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_image_blob PRIVATE pthread)
+endif()
+add_test(NAME image_blob COMMAND test_image_blob)
+
 # Ingress canonicalizer (xi_ingress.hpp) — the domain edge (task 1c). The ONLY
 # path from foreign/untrusted msgpack bytes to a Pack entry: structural
 # validation + profile normalization (NaN flatten, dup/non-string-key reject) +

@@ -55,32 +55,32 @@ public:
     void process(xi::PackIn& in, xi::PackOut& out) override {
         // Fail loud: a missing/mis-typed required input is a NORMAL sealed
         // pack stamped with a $fault reason the caller routes to a verdict —
-        // never a silent empty default. (in.image() returns nullopt when
-        // "gray" is absent or not an image entry; no coercion.)
-        auto src = in.image("gray");
-        if (!src || !src->pixels) {
+        // never a silent empty default. in.image_blob() returns nullopt when
+        // "gray" is absent, not a blob, or not an xi/image (no coercion) — one
+        // call carrying the real dtype + the zero-copy payload span.
+        auto src = in.image_blob("gray");
+        if (!src) {
             out.fault(xi::contract::kMissingInput, "gray",
-                      "{{NAME}}: required image 'gray' is missing");
+                      "{{NAME}}: required xi/image 'gray' is missing");
             return;
         }
 
-        // Read the INPUT through a non-owning view + as_cv_read (the pack's
-        // pixels are a zero-copy pool span shared with other consumers — read
-        // them, never mutate them). Collapse a colour input to gray first so the
-        // threshold has a single channel to work on.
-        xi::Image srcView = xi::Image::view(src->width, src->height, src->channels,
-                                            static_cast<const uint8_t*>(src->pixels));
-        cv::Mat srcMat = xi::as_cv_read(srcView);
+        // Read the INPUT as a cv::Mat over the blob payload — as_cv_read maps the
+        // descriptor's dt to the CV type (zero-copy; the pixels are a pool span
+        // shared with other consumers — read them, never mutate them). Collapse a
+        // colour input to gray first so the threshold has a single channel.
+        cv::Mat srcMat = xi::as_cv_read(*src);
         cv::Mat gray;
         if (srcMat.channels() == 1) gray = srcMat;
         else                        cv::cvtColor(srcMat, gray, cv::COLOR_BGR2GRAY);
 
         // Produce the output as a self-describing xi/image BLOB (spec 30): mint a
-        // headed pool buffer, wrap its 64B-aligned payload as a cv::Mat, and let
-        // cv::threshold write the binary image straight INTO it — then adopt the
-        // buffer zero-copy (the pack addrefs; we drop our mint ref). No heap→pool
-        // memcpy. (The frozen @1 out.adopt_image door adapter now copies, so an
-        // in-tree producer mints the headed buffer directly.)
+        // headed pool buffer, wrap its 64B-aligned payload as a WRITABLE cv::Mat
+        // with as_cv_write_blob, and let cv::threshold write the binary image
+        // straight INTO it — then adopt the buffer zero-copy (the pack addrefs;
+        // we drop our mint ref). No heap→pool memcpy. (The frozen @1
+        // out.adopt_image door adapter now copies, so an in-tree producer mints
+        // the headed buffer directly.)
         const int w = src->width, h = src->height;
         xi::mp::Writer dw;                        // {"t":"xi/image","w","h","c","dt"}
         dw.map(5);
@@ -96,7 +96,7 @@ public:
             out.fault("no_blob_plane", "binary", "{{NAME}}: host has no xi.pack@4 blob plane");
             return;
         }
-        cv::Mat binMat(h, w, CV_8UC1, pp);        // aliases the blob payload
+        cv::Mat binMat = xi::as_cv_write_blob(pp, w, h, 1, "u8");  // writable payload view
         cv::threshold(gray, binMat, (double)threshold_.load(), 255.0, cv::THRESH_BINARY);
 
         const double pixels = (double)w * h;

@@ -33,6 +33,7 @@
 
 #include "xi_abi.h"
 #include "xi_image.hpp"
+#include "xi_image_blob.hpp"     // xi::ImageBlobView + read_image_blob (xi/image consumer)
 #include "xi_json_escape.hpp"    // the ONE JSON string-escape primitive (std-only leaf)
 #include "xi_pack_contract.hpp"  // reserved $-keys + fault/provenance helpers (U1, doc 15)
 
@@ -441,6 +442,20 @@ public:
         b.desc    = reinterpret_cast<const uint8_t*>(d);
         b.payload = reinterpret_cast<const uint8_t*>(p);
         return b;
+    }
+    // Convenience consumer accessor for an `xi/image` self-describing blob
+    // (spec 30): parse the descriptor's {w,h,c,dt} + payload into an
+    // ImageBlobView in ONE fail-loud call (nullopt on absent key, a non-blob
+    // entry, "t" != "xi/image", or a malformed/undersized descriptor). Unlike
+    // image() (which rides the @1 xi/image adapter and hands back a u8-assuming
+    // xi_pack_image) this carries the real dtype and needs no @1 door. Wrap it as
+    // a cv::Mat with xi::as_cv_read(ImageBlobView) from <xi/xi_cv.hpp>.
+    std::optional<ImageBlobView> image_blob(const char* k) const {
+        auto b = blob(k);
+        if (!b) return std::nullopt;
+        return read_image_blob(
+            std::span<const uint8_t>(b->desc, b->desc_len > 0 ? (size_t)b->desc_len : 0),
+            std::span<const uint8_t>(b->payload, b->payload_len > 0 ? (size_t)b->payload_len : 0));
     }
     // The whole i-th directory row in ONE call (key + tag + storage) — the walk
     // primitive; insertion order, exactly like key_at/tag_at.
