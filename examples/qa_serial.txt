@@ -24,6 +24,11 @@ qa_semaphore_queue
 qa_plugin_queue_sim
 qa_overflow_block
 
+# --- live-UI egress: asserts the DELIVERED frame RATE (egress fps vs a fast
+#     source) + pushes>>delivered collapse — wall-clock rate assertions flake
+#     under CPU oversubscription. ---
+qa_ui_egress
+
 # --- dispatch / group parallelism + interval timing ---
 qa_dispatch_groups
 qa_group_parallelism
