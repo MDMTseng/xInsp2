@@ -243,8 +243,8 @@ inline Magazine* tls_magazine() {
 } // namespace detail
 
 // Alloc: magazine -> shelf -> fresh heap; > 64 MiB takes the direct lane.
-// Returned bytes are UNSPECIFIED (recycled buffers carry stale pixels);
-// ImagePool::create() decides the zero-fill policy.
+// Returned bytes are UNSPECIFIED (recycled buffers carry stale pixels).
+// ImagePool::create() hands them back as-is — no zero-fill (CT ruling 2026-07).
 inline PixBuf pixel_alloc(uint64_t bytes) {
     PixBuf b;
     b.cls = class_for(bytes);
@@ -331,11 +331,6 @@ public:
     static constexpr uint64_t SLOT_MASK  = SLOT_COUNT - 1;
     // Max generation that fits in (64 - 8 - SLOT_BITS) = 40 bits.
     static constexpr uint64_t GEN_MAX    = (1ull << 40) - 1;
-    // create() returns ZEROED pixels — the documented contract since the
-    // vector-value-init days; recycled buffers are memset to preserve it
-    // (see create()). Keep true unless every read-before-write caller is gone.
-    static constexpr bool kZeroFillCreate = true;
-
     // INTENTIONALLY LEAKED: the pool is process-lifetime state, so it is never
     // destroyed — heap-allocated once, reclaimed by the OS at exit. This makes
     // every late-teardown path (a static-destruction adapter dtor's owner
@@ -353,21 +348,19 @@ public:
 
     // ---- create / release -------------------------------------------
 
-    // create() returns ZEROED pixels (the documented external contract).
-    // create_uninit() is the identical mint but SKIPS the zero-fill — for a
-    // caller that immediately full-overwrites the buffer (pack_pool::alloc_bytes
-    // memcpy's a non-null src over every byte), where the memset is pure waste
-    // (doc 28 zeroinit verdict). NEVER use create_uninit for a writable canvas a
-    // consumer may read before writing — that path keeps create()'s zero-fill.
+    // create() returns UNINITIALISED pixels (CT ruling, 2026-07: canvas
+    // zero-fill removed — the info-leak from a recycled buffer's stale bytes is
+    // accepted). A producer MUST fully overwrite every byte it exposes; a
+    // partial-paint producer must clear the regions it does not write, or stale
+    // pixels ride onto the wire / into a record. A recycled magazine buffer
+    // carries the PREVIOUS image's bytes. (The prior create()/create_uninit()
+    // split collapsed here: both were the same mint once zero-fill went away.)
     xi_image_handle create(int32_t w, int32_t h, int32_t ch) {
-        return create_(w, h, ch, /*zero_fill=*/true);
-    }
-    xi_image_handle create_uninit(int32_t w, int32_t h, int32_t ch) {
-        return create_(w, h, ch, /*zero_fill=*/false);
+        return create_(w, h, ch);
     }
 
 private:
-    xi_image_handle create_(int32_t w, int32_t h, int32_t ch, bool zero_fill) {
+    xi_image_handle create_(int32_t w, int32_t h, int32_t ch) {
         // D-P1-7: validate dimensions BEFORE entering counter / slot
         // bookkeeping. The original `(size_t)w * h * ch` cast applies
         // only to the first multiplicand; `h * ch` is int32 mul first,
@@ -391,18 +384,10 @@ private:
             return 0;
         }
         entry->size = (uint64_t)pixels;
-        // ZERO-FILL: create() has always returned zeroed pixels (the old
-        // vector::resize value-init), and callers exist that rely on it
-        // (e.g. plugins that paint shapes onto a "blank" canvas). A recycled
-        // magazine buffer carries the PREVIOUS image's bytes, so we memset
-        // the logical size explicitly. Still ~5-10x cheaper than the old
-        // path for the hot same-size case: the memset writes warm, already-
-        // faulted-in pages instead of malloc + zero + first-touch faults.
-        // Flip kZeroFillCreate ONLY with proof no caller reads-before-write.
-        // zero_fill=false (create_uninit) skips it for a caller that immediately
-        // full-overwrites the buffer.
-        if (kZeroFillCreate && zero_fill)
-            std::memset(entry->buf.mem, 0, (size_t)pixels);
+        // NO ZERO-FILL (CT ruling, 2026-07): the buffer is handed back with
+        // whatever bytes it carries (a recycled magazine buffer holds the
+        // previous image's pixels). The producer overwrites what it exposes; the
+        // pool spends no per-create memset. See create()'s contract note above.
         entry->width    = w;
         entry->height   = h;
         entry->channels = ch;

@@ -650,6 +650,66 @@ static void test_padded_layout() {
     CHECK(pool_live() == base, "padded-layout mint released on BufRef drop");
 }
 
+// ------------------------------------------------------------------
+// The two KEPT zero regions survive a DIRTY recycle (CT ruling 2026-07: the pool
+// no longer zero-fills, so a recycled buffer carries stale bytes — but the blob
+// head pad and place_padded_head's pad gap are zeroed EXPLICITLY for wire
+// determinism, and must be zero even when the underlying buffer is dirty).
+// ------------------------------------------------------------------
+static void test_kept_zero_regions_over_dirty_recycle() {
+    const int base = pool_live();
+    const int N = 4096;   // a size class; the recycler is per-thread LIFO by class
+
+    // Dirty a buffer of size class N and release it back into the magazine. With
+    // zero-fill gone, a later same-size mint recycles these 0xFF bytes verbatim.
+    {
+        xi_image_handle dirty = xi::ImagePool::instance().create(N, 1, 1);
+        CHECK(dirty != XI_IMAGE_NULL, "dirty scratch minted");
+        if (dirty) {
+            std::memset(xi::ImagePool::instance().data(dirty), 0xFF, N);
+            xi::ImagePool::instance().release(dirty);   // -> magazine, still 0xFF
+        }
+    }
+
+    // (1) mint_blob's HEAD PAD [8+desc_len, payload_off) is zero over the recycle.
+    {
+        xi::mp::Bytes desc = xi::BlobDesc("acme/scan").i64("n", 1).build();
+        const uint32_t desc_len = uint32_t(desc.size());
+        const uint64_t payload_off = xi::blob_payload_off(desc_len);
+        CHECK(payload_off > uint64_t(8) + desc_len, "there is a real pad gap to check");
+        const int64_t payload_len = int64_t(N) - int64_t(payload_off);   // total == N (same class)
+        xi::BufRef ref = xi::mint_blob(desc.data(), int32_t(desc_len), payload_len);
+        CHECK((bool)ref, "mint_blob over a dirty recycled buffer");
+        if (ref) {
+            const uint8_t* buf_base = ref.payload() - payload_off;   // back to the buffer base
+            bool pad_zero = true;
+            for (uint64_t i = uint64_t(8) + desc_len; i < payload_off; ++i)
+                pad_zero = pad_zero && buf_base[i] == 0;
+            CHECK(pad_zero, "blob head pad is zero even over a dirty recycled buffer");
+        }
+    }
+
+    // (2) place_padded_head's pad gap is zero even when we deliberately dirty it.
+    {
+        auto L = xi::padded_layout(10, 100);            // head 10 -> data_off 64
+        xi::mp::Bytes desc = xi::BlobDesc("acme/scan").build();
+        xi::BufRef ref = xi::mint_blob(desc.data(), int32_t(desc.size()), int64_t(L->total));
+        CHECK(L && (bool)ref, "mint for the padded-layout dirty check");
+        if (L && ref) {
+            uint8_t* payload = ref.payload();
+            std::memset(payload, 0xAB, size_t(L->total));   // dirty the whole payload
+            std::vector<uint8_t> head = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+            uint8_t* bulk = xi::place_padded_head(payload, head, *L);
+            bool pad_zero = true;
+            for (size_t i = head.size(); i < L->data_off; ++i)
+                pad_zero = pad_zero && payload[i] == 0;
+            CHECK(pad_zero, "place_padded_head zeroes the pad gap over dirty bytes");
+            CHECK(bulk == payload + L->data_off, "bulk lands at data_off");
+        }
+    }
+    CHECK(pool_live() == base, "dirty-recycle KEEP-zero mints released on drop");
+}
+
 int main() {
     std::printf("test_xi_pack\n");
     test_lifecycle_and_contract_layer();
@@ -670,6 +730,7 @@ int main() {
     test_bin_pool_exhaustion_no_null_span();
     test_sort_idx_recycle();
     test_padded_layout();
+    test_kept_zero_regions_over_dirty_recycle();
     if (g_fail == 0) { std::printf("  OK (all checks passed)\n"); return 0; }
     std::printf("  %d check(s) FAILED\n", g_fail);
     return 1;
