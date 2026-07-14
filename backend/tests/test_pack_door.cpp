@@ -719,6 +719,141 @@ static void test_pack_v3_door() {
     CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
 }
 
+// ---------------------------------------------------------------------------
+// (10) Finding ⑦ regression: foreign msgpack is canonicalized AT THE C-ABI SEAM
+//      (builder_add_mp), turning "ingress is the only path" from a convention
+//      into structure. Well-formed canonical bytes round-trip byte-identical
+//      (canonicalize is idempotent, so wire/golden bytes are unaffected);
+//      malformed / ext-bearing (incl. handle-shaped) bytes are REFUSED — nothing
+//      is stored, matching ScriptPack::add_mp's fail-closed drop. Pre-fix this
+//      trampoline copied caller bytes verbatim into the slab, so hostile msgpack
+//      could ride the wire / a replay file.
+// ---------------------------------------------------------------------------
+static void test_add_mp_seam_canonicalize() {
+    SECTION("⑦: builder_add_mp canonicalizes foreign msgpack at the C-ABI seam");
+    xi::install_pack_abi();
+    const xi_pack_v1* fi = xi::pack_v1_iface();
+
+    // Well-formed canonical value (an xi::mp::Writer value is canonical by
+    // construction — max-width tags, string keys).
+    xi::mp::Writer mw;
+    mw.array(2); mw.int_(1); mw.str("hi");
+    const xi::mp::Bytes canon(mw.bytes());   // copy: seal recycles the writer's buffer path
+
+    xi_pack_builder b = fi->builder_new();
+    fi->builder_add_mp(b, "good", canon.data(), (int32_t)canon.size());
+
+    // Malformed: a fixarray header claiming 4 elements with no payload — the
+    // classic truncation the interior must never trust.
+    const uint8_t truncated[1] = { 0x94 };
+    fi->builder_add_mp(b, "trunc", truncated, (int32_t)sizeof truncated);
+
+    // Handle-shaped ext (fixext1, type 0x70 = kPoolHandleExtType): a forged pool
+    // ref. reject-all ext policy refuses it (ingress never imports a pool handle).
+    const uint8_t handle_ext[3] = { 0xd4, 0x70, 0x00 };
+    fi->builder_add_mp(b, "forged", handle_ext, (int32_t)sizeof handle_ext);
+
+    // Any other foreign ext is likewise refused by the reject-all policy.
+    const uint8_t any_ext[3] = { 0xd4, 0x01, 0x2a };
+    fi->builder_add_mp(b, "ext", any_ext, (int32_t)sizeof any_ext);
+
+    xi_pack_handle f = fi->builder_seal(b);
+    CHECK(f != XI_PACK_NULL);
+
+    // Only the well-formed entry survived; the three hostile ones were dropped.
+    CHECK(fi->count(f) == 1);
+    CHECK(fi->tag_of(f, "good") == XI_PACK_TAG_MP);
+    CHECK(fi->tag_of(f, "trunc")  == -1);
+    CHECK(fi->tag_of(f, "forged") == -1);
+    CHECK(fi->tag_of(f, "ext")    == -1);
+
+    // Byte-identical: canonical input re-emitted verbatim (idempotent) — wire
+    // and golden bytes are unaffected by the seam gate.
+    const void* mp = nullptr; int32_t ml = 0;
+    CHECK(fi->get_mp(f, "good", &mp, &ml) == 1);
+    CHECK(ml == (int32_t)canon.size());
+    CHECK(mp && std::memcmp(mp, canon.data(), canon.size()) == 0);
+
+    fi->release(f);
+}
+
+// ---------------------------------------------------------------------------
+// (11) Finding ② regression (mechanism-level): the single-creator-tag invariant
+//      requires the creator's seal ref to be retired UNDER OwnerGuard(creator).
+//      reinit() destroys the OLD plugin instance, whose dtor releases the pack
+//      refs it created; the fix wraps that destroy in OwnerGuard(owner_id_) so
+//      those releases match the creator tag and clear it (exactly like the
+//      adapter dtor path). This pins the invariant both ways: a GUARDED creator
+//      release (what fixed reinit now does) clears the tag, so a later owner
+//      sweep reclaims nothing and a consumer's co-held ref survives; an
+//      UNGUARDED release (the pre-fix reinit path — destroy ran off-guard, so
+//      release_as(pack, 0)) STRANDS the tag, and the same sweep then
+//      over-releases the consumer's live ref — the UAF finding ② describes.
+//
+//      NOTE: this drives the PackRegistry mechanism directly rather than a real
+//      reinit() through a DLL. A faithful reinit-driven test needs a plugin
+//      whose dtor releases a pack ref it created (a cache/ring plugin); no such
+//      test plugin exists and building one was out of scope ("no huge new
+//      harness"). The fix itself (xi_cabi_adapter.hpp reinit) is a one-line
+//      OwnerGuard mirroring the already-tested dtor path.
+// ---------------------------------------------------------------------------
+static void test_reinit_creator_tag_ownerguard() {
+    SECTION("②: the creator seal ref must be retired under OwnerGuard(creator)");
+    xi::install_pack_abi();
+    const xi_pack_v1* fi = xi::pack_v1_iface();
+    auto& reg = xi::PackRegistry::instance();
+    size_t base_frames = reg.live_frames();
+
+    xi::ImagePoolOwnerId X = xi::ImagePool::alloc_owner_id();   // the OLD instance (creator)
+    xi::ImagePoolOwnerId Q = xi::ImagePool::alloc_owner_id();   // a consumer co-holding the pack
+
+    // --- THE FIX: the old instance's dtor releases its seal ref UNDER
+    //     OwnerGuard(owner_id_) (fixed reinit). The tag clears; the sweep is safe.
+    {
+        xi_pack_handle P = XI_PACK_NULL;
+        { xi::ImagePool::OwnerGuard g(X);            // old instance seals under its guard
+          xi_pack_builder b = fi->builder_new();
+          fi->builder_add_i64(b, "seq", 7);
+          P = fi->builder_seal(b); }
+        CHECK(P != XI_PACK_NULL);
+        CHECK(reg.owner_refs(X) == 1);               // creator tag live (rc 1)
+        { xi::ImagePool::OwnerGuard g(Q); fi->retain(P); }   // consumer co-holds (rc 2, untracked)
+
+        { xi::ImagePool::OwnerGuard g(X); fi->release(P); }  // GUARDED release → tag cleared, rc 1
+        CHECK(reg.owner_refs(X) == 0);               // NOT stranded
+        CHECK(xi::ImagePool::sweep_packs_for(X) == 0);       // later teardown sweep reclaims nothing
+        int64_t v = 0;
+        CHECK(fi->get_i64(P, "seq", &v) == 1 && v == 7);     // consumer's ref still valid — no UAF
+        { xi::ImagePool::OwnerGuard g(Q); fi->release(P); }  // consumer done → freed exactly once
+        CHECK(reg.live_frames() == base_frames);
+    }
+
+    // --- THE BUG the fix removes: an UNGUARDED creator release (pre-fix reinit's
+    //     destroy ran with current_owner()==0 → release_as(pack, 0)). The tag
+    //     clears only on owner match, so it STAYS live and lies; the owner sweep
+    //     then over-releases the consumer's surviving ref → the pack is freed
+    //     while Q still holds it. Reproduced here to prove the mechanism (and to
+    //     document precisely what the OwnerGuard prevents).
+    {
+        xi_pack_handle P = XI_PACK_NULL;
+        { xi::ImagePool::OwnerGuard g(X);
+          xi_pack_builder b = fi->builder_new();
+          fi->builder_add_i64(b, "seq", 9);
+          P = fi->builder_seal(b); }
+        CHECK(P != XI_PACK_NULL);
+        { xi::ImagePool::OwnerGuard g(Q); fi->retain(P); }   // consumer co-holds (rc 2)
+
+        reg.release_as(P, 0);                        // UNGUARDED release (owner 0 != creator X): rc 1
+        CHECK(reg.owner_refs(X) == 1);               // STRANDED tag — the defect
+        CHECK(xi::ImagePool::sweep_packs_for(X) == 1);       // sweep over-releases Q's live ref
+        int64_t v = 0;
+        CHECK(fi->get_i64(P, "seq", &v) == 0);       // P freed under Q — the finding-② UAF
+        // Q's ref is now dangling by construction; the over-release already drove
+        // rc to 0, so nothing more to release — the table is back to baseline.
+        CHECK(reg.live_frames() == base_frames);
+    }
+}
+
 int main() {
     std::printf("[test] xi.pack@1 carved data-plane door + dispatch dual-carry\n");
     test_door_probe();
@@ -730,6 +865,8 @@ int main() {
     test_bin_pool_exhaustion_no_null_span();
     test_cross_plane_owner_sweep_keeps_coowned_pack_buffers();
     test_pack_v3_door();
+    test_add_mp_seam_canonicalize();
+    test_reinit_creator_tag_ownerguard();
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
         return 0;
