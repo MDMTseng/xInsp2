@@ -27,10 +27,12 @@
 
 #include "xi_abi.h"          // xi_pack_handle / xi_pack_v1 / xi_pack_image
 #include "xi_pack.hpp"      // xi::Pack / xi::PackBuilder (the container)
+#include "xi_ingress.hpp"   // xi::ingress::canonicalize_into (the foreign-mp gate)
 #include "xi_image_pool.hpp" // ImagePool::publish_pack_iface (the door slot)
 #include "xi_trigger_bus.hpp"// TriggerBus::emit_pack / set_pack_releaser
 
 #include <atomic>
+#include <cstdio>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -270,9 +272,40 @@ inline void f_adopt_image(xi_pack_builder b, const char* key,
     if (auto* fb = PackRegistry::instance().builder(b))
         fb->adopt_image(key ? key : "", w, h, c, handle);
 }
+// Finding ⑦: canonicalize foreign msgpack AT THE C-ABI SEAM. Before this fix
+// "all foreign msgpack is canonicalized at ingress" was a CONVENTION — only
+// ScriptPack::add_mp and xi::ingress gated; this raw trampoline (reached by
+// PackOut::mp and any plugin calling builder_add_mp directly) copied caller
+// bytes verbatim into the slab via PackBuilder::add_mp (which trusts). Hostile
+// or malformed msgpack — including handle-shaped ext (a forged pool ref) — could
+// enter a pack entry and travel onto the wire or a replay file. Route it through
+// the SAME xi::ingress::canonicalize_into machinery ingress uses (reject-all ext
+// policy by default), turning the convention into structure:
+//   * already-canonical input re-emits byte-identical (canonicalize is
+//     idempotent), so wire/golden bytes are unaffected;
+//   * malformed / ext-bearing / non-string-keyed / duplicate-keyed bytes are
+//     REFUSED — nothing is stored, matching ScriptPack::add_mp's fail-closed
+//     drop. The seam is void (no bool the foreign caller could check), so the
+//     refusal is made loud with a warn-once diagnostic instead of a silent drop.
 inline void f_add_mp(xi_pack_builder b, const char* key, const void* mp, int32_t len) {
-    if (auto* fb = PackRegistry::instance().builder(b))
-        fb->add_mp(key ? key : "", mp, len > 0 ? (size_t)len : 0);
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return;
+    const size_t n = len > 0 ? (size_t)len : 0;
+    if (n == 0 || !mp) { fb->add_mp(key ? key : "", mp, n); return; }  // empty/nil: nothing to validate
+    std::span<const uint8_t> foreign(static_cast<const uint8_t*>(mp), n);
+    ingress::Result r = ingress::canonicalize_into(*fb, key ? key : "",
+                                                   foreign, /*type_tag=*/{});
+    if (!r.ok()) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            std::fprintf(stderr,
+                "[xinsp2] xi.pack builder_add_mp REFUSED foreign msgpack for key "
+                "'%s' (codec status %d, semantic_ok %d) — malformed / ext-bearing "
+                "/ non-canonical bytes are rejected at the C-ABI seam, not stored "
+                "(finding ⑦). The entry is omitted.\n",
+                key ? key : "", (int)r.codec_status, (int)r.semantic_ok);
+        }
+    }
 }
 inline xi_pack_handle f_seal(xi_pack_builder b) { return PackRegistry::instance().seal(b); }
 inline void f_abandon(xi_pack_builder b) { PackRegistry::instance().abandon(b); }
