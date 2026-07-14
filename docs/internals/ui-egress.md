@@ -106,8 +106,20 @@ Producer opt-in is per-producer (e.g. mock_camera's `ui_preview`, default off).
 
 ## Tests
 
-- `qa_ui_egress` (e2e): rate cap honoured (a fast producer, the wire ≤ ~fps),
-  latest-wins, no-subscriber → zero encode (`stats.encodes`==0), cap-absent
-  no-op (no imgcodec → raw fallback; no `ui_egress` → producer push is a no-op).
-- The content-keyed dedup + LRU eviction + latest-wins slot semantics are pinned
-  by a ctest unit over the dedup memo.
+- **`plugins/cap_ui_egress_test.cpp`** (ctest unit) drives the WHOLE pipeline in
+  process against the three REAL DLLs (ui_egress + imgcodec + expose) through the
+  real cap plane, observed only through the `stats` / `get` / `subscribe`
+  exchanges. Because a push does NOT force an early flush (the flusher's wake CV
+  predicate only fires on shutdown), a low `fps` gives a race-free window between
+  flushes, so it pins the timer-driven semantics DETERMINISTICALLY: full-path
+  delivery, **no-subscriber → zero encode** (drop at the probe, `encodes`
+  unmoved, expose stores nothing), **content dedup** (`encodes` pinned while
+  `dedup_hits` climbs), **latest-wins** (a burst collapses to the LAST frame —
+  the superseded ones do zero encode work), **LRU eviction** (`lru_entries` caps
+  at `lru_max`), and unregister-on-teardown + pack balance.
+- **`examples/qa_ui_egress`** (python e2e) proves the wall-clock behaviour the
+  ctest cannot: a 30fps `mock_camera` (`ui_preview=on`) is **rate-capped** to the
+  egress `fps` at a real WS client (delivered ≪ pushed) carrying a full-res jpeg
+  preview; the **no-subscriber** window shows `encodes==0`/`dropped_no_sub>0`; and
+  the **cap-absent** phase (no `ui_egress`) leaves the product plane byte-intact
+  with nothing on `ui/cam`.

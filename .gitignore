@@ -118,6 +118,10 @@ examples/*/gw.log
 # (path-containment guard forbids the old "../inspect.cpp" reference)
 examples/qa_jpeg_preview/no_codec/inspect.cpp
 
+# qa_ui_egress phase2 (cap-absent): driver copies the script into no_egress/ at
+# run time for the same path-containment reason.
+examples/qa_ui_egress/no_egress/inspect.cpp
+
 # qa runtime artifacts (health snapshots + removed-instance residue)
 examples/**/*.log.health
 examples/qa_remove_under_load/instances/victim/

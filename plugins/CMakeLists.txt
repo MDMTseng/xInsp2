@@ -479,6 +479,27 @@ endif()
 add_dependencies(cap_imgcodec_test imgcodec)
 add_test(NAME cap_imgcodec_test COMMAND cap_imgcodec_test)
 
+# LIVE-UI egress pipeline (spec 31 / docs/internals/ui-egress.md) end to end
+# across the THREE REAL DLLs through the REAL cap plane: push -> xi.ui.egress
+# (ui_egress latest-wins slot + timer flusher) -> xi.jpeg.encode (imgcodec) ->
+# xi.ui.sink (expose byte-blind store + subscription gate). Pins the LRU/slot
+# runtime the python e2e cannot make deterministic — dedup, no-subscriber zero
+# encode, latest-wins collapse, LRU eviction — observed only through the "stats"
+# and "get"/"subscribe" exchanges. Needs the same host (make_host_api +
+# install_pack_abi + install_cap_plane).
+add_executable(cap_ui_egress_test cap_ui_egress_test.cpp)
+target_include_directories(cap_ui_egress_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
+target_compile_definitions(cap_ui_egress_test PRIVATE
+    UI_EGRESS_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ui_egress/xi-ui_egress.dll"
+    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec.dll"
+    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose.dll")
+if(WIN32)
+    target_link_libraries(cap_ui_egress_test PRIVATE Ws2_32)
+endif()
+add_dependencies(cap_ui_egress_test ui_egress imgcodec expose)
+add_test(NAME cap_ui_egress_test COMMAND cap_ui_egress_test)
+
 # polaris2 CORE-CODEC EVICTION (stage 1) — the HOST's read_image_file
 # (backend/src/xi_image_io.cpp, linked in so its static installer runs)
 # delegating decode to xi.image.decode with an stb fallback: byte-equivalence
