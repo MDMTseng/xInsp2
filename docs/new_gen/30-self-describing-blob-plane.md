@@ -23,10 +23,13 @@ pool buffer (base is 64B-aligned):
 
 - The descriptor is a **canonical msgpack map, string keys** (same canonical
   rules as pack ingress; validated fail-loud wherever foreign bytes arrive).
-- Required key: `"t"` — the type string, namespaced by convention
+- Convention key `"t"` — the type string, namespaced by convention
   (`"toolbox-id/type-name"`, e.g. `"xi/image"`, `"acme-scan/profile3d"`).
-  Collisions are avoided by namespace, not by a central registry: **the core
-  owns no type space**.
+  Required **by convention** (every typed consumer reads it), but the core seam
+  does **not** enforce its presence — `blob_head_validate` checks the descriptor
+  is a canonical map and interprets no key (**the core owns no type space**). A
+  `"t"`-less blob is well-formed to the core; `type_of` simply returns none.
+  Collisions are avoided by namespace, not by a central registry.
 - Convention keys for raster/tensor data (used by `xi/image` and friends):
   `"w"`,`"h"`,`"c"` (int), `"dt"` (str: `"u8"|"u16"|"i32"|"f32"|"f64"`).
   Toolboxes add their own keys freely — the core never reads any of them.

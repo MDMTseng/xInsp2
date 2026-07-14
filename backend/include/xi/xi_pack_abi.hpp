@@ -271,10 +271,17 @@ inline void f_add_image(xi_pack_builder b, const char* key,
                         int32_t w, int32_t h, int32_t c, const void* px) {
     auto* fb = PackRegistry::instance().builder(b);
     if (!fb) return;
+    // Guard the dims BEFORE the signed w*h*c multiply (mint_image does; this
+    // adapter must too — doc 28 finding B①). A non-positive dim, or a product
+    // over the pool cap, is refused rather than dropped silently via a wrapped
+    // length or left to signed-overflow UB.
+    if (w <= 0 || h <= 0 || c <= 0) return;
+    const uint64_t need = uint64_t(w) * uint64_t(h) * uint64_t(c);
+    if (need > uint64_t(INT32_MAX)) return;                    // pool per-buffer cap
     xi::mp::Bytes desc = xi::make_image_desc(w, h, c, "u8");   // {t,w,h,c,dt}
     if (desc.empty()) return;                                  // bad shape/dtype
     fb->add_blob(key ? key : "", desc.data(), int32_t(desc.size()),
-                 px, int64_t(w) * int64_t(h) * int64_t(c));
+                 px, int64_t(need));
 }
 // adopt_image over a RAW pixel handle: a raw pool buffer has no self-describing
 // head, so zero-copy adoption is impossible in the blob plane. The adapter
@@ -408,10 +415,20 @@ inline int32_t f_get_image(xi_pack_handle f, const char* key, xi_pack_image* out
     if (!bv) return 0;
     auto t = Pack::desc_find_str(bv->desc, "t");
     if (!t || *t != std::string_view("xi/image")) return 0;
+    // The frozen xi_pack_image contract is u8 pixels with length == w*h*c. An
+    // xi/image blob may legitimately be u16/f32 (the SDK reader handles dt); the
+    // @1 adapter must NOT lie about it — fail closed unless it is a u8 image
+    // whose payload size matches the dims. A dt-less descriptor is u8 by the
+    // xi/image convention. (doc 28 finding A①: "the frozen door lies".)
+    auto dt = Pack::desc_find_str(bv->desc, "dt");
+    if (dt && *dt != std::string_view("u8")) return 0;
     auto w = Pack::desc_find_i64(bv->desc, "w");
     auto h = Pack::desc_find_i64(bv->desc, "h");
     auto c = Pack::desc_find_i64(bv->desc, "c");
     if (!w || !h || !c) return 0;
+    if (*w <= 0 || *h <= 0 || *c <= 0) return 0;
+    if (uint64_t(bv->payload.size()) != uint64_t(*w) * uint64_t(*h) * uint64_t(*c))
+        return 0;                                  // dims must match the u8 payload
     if (out) {
         out->width    = int32_t(*w);
         out->height   = int32_t(*h);

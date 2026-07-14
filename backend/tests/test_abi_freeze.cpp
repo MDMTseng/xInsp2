@@ -149,7 +149,8 @@ XI_FREEZE_IFACE(xi_log_v1, set_status, 8, void (*)(const char*, const char*));
 
 // xi.pack@1 (HOST door) — the v3-slab data plane's frozen keyed-buffer vtable =
 // 25 entries. FROZEN FOREVER: the builder_add_bool/get_bool tail was the last
-// pre-cutover append; all later growth ships as xi.pack@3 below. The header
+// pre-cutover append; all later growth ships as xi.pack@4 below (the @3 tensor
+// door was deleted with zero consumers — spec 30). The header
 // carries a size + last-field static_assert too (belt); this pins every field.
 static_assert(sizeof(xi_pack_v1) == 25 * sizeof(void*), "xi_pack_v1 size changed (frozen @1)");
 XI_FREEZE_IFACE(xi_pack_v1, builder_new,         0,   xi_pack_builder (*)(void));

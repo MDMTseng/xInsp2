@@ -459,6 +459,11 @@ inline BufRef mint_blob(const void* desc, int32_t desc_len, int64_t payload_len)
     xi_image_handle h = pack_pool::alloc_canvas(size_t(total));
     if (!h) return {};
     uint8_t* base = pack_pool::writable(h);
+    // payload_off is a multiple of kBlobPayloadAlign, so a 64B-aligned base (the
+    // ImagePool guarantee) lands the payload 64B-aligned. Assert the premise so a
+    // future pool change breaks loud here, not in a SIMD consumer downstream.
+    assert((reinterpret_cast<uintptr_t>(base) % kBlobPayloadAlign) == 0 &&
+           "pool buffer base is not 64B-aligned — blob payload alignment broken");
     pack_mp_detail::put_u32_le(base + 0, kBlobMagic);
     pack_mp_detail::put_u32_le(base + 4, uint32_t(desc_len));
     std::memcpy(base + 8, d, size_t(desc_len));
@@ -817,18 +822,27 @@ public:
         // INLINE: the payload is a canonical bin32 — skip its header (④A).
         return pack_mp_detail::read_bin(slab() + e->off);
     }
-    // Self-describing blob: validate the head, return the descriptor map view +
-    // the 64B-aligned payload span (both zero-copy over the pool buffer). nullopt
-    // on absent/wrong-tag key, a dead/under-sized pool buffer (F1 guard), or a
-    // buffer that fails blob_head_validate (defence in depth — adopt validated,
-    // but a Blob entry always re-derives its offsets from a validated head).
+    // Self-describing blob: re-derive the descriptor map view + the 64B-aligned
+    // payload span (both zero-copy over the pool buffer). nullopt on absent/
+    // wrong-tag key, a dead/under-sized pool buffer (F1 guard), or a head whose
+    // offsets are out of bounds. The head's descriptor was FULLY validated
+    // (blob_head_validate, canonical map) at adopt/ingress and a sealed pack is
+    // immutable, so the read path uses the cheap blob_head_bounds_ok — it keeps
+    // the offset-safety re-derivation (subspans can't escape the buffer) without
+    // re-canonicalizing the descriptor every read (doc 28 finding A④).
     std::optional<BlobView> get_blob(std::string_view key) const {
         const auto* e = find(key);
         if (!e || PackTag(e->tag) != PackTag::Blob) return std::nullopt;
         const pack_detail::ExtRecord& r = ext_of(*e);
         auto buf = pack_pool::view(r.handle);
         if (!r.handle || buf.size() < r.total_len) return std::nullopt;   // F1 guard
-        if (!blob_head_validate(buf.data(), size_t(r.total_len))) return std::nullopt;
+        if (!blob_head_bounds_ok(buf.data(), size_t(r.total_len))) return std::nullopt;
+        // Pool buffers are 64B-aligned (ImagePool guarantee) → payload_off (a
+        // multiple of 64) lands the payload 64B-aligned; assert the base premise
+        // so a future pool change that prefixes a data header fails loud here
+        // rather than silently handing SIMD/cv::Mat consumers a misaligned span.
+        assert((reinterpret_cast<uintptr_t>(buf.data()) % kBlobPayloadAlign) == 0 &&
+               "pool buffer base is not 64B-aligned — blob payload alignment broken");
         const uint32_t desc_len = pack_mp_detail::get_u32_le(buf.data() + 4);
         const uint64_t payload_off = blob_payload_off(desc_len);
         BlobView v;
