@@ -47,8 +47,9 @@ expose = pure transport: channel subscriptions + WS fan-out, drop-not-queue
 - Channel naming: `ui/<instance-id>` is the default panel channel.
 - Dispatch defaults: `xi/image` u8 → jpeg q80; f32/u16 → normalize→u8 (or
   PNG16); `xi/jpeg` → pass-through; unknown `"t"` → metadata card; >2MP →
-  downscale to ≤1MP first. All expose/egress CONFIG (per-channel overridable),
-  never ABI.
+  downscale to ≤1MP first. All expose/egress CONFIG, never ABI. (E1 ships a
+  SINGLE-GLOBAL config — the per-channel override table is DEFERRED until a real
+  consumer needs divergent per-channel policy.)
 - Dedup key = pool handle (+policy fingerprint): sealed buffers are immutable,
   so the handle IS the content identity. LRU bounded (32 entries default),
   retains while cached.

@@ -62,7 +62,8 @@ nothing — the "idle channels are literally free" refinement), then per channel
    `xi.imgcodec`'s memo does for the same ABI reason — content IS the identity
    (sealed buffers are immutable). The same image pushed to two channels / across
    ticks **encodes once**; `stats.encodes` vs `stats.dedup_hits` is the proof.
-3. **Dispatch by descriptor `"t"`** (all config, per-channel overridable):
+3. **Dispatch by descriptor `"t"`** (all config; E1 is SINGLE-GLOBAL — a
+   per-channel override table is DEFERRED, see the Config note below):
    - `xi/image` u8 → `xi.jpeg.encode` at `quality` (default 80). Images larger
      than `downscale_mp` megapixels are **box-downscaled** (area-average) to
      ≤~1MP FIRST, INSIDE egress — the codec stays a pure encoder.
@@ -103,6 +104,12 @@ all shared state is mutex-guarded, counters are atomics.
 `lru_max` (32). `exchange "stats"` → `{pushes, flushes, encodes, dedup_hits,
 dropped_no_sub, raw_fallbacks, lru_entries, registered}`; `"clear"` drains.
 Producer opt-in is per-producer (e.g. mock_camera's `ui_preview`, default off).
+
+**DEFERRED (E1): single-global config.** `set_def` sets ONE config for the whole
+instance; there is no per-channel override table yet. A project that needs
+divergent per-channel policy (different fps/quality per channel) runs a separate
+`ui_egress` instance per policy today; the override table lands when a real
+consumer needs it.
 
 ## Tests
 
