@@ -18,7 +18,22 @@ const TAG = {
   toggle: "xi-toggle",
   radio: "xi-radio",
   dropdown: "xi-dropdown",
+  text: "xi-text",
 };
+
+// Create ONE control element from a control descriptor {type,key,label,min,max,
+// step} and attach its change handler. Attributes only — the CALLER appends it
+// and then applies `value`/`options` (a Svelte CE picks up those props reliably
+// once connected). `onChange(value, el)` fires per edit. Shared by mountPanel
+// (def → set_instance_def) and mountParamPanel (manifest → set_param).
+function makeControlEl(doc, ctl, onChange) {
+  const tag = TAG[ctl.type] || "xi-number";     // unknown type degrades to number
+  const el = doc.createElement(tag);
+  if (ctl.label) el.setAttribute("label", ctl.label);
+  for (const a of ["min", "max", "step"]) if (ctl[a] != null) el.setAttribute(a, String(ctl[a]));
+  el.addEventListener("change", (e) => onChange(e.detail.value, el));
+  return el;
+}
 
 // Build a one-section descriptor from a def object by guessing a control per key.
 export function inferDescriptor(def, { section = "Config", tag = "control" } = {}) {
@@ -58,10 +73,11 @@ export async function mountPanel(host, opts) {
       secEl.appendChild(h);
     }
     for (const ctl of sec.controls || []) {
-      const tag = TAG[ctl.type] || "xi-number"; // total: unknown type degrades to number
-      const el = doc.createElement(tag);
-      if (ctl.label) el.setAttribute("label", ctl.label);
-      for (const a of ["min", "max", "step"]) if (ctl[a] != null) el.setAttribute(a, String(ctl[a]));
+      const el = makeControlEl(doc, ctl, async (value) => {
+        state[ctl.key] = value;
+        try { await client.setInstanceDef(instance, { ...state }); } catch { /* surfaced via WS log */ }
+        host.dispatchEvent(new CustomEvent("xi-change", { detail: { key: ctl.key, value }, bubbles: true }));
+      });
       const wrap = doc.createElement("div");
       wrap.className = "xi-control";
       wrap.appendChild(el);
@@ -69,11 +85,6 @@ export async function mountPanel(host, opts) {
       // Set properties AFTER the element is connected so the CE picks them up.
       if (ctl.options != null) el.options = ctl.options;
       if (ctl.key in state) el.value = state[ctl.key];
-      el.addEventListener("change", async (e) => {
-        state[ctl.key] = e.detail.value;
-        try { await client.setInstanceDef(instance, { ...state }); } catch { /* surfaced via WS log */ }
-        host.dispatchEvent(new CustomEvent("xi-change", { detail: { key: ctl.key, value: e.detail.value }, bubbles: true }));
-      });
       controls.push({ el, key: ctl.key });
     }
     host.appendChild(secEl);
@@ -86,6 +97,67 @@ export async function mountPanel(host, opts) {
       Object.assign(state, d);
       for (const { el, key } of controls) if (key in state) el.value = state[key];
     },
+    destroy() { host.innerHTML = ""; },
+  };
+}
+
+// ---- manifest param-panel (doc 31: set_param single-parameter set) ----------
+// A plugin manifest's `params` block is a flat list of tunables:
+//   [{ name, type?, min?, max?, step?, default?, options?, label? }]
+// `type` ∈ slider|number|toggle|radio|dropdown|text; when omitted it is inferred
+// from `default`/`options` (options → dropdown, boolean → toggle, min&max →
+// slider, string → text, else number).
+export function paramsToControls(params = []) {
+  return (params || []).map((p) => {
+    let type = p.type;
+    if (!type) {
+      if (Array.isArray(p.options)) type = "dropdown";
+      else if (typeof p.default === "boolean") type = "toggle";
+      else if (p.min != null && p.max != null) type = "slider";
+      else if (typeof p.default === "string") type = "text";
+      else type = "number";
+    }
+    return { type, key: p.name, label: p.label || p.name,
+             min: p.min, max: p.max, step: p.step, options: p.options, default: p.default };
+  });
+}
+
+// Render a manifest `params` block into a form of wired controls; each edit fires
+// client.setParam(name, value) (doc 31 single-parameter set — NOT set_instance_def).
+// opts: { client, params, section?, values? }  (values seeds initial control state)
+// Returns { setValues(map), values(), destroy() }; emits `xi-param` {name,value}.
+export function mountParamPanel(host, opts) {
+  const { client, params, section = "Parameters", values = {} } = opts;
+  const doc = host.ownerDocument || globalThis.document;
+  const controls = paramsToControls(params);
+  const state = { ...values };
+  for (const c of controls) if (!(c.key in state) && c.default !== undefined) state[c.key] = c.default;
+  const els = [];
+
+  host.innerHTML = "";
+  const secEl = doc.createElement("section");
+  secEl.className = "xi-section"; secEl.dataset.tag = "param";
+  if (section) {
+    const h = doc.createElement("h3"); h.className = "xi-section-title"; h.textContent = section;
+    secEl.appendChild(h);
+  }
+  for (const ctl of controls) {
+    const el = makeControlEl(doc, ctl, async (value) => {
+      state[ctl.key] = value;
+      try { await client.setParam(ctl.key, value); } catch { /* rsp error surfaced via WS log */ }
+      host.dispatchEvent(new CustomEvent("xi-param", { detail: { name: ctl.key, value }, bubbles: true }));
+    });
+    const wrap = doc.createElement("div"); wrap.className = "xi-control";
+    wrap.appendChild(el); secEl.appendChild(wrap);
+    if (ctl.options != null) el.options = ctl.options;
+    if (ctl.key in state) el.value = state[ctl.key];
+    els.push({ el, key: ctl.key });
+  }
+  host.appendChild(secEl);
+
+  return {
+    setValues(map) { Object.assign(state, map); for (const { el, key } of els) if (key in state) el.value = state[key]; },
+    values() { return { ...state }; },
     destroy() { host.innerHTML = ""; },
   };
 }
