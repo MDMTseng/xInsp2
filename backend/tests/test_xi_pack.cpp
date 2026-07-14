@@ -123,16 +123,16 @@ static void test_bool_entry() {
     // Fail-closed BOTH directions: no silent bool<->i64 coercion.
     CHECK(!f.get_i64("pass").has_value(), "bool entry refuses an i64 read");
     CHECK(!f.get_bool("one").has_value(), "i64 entry refuses a bool read");
-    // SLAB representation: raw_at is the RAW stored byte (0/1) now; the wire
-    // bytes come from the canonical walk. Check both planes: raw storage and
-    // the canonical emission a generic dumper splices to the wire (0xc2/0xc3).
-    CHECK(f.raw_at(0).size() == 1 && f.raw_at(0)[0] == 1, "raw true byte 1");
-    CHECK(f.raw_at(1).size() == 1 && f.raw_at(1)[0] == 0, "raw false byte 0");
+    // SLAB representation (④A memory==wire): raw_at IS the canonical bool byte
+    // (0xc3 true / 0xc2 false) — the wire bytes verbatim, not a raw 0/1. The
+    // canonical walk splices exactly those bytes.
+    CHECK(f.raw_at(0).size() == 1 && f.raw_at(0)[0] == 0xc3, "raw true byte 0xc3");
+    CHECK(f.raw_at(1).size() == 1 && f.raw_at(1)[0] == 0xc2, "raw false byte 0xc2");
     {
         xi::mp::Writer w;
         CHECK(f.canonical_value(0, w) && f.canonical_value(1, w), "canonical_value emits bools");
         CHECK(w.size() == 2 && w.bytes()[0] == 0xc3 && w.bytes()[1] == 0xc2,
-              "canonical walk emits 0xc3/0xc2 (wire parity)");
+              "canonical walk emits 0xc3/0xc2 (== raw_at, wire parity)");
     }
     int bools = 0;
     f.for_each([&](std::string_view, PackTag t) { if (t == PackTag::Bool) ++bools; });
@@ -389,7 +389,8 @@ static void test_for_each_entry_walk() {
             if (e.ordinal == 0) {
                 CHECK(e.key == "first" && e.tag == PackTag::I64 && !e.external,
                       "entry 0 is the inline i64");
-                CHECK(e.raw.size() == 8, "raw scalar is the 8-byte value");
+                CHECK(e.raw.size() == 9 && e.raw[0] == 0xd3,
+                      "raw i64 is the canonical int64 value (0xd3 + 8, ④A wire==memory)");
             } else if (e.ordinal == 1) {
                 CHECK(e.key == "img" && e.tag == PackTag::Image && e.external,
                       "entry 1 is the extern image");

@@ -14,12 +14,13 @@
 // number is reported verbatim, with any implementation cause named.
 //
 // ---------------------------------------------------------------------------
-// THE COSTS UNDER TEST (docs/new_gen/07-uniform-keyed-buffer-plane.md, updated
-// for the pack-v3 SLAB container — scalars stored RAW, canonical msgpack only
-// at the serialization edge via canonical_value):
+// THE COSTS UNDER TEST (docs/new_gen/07-uniform-keyed-buffer-plane.md, for the
+// pack-v3 SLAB container — inline payloads store the canonical msgpack value
+// (④A memory==wire), so a typed read skips the fixed-width header at a known
+// offset and serialization is a verbatim splice):
 //   C1  slab bump BUILD (staging scratch + one slab write at seal)         (§Costs)
 //   C2  one-shot pack FREE (slab back to the per-thread recycle pool)      (§lifecycle 4)
-//   C3  sealed RAW READS (binary search + one raw 8-byte load, no decode)  (§profile 1)
+//   C3  sealed TYPED READS (binary search + fixed-width header skip)       (§profile 1)
 //   C4  move-on-HOP (a sealed Pack hops as a MOVE — pointer swap, no copy,
 //       no refcount CAS)                                                   (§D "small plane")
 // The micros below isolate those costs at the same points.
@@ -43,7 +44,7 @@
 //   C1), seals to ONE contiguous slab, and the event carries the sealed Pack
 //   BY MOVE (C4 — ownership transfer is a pointer swap). The consumer READS M
 //   fields via the typed accessors: a binary search on the hash-sorted
-//   directory + a raw 8-byte load, zero msgpack decode (C3). FREE returns the
+//   directory + a fixed-width msgpack-header skip (④A) (C3). FREE returns the
 //   slab to the per-thread recycle pool in one shot (C2).
 //
 //   IMAGE traffic in the dispatch part is REAL: a pooled 320x240x3 frame
@@ -102,9 +103,10 @@ static constexpr int kReads   = 4;   // seq, score, count, $src  (the consumer's
 
 // ---------------------------------------------------------------------------
 // PACK lane metadata — build the same N scalars + nested map as a sealed slab
-// Pack through xi::PackBuilder. Scalars land RAW in the slab (one 8-byte store,
-// no msgpack encode); the nested region is one canonical-msgpack Mp entry
-// (nesting is msgpack's job, D3).
+// Pack through xi::PackBuilder. Each inline scalar lands as its canonical
+// msgpack value in the slab (④A memory==wire — one fixed-width encode at add);
+// the nested region is one canonical-msgpack Mp entry (nesting is msgpack's
+// job, D3).
 // ---------------------------------------------------------------------------
 static xi::Pack build_bench_pack(int64_t seq) {
     xi::PackBuilder b;
@@ -127,11 +129,10 @@ static xi::Pack build_bench_pack(int64_t seq) {
     return b.seal();
 }
 
-// The consumer's M reads on a sealed slab Pack — the crux of C3 post-slab: a
-// binary search on the hash-sorted directory + a raw aligned load per field,
-// zero msgpack decode. (The old precomputed-offset mp decode this replaces
-// measured the retired mp-plane representation; wire-byte offset decodes are
-// bench_pack_c's territory.)
+// The consumer's M reads on a sealed slab Pack — the crux of C3: a binary
+// search on the hash-sorted directory + a fixed-width msgpack-header skip per
+// field (④A: the inline payload is the canonical value, so a typed read decodes
+// the 0xd3/0xcb/0xdb header at a known offset — one branch, no allocation).
 static inline void read_bench_pack(const xi::Pack& f) {
     uint64_t s = 0;
     s += (uint64_t)f.get_i64("seq").value_or(0);
@@ -163,12 +164,11 @@ static double best_us(F&& op, int L = 2000, int R = 60) {
 // (b) PACK container (xi_pack.hpp) — PackBuilder + seal + read M (sealed typed
 //     accessors) + drop. The task's named "PackBuilder+seal+read+drop": slab
 //     BUILD (C1), sealed raw READ (C3), one-shot FREE (C2). No hop.
-//     METRIC MEANING CHANGE (slab migration): the container now stores scalars
-//     RAW in one slab (build no longer msgpack-encodes scalars; seal adds a
-//     hash-sort + one slab write; reads are raw 8-byte loads via binary
-//     search). GATE frame_micro_framebuilder_ns therefore measures the slab
-//     build/read/free cost — compare against pre-migration baselines with that
-//     in mind.
+//     METRIC MEANING (④A memory==wire): the container encodes each inline
+//     entry's canonical msgpack value into the slab at add-time; seal adds a
+//     hash-sort + one slab write; reads binary-search then skip the fixed-width
+//     header. GATE frame_micro_framebuilder_ns therefore measures the slab
+//     build/read/free cost — compare against pre-④A baselines with that in mind.
 static double micro_frame_builder() {
     return best_us([&] {
         xi::Pack f = build_bench_pack(7);
@@ -177,8 +177,10 @@ static double micro_frame_builder() {
     });
 }
 
-// (c) SLAB RAW READ — M typed reads on one pre-sealed pack, isolating C3 (the
-//     per-read cost: directory binary search + raw aligned load, no decode).
+// (c) SLAB TYPED READ — M typed reads on one pre-sealed pack, isolating C3 (the
+//     per-read cost: directory binary search + fixed-width msgpack-header skip;
+//     ④A stores the canonical value inline, so a read decodes the header at a
+//     known offset — one branch, zero copy for str/bin).
 //     METRIC RENAME (slab migration): this lane REPLACES the retired
 //     frame_micro_plane_memcpy_hop_ns ("mp plane + memcpy-hop + offset-read").
 //     That lane modelled the pre-slab representation — a contiguous canonical-
@@ -456,8 +458,8 @@ int main(int argc, char** argv) {
     double frr_ns = micro_slab_read()     * 1000.0;
     std::printf("  %-52s %9.1f ns/op\n", "PACK  PackBuilder+seal+read+drop [v3 slab]", frb_ns);
     std::printf("  %-52s %9.1f ns/op\n", "PACK  M typed raw-slab reads on a sealed pack [v3 read]", frr_ns);
-    std::printf("    ^ Slab cost = staged build + hash-sort seal + raw reads + one-shot free;\n");
-    std::printf("      Read cost = per-read directory binary search + raw aligned load (no decode).\n\n");
+    std::printf("    ^ Slab cost = staged build + hash-sort seal + typed reads + one-shot free;\n");
+    std::printf("      Read cost = per-read directory binary search + fixed-width header skip.\n\n");
 
     // -------- dispatch across parallelism ------------------------------------
     std::printf("--- closed-loop dispatch (matched load, inflight=parallel) — STEADY-STATE service latency ---\n");

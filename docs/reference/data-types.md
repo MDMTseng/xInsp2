@@ -10,8 +10,9 @@ The mechanics live in [`../internals/pack-plane.md`](../internals/pack-plane.md)
 The universal container since THE CUT (ABI v12): a sealed, immutable set of
 `key → typed entry` pairs. One *external* encoding everywhere — the same
 canonical msgpack bytes on the WS wire (XEX1-v3) and on disk (`.xex1`). In
-memory (pack-v3 slab) scalars are stored raw for zero-decode typed reads; the
-canonical bytes are produced at the serialization edge
+memory (pack-v3 slab) an inline entry stores that same canonical value, so
+memory == wire and a serialization boundary is a copy, not a re-encode; a typed
+read skips the fixed-width header at a known offset
 ([`../internals/pack-plane.md`](../internals/pack-plane.md)). Entry types:
 `i64`, `f64`, `bool`, `str`, `bin`, `image`, and `mp` (one nested
 canonical-msgpack subtree for arrays/maps — nesting is msgpack's job, not

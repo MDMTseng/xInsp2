@@ -6,38 +6,33 @@
 // historical-spelling rule); the frame under test is XEX1-v3 — the FINALIZED
 // canonical dump ([tag, value] entries, gate P3).
 //
-// WHY THE OLD IDENTITY DIED (pack-v3 slab migration, packv3 branch d8fe140):
-// this test used to be the polaris2 wave-2 headline "memory ≈ wire ≈ disk" —
-// it spliced pack.raw_at(i) onto the wire and asserted the entry's IN-MEMORY
-// arena bytes were already canonical msgpack, appearing VERBATIM in the frame.
-// That premise was retired BY DESIGN: the slab container stores scalars RAW
-// (i64/f64 = 8 aligned bytes, bool = one 0/1 byte, str = raw bytes with the
-// length in the DirEntry) so a typed read is one load with zero msgpack
-// decode. Memory != wire for scalars now; raw_at(i) returns the raw stored
-// payload, not a canonical value.
+// MEMORY == WIRE, RESTORED (④A, doc 28 finding ④): the slab container stores
+// each INLINE entry's payload as its CANONICAL MSGPACK VALUE — i64=int64
+// 0xd3+8, f64=float64 0xcb+8 (NaN flattened at add), bool=0xc2/0xc3, str=str32,
+// small bin=bin32, nested Mp verbatim. So raw_at(i) IS the wire bytes again,
+// and the identity is STRUCTURAL: canonical_value(i) is a verbatim SPLICE of
+// raw_at(i), not a re-encode a walker must keep honest. (This reverses the
+// interim slab state where scalars lived raw and memory != wire.)
 //
-// THE INVARIANT THAT HOLDS NOW (what this file pins, executably):
+// THE INVARIANT THIS FILE PINS, executably:
 //
-//   Pack::canonical_value(i, w)  ==  independent xi::mp::Writer re-encode
-//                                ==  the bytes the XEX1-v3 encoder emits
-//                                ==  the bytes on disk.
+//   Pack::raw_at(i)  ==  Pack::canonical_value(i, w)              (inline: structural)
+//                    ==  independent xi::mp::Writer re-encode
+//                    ==  the bytes the XEX1-v3 encoder emits
+//                    ==  the bytes on disk.
 //
-// Canonical msgpack is produced ON DEMAND at the serialization edge by the
-// pack's walk API (for_each_entry + canonical_value), byte-identical to what
-// the old arena stored (max-width profile, ruling-1 NaN flatten — the emit
-// goes through xi::mp::Writer, the one canonical-encode truth). The XEX1-v3
-// encoder (xex1_encode.hpp — the same encoder the protocol/fixtures goldens
-// pin, so walk == encoder here transitively means walk == goldens) splices
-// those bytes verbatim, and disk is a byte copy of the wire.
+// The XEX1-v3 encoder (xex1_encode.hpp — the same encoder the protocol/fixtures
+// goldens pin, so walk == encoder here transitively means walk == goldens)
+// splices those bytes verbatim, and disk is a byte copy of the wire.
 //
 // The test's value is unchanged — it caught encode drift before and must
 // still: it FAILS if the canonical walk and the encoder ever diverge. It
 // proves, on a real pack:
 //
-//   0. the retirement itself: scalar raw_at bytes are RAW (8B/1B payloads),
-//      NOT the canonical encoding — the old memory==wire claim is dead code,
-//      not silently still true by accident. (Mp entries alone stay canonical
-//      verbatim in the slab.)
+//   0. the restored identity: for every inline entry raw_at(i) EQUALS the
+//      canonical bytes byte-for-byte (i64/f64 carry the 0xd3/0xcb marker, bool
+//      is 0xc2/0xc3, str is str32, Mp is its canonical value) — memory == wire
+//      is a structure, not a convention the walker re-derives.
 //   1. walk == codec: canonical_value(i) is byte-identical to re-encoding the
 //      same typed value through an independent xi::mp::Writer.
 //   2. walk == wire: the XEX1-v3 frame built from the canonical walk carries
@@ -136,40 +131,41 @@ int main() {
     }
     CHECK(pack.size() == 8);
 
-    // ---- (0) the retirement, made executable: slab scalars are RAW ----------
-    // raw_at(i) is the raw stored payload now — 8 bytes for i64/f64 (no 0xd3/
-    // 0xcb marker), 1 byte for bool, bare string bytes for str. If any of these
-    // ever equals the canonical encoding again, someone resurrected the old
-    // representation and this file's premise (and comments) must be revisited.
-    SECTION("(0) memory != wire: scalar raw_at is the RAW payload, not canonical msgpack");
+    // ---- (0) the restored identity, made executable: raw_at == canonical -----
+    // memory == wire (④A): raw_at(i) IS the canonical value for every inline
+    // entry. i64/f64 carry the 0xd3/0xcb marker + 8 bytes, bool is one 0xc2/
+    // 0xc3 byte, str is a str32 value, Mp is its canonical bytes. Each must
+    // equal the independent re-encode byte-for-byte. If raw_at ever DIVERGES
+    // from canonical again, someone reintroduced a raw-scalar representation and
+    // this file's premise (and comments) must be revisited.
+    SECTION("(0) memory == wire: inline raw_at EQUALS the canonical msgpack value");
     pack.for_each_entry([&](const xi::Pack::EntryView& e) {
         if (e.external) return;                             // image: no inline bytes
         std::vector<uint8_t> mem(e.raw.begin(), e.raw.end());
         std::vector<uint8_t> canon = reencode(pack, e.key, e.tag);
+        CHECK(mem == canon);                                // the structural identity
         switch (e.tag) {
             case xi::PackTag::I64:
             case xi::PackTag::F64:
-                CHECK(mem.size() == 8);                     // raw 8-byte value
-                CHECK(canon.size() == 9);                   // 0xd3/0xcb + 8
-                CHECK(mem != canon);
+                CHECK(mem.size() == 9 && (mem[0] == 0xd3 || mem[0] == 0xcb));
                 break;
             case xi::PackTag::Bool:
-                CHECK(mem.size() == 1 && (mem[0] == 0 || mem[0] == 1));
-                CHECK(mem != canon);
+                CHECK(mem.size() == 1 && (mem[0] == 0xc2 || mem[0] == 0xc3));
                 break;
             case xi::PackTag::Str:
-                CHECK(mem.size() == e.raw.size() && mem != canon);  // no str32 header
+                CHECK(mem.size() >= 5 && mem[0] == 0xdb);   // str32 header + bytes
                 break;
             case xi::PackTag::Mp:
-                CHECK(mem == canon);                        // Mp alone stays verbatim
+                CHECK(mem == canon);                        // nested canonical verbatim
                 break;
             default: break;
         }
     });
 
     // ---- (1) walk == codec, and the frame entries come FROM the walk --------
-    // This is the port shape every serialization site uses now: for_each_entry
-    // + canonical_value produce the wire bytes; nothing reads raw_at at an edge.
+    // This is the port shape every serialization site uses: for_each_entry +
+    // canonical_value produce the wire bytes. Since ④A canonical_value for an
+    // inline entry is a verbatim splice of raw_at, so walk == raw_at == codec.
     SECTION("(1) canonical_value(i) == independent xi::mp::Writer re-encode");
     std::vector<xi::xex1::V3Entry> entries;        // values from the canonical walk
     std::vector<xi::xex1::V3Entry> entries_indep;  // values from the independent re-encode

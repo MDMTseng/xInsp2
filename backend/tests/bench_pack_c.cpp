@@ -196,10 +196,10 @@ static std::vector<uint8_t> serialize_current(const xi::Pack& p) {
             out.insert(out.end(), v->begin(), v->end());
         } else {
             // Canonical bytes for the inline entry (I64/F64/Str/Mp/Bool).
-            // POST-SLAB-MIGRATION: scalars live RAW in the pack, so the walk
-            // re-emits the canonical form (Pack::canonical_value) instead of
-            // splicing raw_at — this lane now measures the slab pack's
-            // encode-on-serialize cost, the honest production walk.
+            // ④A memory==wire: the inline payload IS the canonical value, so
+            // Pack::canonical_value splices raw_at verbatim — this lane measures
+            // the walk's splice cost (a copy, not a re-encode), the honest
+            // production serialization path.
             xi::mp::Writer w;
             bool ok = p.canonical_value(i, w);
             put_u32(out, ok ? uint32_t(w.size()) : 0u);
