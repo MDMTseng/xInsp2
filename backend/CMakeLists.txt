@@ -1059,7 +1059,15 @@ if(NOT MSVC)
 endif()
 add_test(NAME pack_c COMMAND test_pack_c)
 
-add_executable(bench_pack_c tests/bench_pack_c.cpp)
+# EXCLUDE_FROM_ALL (self-describing blob plane, spec 30): this microbench
+# compares the real xi::Pack's IMAGE ops against the design-C prototype's
+# tensor/typed-blob ops. The blob cut retired PackBuilder::add_image/get_tensor,
+# so the comparison's premise dissolved (real images are self-describing blobs
+# now, the proto side is unchanged). The proto + this bench are doc-28 finding ⑥'s
+# to retire; re-benching blob ops (if wanted) is package D / proto-retire, not the
+# package-B door cut. Excluded from the default build so it never breaks it; still
+# buildable on demand once migrated. TODO(selfdesc-D): re-cut or delete with the proto.
+add_executable(bench_pack_c EXCLUDE_FROM_ALL tests/bench_pack_c.cpp)
 target_link_libraries(bench_pack_c PRIVATE xi_core)
 if(NOT MSVC)
     target_link_libraries(bench_pack_c PRIVATE pthread)

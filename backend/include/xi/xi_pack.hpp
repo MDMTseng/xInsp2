@@ -466,6 +466,16 @@ public:
     uint8_t*        payload()     const { return payload_; }      // 64B-aligned, writable
     int64_t         payload_len() const { return payload_len_; }
 
+    // Relinquish ownership of the mint ref to the caller (the buffer is NOT
+    // released on drop afterward). Used by the C door's blob_mint, which hands
+    // the raw handle to a C caller who owns it until adopt+seal. Returns the
+    // handle and nulls this BufRef.
+    xi_image_handle take() {
+        xi_image_handle h = handle_;
+        handle_ = XI_IMAGE_NULL; payload_ = nullptr; payload_len_ = 0;
+        return h;
+    }
+
 private:
     void reset_() {
         if (handle_) pack_pool::release(handle_);
