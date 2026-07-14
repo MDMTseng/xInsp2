@@ -408,12 +408,38 @@ private:
     }
 
     // ---- expose handoff + subscription gate (spec 31 "hand to expose") -------
-    // TODO(egress-expose-contract): pending the team-lead's confirmation of the
-    // ingestion mechanism (proposed: expose provides an xi.ui.sink@1 cap). Until
-    // wired, the subscription gate answers "subscribed" (so the timer path is
-    // exercised end-to-end in unit tests) and the handoff is a no-op seam.
-    bool channel_subscribed_(const std::string& /*channel*/) { return true; }
-    void hand_to_expose_(const std::string& /*channel*/, const std::vector<uint8_t>& /*frame*/) {}
+    // The ingestion rides the cap plane: expose provides xi.ui.sink@1 (a byte-
+    // blind store-and-broadcast). PROBE-THEN-PUSH: the timer only reaches here
+    // for a channel with FRESH content (empty slots are skipped in flush_once_),
+    // so a cheap subscription probe first keeps "no subscriber -> zero encode"
+    // EXACTLY true — we never dedup/encode for an unsubscribed channel. Expose
+    // absent (no xi.ui.sink) -> fail-open no-op (probe reads absent -> unsubscribed
+    // -> drop; the project's plugin list decides whether live UI exists at all).
+    bool channel_subscribed_(const std::string& channel) {
+        if (!cap_) return false;
+        xi_pack_builder b = pk_->builder_new();
+        pk_->builder_add_str(b, xi::pack_contract::kChannel, channel.c_str(), (int32_t)channel.size());
+        xi_pack_handle req = pk_->builder_seal(b);
+        xi_pack_handle rsp = XI_PACK_NULL;
+        const int32_t rc = cap_->call("xi.ui.sink", req, &rsp);
+        pk_->release(req);
+        if (rc < 0 || rsp == XI_PACK_NULL) { if (rsp != XI_PACK_NULL) pk_->release(rsp); return false; }
+        int64_t sub = 0;
+        pk_->get_i64(rsp, "subscribed", &sub);
+        pk_->release(rsp);
+        return sub != 0;
+    }
+    void hand_to_expose_(const std::string& channel, const std::vector<uint8_t>& frame) {
+        if (!cap_ || frame.empty()) return;
+        xi_pack_builder b = pk_->builder_new();
+        pk_->builder_add_str(b, xi::pack_contract::kChannel, channel.c_str(), (int32_t)channel.size());
+        pk_->builder_add_bin(b, "frame", frame.data(), (int32_t)frame.size());
+        xi_pack_handle req = pk_->builder_seal(b);
+        xi_pack_handle rsp = XI_PACK_NULL;
+        cap_->call("xi.ui.sink", req, &rsp);
+        pk_->release(req);
+        if (rsp != XI_PACK_NULL) pk_->release(rsp);
+    }
 
     // ---- retained-state LRU (content-keyed encode memo) ----------------------
     std::shared_ptr<Encoded> lru_get_(uint64_t key) {
