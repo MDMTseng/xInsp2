@@ -49,7 +49,10 @@ struct ImageBlobView {
 // (w/h/c/dt) is missing or mistyped; the dtype is unsupported; a dim is
 // non-positive; or the payload is shorter than w*h*c*elem_size(dt). Unknown
 // descriptor keys (a toolbox's own) are skipped, not rejected — the core reads
-// only this convention's keys.
+// only this convention's keys. ONE exception: "loc" (a RESERVED key,
+// docs/roadmap/memory-domains.md) — a non-"host" loc means the payload is a
+// DEVICE-MEMORY PROXY, not pixels; a host-only reader must refuse it here,
+// loudly, instead of wrapping an empty/garbage span.
 inline std::optional<ImageBlobView> read_image_blob(std::span<const uint8_t> desc,
                                                     std::span<const uint8_t> payload) {
     mp::Reader r(desc.data(), desc.size());
@@ -63,7 +66,12 @@ inline std::optional<ImageBlobView> read_image_blob(std::span<const uint8_t> des
         mp::Element k;
         if (r.next(k) != mp::Status::Ok || k.kind != mp::Kind::Str) return std::nullopt;
         std::string_view key(reinterpret_cast<const char*>(k.data), k.len);
-        if (key == "t" || key == "dt") {
+        if (key == "loc") {
+            mp::Element v;
+            if (r.next(v) != mp::Status::Ok || v.kind != mp::Kind::Str) return std::nullopt;
+            std::string_view s(reinterpret_cast<const char*>(v.data), v.len);
+            if (s != "host") return std::nullopt;   // device proxy: not readable here
+        } else if (key == "t" || key == "dt") {
             mp::Element v;
             if (r.next(v) != mp::Status::Ok || v.kind != mp::Kind::Str) return std::nullopt;
             std::string_view s(reinterpret_cast<const char*>(v.data), v.len);

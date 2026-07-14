@@ -106,6 +106,28 @@ static void test_rejects() {
         auto ib = xi::read_image_blob(d, u8pay);
         CHECK(ib.has_value() && ib->width == W, "unknown descriptor keys are skipped, not rejected");
     }
+
+    // "loc" is the RESERVED memory-domain key (docs/roadmap/memory-domains.md):
+    // a non-host loc marks a device-memory proxy whose payload is NOT pixels —
+    // a host-only reader must refuse it, never wrap the proxy bytes.
+    {
+        auto with_loc = [&](std::string_view loc) {
+            xi::mp::Writer dw;
+            dw.map(6);
+            dw.key("t");   dw.str("xi/image");
+            dw.key("w");   dw.int_(W);
+            dw.key("h");   dw.int_(H);
+            dw.key("c");   dw.int_(C);
+            dw.key("dt");  dw.str("u8");
+            dw.key("loc"); dw.str(loc);
+            xi::mp::Bytes b = dw.take();
+            return std::vector<uint8_t>(b.begin(), b.end());
+        };
+        CHECK(!xi::read_image_blob(with_loc("cuda:0"), u8pay).has_value(),
+              "reject: loc != host (device-memory proxy)");
+        CHECK(xi::read_image_blob(with_loc("host"), u8pay).has_value(),
+              "loc == host is accepted (explicit host residency)");
+    }
 }
 
 // The WRITE flavor over a minted payload (producer mint window).
