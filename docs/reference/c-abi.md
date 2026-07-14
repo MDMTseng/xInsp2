@@ -418,7 +418,13 @@ Contract points:
   legal only because `xi.pack@1` had not shipped beyond the tree; `xi.pack@1`
   is now **frozen at that tail** — all later growth shipped as the
   `xi.pack@3` supplement (§6.1b) per the freeze doctrine (field order frozen
-  forever within a published version). NULL-check the tail entries when
+  forever within a published version). This is no longer a doctrine on trust:
+  both `xi_pack_v1` and `xi_pack_v3` are pinned by a build-time guard — a
+  `static_assert` on each vtable's size + last-field offset in `xi_abi.h`, and
+  a per-field `{offset, type}` snapshot in `test_abi_freeze.cpp` (the same
+  discipline that guards `xi_host_api`). A mid-struct insert that would
+  silently rewire an already-compiled pack plugin's function pointers now fails
+  the build instead. NULL-check the tail entries when
   consuming a foreign table. A canonical bool entry is the single msgpack byte
   `0xc2`/`0xc3` (tag `XI_PACK_TAG_BOOL`); `v` is 0/1 and `get_bool` writes 0/1.
 - **Reserved `$`-keys.** `$fault`/`$fault_key`/`$fault_detail` (fail-loud
