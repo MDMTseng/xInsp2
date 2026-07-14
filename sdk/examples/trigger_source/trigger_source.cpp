@@ -26,7 +26,8 @@
 // a script) adds both on top — see plugins/mock_camera for that pattern.
 //
 
-#include <xi/xi_abi.hpp>    // xi::Plugin, xi::PackOut, xi::Image, pool_image()/new_pack()/emit()
+#include <xi/xi_abi.hpp>    // xi::Plugin, xi::PackOut, xi::Image, new_pack()/emit()
+#include <xi/xi_mp.hpp>     // canonical msgpack Writer — the xi/image blob descriptor
 #include <xi/xi_json.hpp>
 #include <xi/xi_thread.hpp> // xi::spawn_worker — SEH-safe capture thread
 
@@ -85,25 +86,48 @@ private:
         if (thread_.joinable()) thread_.join();
     }
 
+    // Zero-copy xi/image emit (spec 30): mint a self-describing blob, paint into
+    // its 64B-aligned payload IN PLACE (via a non-owning Image view), adopt it
+    // (the pack addrefs), then drop our mint ref — no heap-to-pool copy. The
+    // successor to the old adopt_image pool-handle hand-off.
+    template <class Paint>
+    bool add_image_blob_(xi::PackOut& f, const char* key,
+                         int w, int h, int c, Paint&& paint) {
+        xi::mp::Writer dw;                    // {"t":"xi/image","w","h","c","dt"}
+        dw.map(5);
+        dw.key("t");  dw.str("xi/image");
+        dw.key("w");  dw.int_(w);
+        dw.key("h");  dw.int_(h);
+        dw.key("c");  dw.int_(c);
+        dw.key("dt"); dw.str("u8");
+        void* pp = nullptr;
+        xi_image_handle bh = f.blob_mint(dw.bytes().data(), (int32_t)dw.bytes().size(),
+                                         (int64_t)w * h * c, &pp);
+        if (!bh || !pp) return false;
+        xi::Image v = xi::Image::view(w, h, c, static_cast<const uint8_t*>(pp));
+        paint(v);
+        bool ok = f.adopt_blob(key, bh);
+        host_->image_release(bh);
+        return ok;
+    }
+
     void run_loop_() {
         const int W = 320, H = 240;
         int seq = 0;
         while (running_.load()) {
-            // 1. Paint one frame straight into a fresh host-pool slot, so the
-            //    pack can adopt it by refcount (no heap-to-pool copy).
-            xi::Image img = pool_image(W, H, 1);
-            uint8_t* px = img.write();   // blessed writable-output accessor
-            for (int i = 0; i < W * H; ++i) px[i] = (uint8_t)((i + seq) & 0xFF);
-
-            // 2. Emit it. new_pack() starts a host-side builder; adopt_image
-            //    hands the pool slot to the pack by refcount (the pack addrefs,
-            //    `img` keeps its own ref); emit() seals + dispatches. Default
-            //    id = XI_TRIGGER_NULL → host mints a fresh trigger id; default
-            //    ts = 0 → host stamps now(). The script reads this frame back
-            //    as current_trigger().pack().get_image("frame").
+            // Emit one frame as a self-describing xi/image blob, painted IN PLACE
+            // in the minted buffer's 64B-aligned payload (zero-copy). new_pack()
+            // starts a host-side builder carrying the @4 blob supplement; emit()
+            // seals + dispatches. Default id = XI_TRIGGER_NULL → host mints a
+            // fresh trigger id; default ts = 0 → host stamps now(). The script
+            // reads this frame back as current_trigger().pack().get_image("frame")
+            // (the @1 xi/image blob adapter).
             xi::PackOut f = new_pack();
             f.i64("seq", seq);
-            f.adopt_image("frame", W, H, 1, img.pool_handle());
+            add_image_blob_(f, "frame", W, H, 1, [&](xi::Image& img) {
+                uint8_t* px = img.data();
+                for (int i = 0; i < W * H; ++i) px[i] = (uint8_t)((i + seq) & 0xFF);
+            });
             emit(std::move(f));
 
             ++seq;

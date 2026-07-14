@@ -7,20 +7,25 @@
 //   1. Build two distinct frames (left = vertical stripes, right = horizontal)
 //      stamped with the same `seq` so the script can verify they really come
 //      from the same event.
-//   2. Gather them into ONE sealed xi.pack@1 Pack — the left + right image
-//      entries plus the seq entry — and emit it under a single trigger. v12
-//      (THE CUT): the sealed Pack is the SOLE data plane; adopt_image rides
-//      the pool refcount (zero-copy addref), and a host without the xi.pack@1
-//      plane cannot run this source's emit path.
+//   2. Gather them into ONE sealed Pack — the left + right image entries plus
+//      the seq entry — and emit it under a single trigger. v12 (THE CUT) + spec
+//      30: the sealed Pack is the SOLE data plane; each image is a
+//      self-describing xi/image BLOB minted and painted IN PLACE (zero-copy
+//      adopt_blob addref), and a host without the blob plane cannot run this
+//      source's emit path.
 //
 // The dispatched event carries both images; a script reads them via the pack
-// (t.pack().image("left") / .image("right")) or the expose walk.
+// (t.pack().image("left") / .image("right"), the @1 xi/image blob adapter) or
+// the expose walk.
 //
 
 #include <xi/xi_abi.hpp>
+#include <xi/xi_mp.hpp>         // canonical msgpack Writer — build the xi/image blob descriptor
 #include <xi/xi_json.hpp>
 #include <xi/xi_contract.hpp>   // fail-loud schema-skew guard (kSchemaKey)
 #include <xi/xi_thread.hpp>   // xi::spawn_worker — SEH-safe capture thread
+
+#include <utility>
 
 #include "synced_stereo_keys.gen.h"   // the ONE key contract (kLeft/kRight/kSeq)
 
@@ -106,35 +111,58 @@ private:
 
     std::atomic<int> seq_{0};
 
+    // Zero-copy xi/image emit (spec 30): mint a self-describing blob, paint into
+    // its 64B-aligned payload IN PLACE (via a non-owning Image view), adopt it
+    // into the pack (which addrefs), then drop our mint ref — no per-frame image
+    // memcpy. The successor to the old adopt_image pool-handle hand-off (that @1
+    // door adapter now copies raw pixels into a headed blob).
+    template <class Paint>
+    bool add_image_blob_(xi::PackOut& f, const char* key,
+                         int w, int h, int c, Paint&& paint) {
+        xi::mp::Writer dw;                    // {"t":"xi/image","w","h","c","dt"}
+        dw.map(5);
+        dw.key("t");  dw.str("xi/image");
+        dw.key("w");  dw.int_(w);
+        dw.key("h");  dw.int_(h);
+        dw.key("c");  dw.int_(c);
+        dw.key("dt"); dw.str("u8");
+        void* pp = nullptr;
+        xi_image_handle bh = f.blob_mint(dw.bytes().data(), (int32_t)dw.bytes().size(),
+                                         (int64_t)w * h * c, &pp);
+        if (!bh || !pp) return false;
+        xi::Image v = xi::Image::view(w, h, c, static_cast<const uint8_t*>(pp));
+        paint(v);
+        bool ok = f.adopt_blob(key, bh);
+        host_->image_release(bh);
+        return ok;
+    }
+
     void emit_one_() {
         const int W = 320, H = 240;
         int seq = seq_.fetch_add(1);
 
-        // LEFT: vertical stripes. RIGHT: horizontal stripes. Same seq. Paint
-        // straight into fresh host-pool slots so emit() hands them over via the
-        // pool refcount path (no heap-to-pool copy).
-        xi::Image L = pool_image(W, H, 1);
-        xi::Image R = pool_image(W, H, 1);
-        uint8_t* lp = L.data();
-        uint8_t* rp = R.data();
-        for (int y = 0; y < H; ++y)
-            for (int x = 0; x < W; ++x) {
-                lp[y * W + x] = (uint8_t)(((x + seq) & 31) ? 200 : 32);
-                rp[y * W + x] = (uint8_t)(((y + seq) & 31) ? 32 : 200);
-            }
-        // Stamp seq into the top-left 4 bytes of each so the script can verify
-        // "these came from the same event".
-        std::memcpy(lp, &seq, sizeof(seq));
-        std::memcpy(rp, &seq, sizeof(seq));
-
-        // v12: gather the correlated pair into ONE sealed Pack — both images plus
-        // the seq entry under a single trigger. adopt_image is a zero-copy
-        // pool-handle addref (not a memcpy). The sealed xi.pack@1 Pack is the sole
-        // data plane; a host without it can't run this source's emit path.
+        // v12 + spec 30: gather the correlated pair into ONE sealed Pack — both
+        // images (as self-describing xi/image BLOBS, painted IN PLACE in the
+        // minted buffers, zero-copy) plus the seq entry under a single trigger.
+        // LEFT: vertical stripes. RIGHT: horizontal stripes. Same seq. The
+        // sealed pack is the sole data plane; a host without the blob plane
+        // can't run this source's emit path.
         xi::PackOut f = new_pack();
         f.i64(keys::kSeq, seq);
-        f.adopt_image(keys::kLeft,  W, H, 1, L.pool_handle());
-        f.adopt_image(keys::kRight, W, H, 1, R.pool_handle());
+        add_image_blob_(f, keys::kLeft, W, H, 1, [&](xi::Image& img) {
+            uint8_t* lp = img.data();
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x)
+                    lp[y * W + x] = (uint8_t)(((x + seq) & 31) ? 200 : 32);
+            std::memcpy(lp, &seq, sizeof(seq));   // stamp seq: same-event check
+        });
+        add_image_blob_(f, keys::kRight, W, H, 1, [&](xi::Image& img) {
+            uint8_t* rp = img.data();
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x)
+                    rp[y * W + x] = (uint8_t)(((y + seq) & 31) ? 32 : 200);
+            std::memcpy(rp, &seq, sizeof(seq));
+        });
         emit(std::move(f));
         ticks_++;
     }

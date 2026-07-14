@@ -23,6 +23,7 @@
 //
 
 #include <xi/xi_json.hpp>     // xi::Json config + command parsing
+#include <xi/xi_mp.hpp>       // canonical msgpack Writer — the xi/image blob descriptor
 #include <xi/xi_thread.hpp>   // xi::spawn_worker (SEH-safe)
 
 #include <atomic>
@@ -116,20 +117,30 @@ private:
             int w, h, iv;
             { std::lock_guard<std::mutex> lk(mu_); w = width_; h = height_; iv = interval_ms_; }
 
-            // Zero-copy: paint straight into a fresh host pool slot. For a real
-            // camera you'd copy the grabbed frame in here.
-            xi::Image frame = pool_image(w, h, 1);
-            std::memset(frame.write(), (uint8_t)(seq & 0xFF), (size_t)w * h);
-
-            // Hand the frame to the host as a sealed xi.pack@1 pack — the sole
-            // data plane (v12). new_pack() starts a host-side builder;
-            // adopt_image hands the pool slot to the pack by refcount (no
-            // memcpy — the pack addrefs, `frame` keeps its own ref); emit()
-            // seals + dispatches and mints a fresh trigger id (ts = host now)
-            // — one call, no manual refcount balance.
+            // Zero-copy (spec 30): emit the frame as a self-describing xi/image
+            // BLOB. Mint a headed pool buffer, write the pixels straight into its
+            // 64B-aligned payload (a real camera DMAs the grabbed frame here),
+            // then adopt it — the pack co-owns the buffer (addref) and we drop
+            // our mint ref. No image memcpy. (The frozen @1 out.adopt_image door
+            // adapter now COPIES raw pixels into a headed blob, so an in-tree
+            // producer mints the headed buffer directly, as here.)
             xi::PackOut f = new_pack();
             f.i64("seq", (int64_t)seq);
-            f.adopt_image("frame", w, h, 1, frame.pool_handle());
+            xi::mp::Writer dw;                    // {"t":"xi/image","w","h","c","dt"}
+            dw.map(5);
+            dw.key("t");  dw.str("xi/image");
+            dw.key("w");  dw.int_(w);
+            dw.key("h");  dw.int_(h);
+            dw.key("c");  dw.int_(1);
+            dw.key("dt"); dw.str("u8");
+            void* pp = nullptr;
+            xi_image_handle bh = f.blob_mint(dw.bytes().data(), (int32_t)dw.bytes().size(),
+                                             (int64_t)w * h, &pp);
+            if (bh && pp) {
+                std::memset(pp, (uint8_t)(seq & 0xFF), (size_t)w * h);
+                f.adopt_blob("frame", bh);
+                host_->image_release(bh);         // pack holds its own addref now
+            }
             emit(std::move(f));
             ++seq;
             emit_count_.fetch_add(1);
