@@ -97,6 +97,19 @@ contiguous slab** + N pool-backed EXTERN buffers, resolved behind one API (D1
     and `Pack::desc_find_str/desc_find_i64` (the SDK image accessors read
     `w/h/c/dt` through these).
 
+  - **Padded sub-layout inside a payload (`xi_blob_head.hpp`).** A custom type
+    often lays its payload out as `[own info][pad][bulk data]` so the bulk region
+    is aligned for SIMD / `cv::Mat` wrap / GPU upload. Because the payload *base*
+    is already 64B-aligned, `align_up` **within** the payload gives the bulk
+    absolute alignment. `padded_layout(head_len, data_len, align=64) → {data_off,
+    total}` (overflow-checked, fail-loud) does the offset math, and
+    `place_padded_head(payload, head_bytes, layout)` memcpys the head, **zeroes
+    the pad gap** (deterministic — the whole payload rides the wire verbatim), and
+    returns the aligned bulk pointer. This is **mechanics, not per-type sugar**
+    (the spec-30 sugar-boundary ruling): it is convention-neutral — writes no key
+    and names nothing — so the caller records `data_off` in its *own* descriptor
+    (e.g. `{"t":"acme/scan","data_off":…}`) for a reader to resolve the bulk.
+
   > **Retired with the blob cut (spec 30):** `PackTag::Image` / `PackTag::Tensor`,
   > `PackDtype` + the dtype-in-`type_id` encoding, `kPackTypeUserBase` + the
   > user-blob type space, `ExtRecord`'s `w/h/c`, and the `add_image` /

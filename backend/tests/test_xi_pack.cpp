@@ -589,6 +589,66 @@ static void test_sort_idx_recycle() {
     CHECK(all_ok, "recycled scratch/sort_idx builds correct packs across 200 rounds");
 }
 
+// ------------------------------------------------------------------
+// Padded sub-layout inside a blob payload (xi_blob_head.hpp): the
+// [head][pad][bulk] convenience. Layout math + overflow rejects + a REAL minted
+// payload (bulk 64B-aligned, pad deterministically zero). Convention-neutral —
+// the helper writes no key; the caller records data_off in its own descriptor.
+// ------------------------------------------------------------------
+static void test_padded_layout() {
+    // ---- pure layout math ----
+    auto L0 = xi::padded_layout(0, 100);           // empty head
+    CHECK(L0 && L0->data_off == 0 && L0->total == 100, "head_len 0: bulk at offset 0");
+    auto L64 = xi::padded_layout(64, 100);         // head exactly one block
+    CHECK(L64 && L64->data_off == 64 && L64->total == 164, "head_len 64: bulk at 64");
+    auto L10 = xi::padded_layout(10, 100);         // non-multiple head
+    CHECK(L10 && L10->data_off == 64 && L10->total == 164, "head_len 10: padded up to 64");
+    auto L65 = xi::padded_layout(65, 8);           // just over one block
+    CHECK(L65 && L65->data_off == 128 && L65->total == 136, "head_len 65: padded up to 128");
+    auto La = xi::padded_layout(10, 4, 16);        // custom power-of-two align
+    CHECK(La && La->data_off == 16 && La->total == 20, "align=16: bulk at 16");
+
+    // ---- fail-loud rejection ----
+    CHECK(!xi::padded_layout(10, 10, 0).has_value(),  "align 0 rejected");
+    CHECK(!xi::padded_layout(10, 10, 24).has_value(), "non-power-of-two align rejected");
+    CHECK(!xi::padded_layout((size_t)0x100000000ull, 0).has_value(),
+          "head whose aligned offset overflows uint32_t rejected");
+    CHECK(!xi::padded_layout(1, SIZE_MAX - 10).has_value(),
+          "total that overflows size_t rejected");
+
+    // ---- a REAL minted payload: bulk 64B-aligned, pad deterministically zero ----
+    const int base = pool_live();
+    {
+        std::vector<uint8_t> head = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};   // 10-byte head
+        const size_t bulk_len = 200;
+        auto L = xi::padded_layout(head.size(), bulk_len);
+        CHECK(L && L->data_off == 64 && L->total == 64 + bulk_len, "layout for the minted case");
+        if (L) {
+            xi::mp::Bytes desc =
+                xi::BlobDesc("acme/scan").i64("data_off", L->data_off).build();
+            xi::BufRef ref = xi::mint_blob(desc.data(), int32_t(desc.size()), int64_t(L->total));
+            CHECK((bool)ref, "mint_blob for the padded payload");
+            if (ref) {
+                uint8_t* payload = ref.payload();
+                CHECK((reinterpret_cast<uintptr_t>(payload) % 64) == 0,
+                      "minted payload base is 64B-aligned");
+                uint8_t* bulk = xi::place_padded_head(payload, head, *L);
+                CHECK((reinterpret_cast<uintptr_t>(bulk) % 64) == 0, "bulk region is 64B-aligned");
+                CHECK(bulk == payload + 64, "bulk lands at data_off");
+                bool head_ok = true;
+                for (size_t i = 0; i < head.size(); ++i) head_ok = head_ok && payload[i] == head[i];
+                CHECK(head_ok, "head bytes copied verbatim");
+                bool pad_zero = true;
+                for (size_t i = head.size(); i < 64; ++i) pad_zero = pad_zero && payload[i] == 0;
+                CHECK(pad_zero, "pad gap is deterministically zero");
+                std::memset(bulk, 0xAB, bulk_len);
+                CHECK(bulk[0] == 0xAB && bulk[bulk_len - 1] == 0xAB, "bulk region is writable");
+            }
+        }
+    }
+    CHECK(pool_live() == base, "padded-layout mint released on BufRef drop");
+}
+
 int main() {
     std::printf("test_xi_pack\n");
     test_lifecycle_and_contract_layer();
@@ -608,6 +668,7 @@ int main() {
     test_crash_drop_no_double_release();
     test_bin_pool_exhaustion_no_null_span();
     test_sort_idx_recycle();
+    test_padded_layout();
     if (g_fail == 0) { std::printf("  OK (all checks passed)\n"); return 0; }
     std::printf("  %d check(s) FAILED\n", g_fail);
     return 1;
