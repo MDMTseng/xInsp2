@@ -1059,19 +1059,18 @@ if(NOT MSVC)
 endif()
 add_test(NAME pack_c COMMAND test_pack_c)
 
-# EXCLUDE_FROM_ALL (self-describing blob plane, spec 30): this microbench
-# compares the real xi::Pack's IMAGE ops against the design-C prototype's
-# tensor/typed-blob ops. The blob cut retired PackBuilder::add_image/get_tensor,
-# so the comparison's premise dissolved (real images are self-describing blobs
-# now, the proto side is unchanged). The proto + this bench are doc-28 finding ⑥'s
-# to retire; re-benching blob ops (if wanted) is package D / proto-retire, not the
-# package-B door cut. Excluded from the default build so it never breaks it; still
-# buildable on demand once migrated. TODO(selfdesc-D): re-cut or delete with the proto.
-add_executable(bench_pack_c EXCLUDE_FROM_ALL tests/bench_pack_c.cpp)
-target_link_libraries(bench_pack_c PRIVATE xi_core)
-if(NOT MSVC)
-    target_link_libraries(bench_pack_c PRIVATE pthread)
-endif()
+# bench_pack_c (removed, self-describing blob plane, package D): this microbench
+# was a HEAD-TO-HEAD of the real xi::Pack's image/tensor ops against the design-C
+# prototype (tests/proto/xi_pack_c.hpp) — it existed only to feed the
+# migrate/don't-migrate judgment for the slab container. That judgment is made
+# (the slab shipped; spec 30 supersedes it), the current-Pack side was written
+# entirely around now-deleted verbs (add_image/add_tensor/get_image/get_tensor/
+# typed blobs), and its opponent proto is retired to tests/proto/ as an inert
+# experiment record (its own unit test is `test_pack_c`/`pack_c` above). With one
+# side gone and the other re-cut required from scratch, the comparison is moot;
+# absolute build/read/hop/free numbers for the current pack live in bench_pack.
+# Deleted rather than re-cut (doc 28 finding ⑥ contraction). The proto header +
+# test_pack_c stay as the deliberate experiment record.
 
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_IPP=1)
