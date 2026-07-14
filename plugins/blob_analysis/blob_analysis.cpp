@@ -138,19 +138,22 @@ public:
     // the xi::contract reason code (PackOut::fault), which the caller routes to a
     // verdict — never a silent default.
     void process(xi::PackIn& in, xi::PackOut& out) override {
-        auto gray = in.image(keys::kGray);
-        if (!gray || !gray->pixels) {
+        // Read the input as an xi/image self-describing blob (spec 30): one
+        // fail-loud call carrying the real dtype + the zero-copy payload, no
+        // bounce through the @1 xi_pack_image adapter (which assumes u8).
+        auto gray = in.image_blob(keys::kGray);
+        if (!gray) {
             out.fault(xi::contract::kMissingInput, keys::kGray,
-                      "blob_analysis(pack): required image 'gray' is missing");
+                      "blob_analysis(pack): required xi/image 'gray' is missing");
             return;
         }
-        if (gray->channels != 1) {
+        if (gray->channels != 1 || gray->dt != "u8") {
             out.fault(xi::contract::kWrongType, keys::kGray,
-                      "blob_analysis(pack): 'gray' must be single-channel");
+                      "blob_analysis(pack): 'gray' must be single-channel u8");
             return;
         }
         const int w = gray->width, h = gray->height;
-        const uint8_t* sp = static_cast<const uint8_t*>(gray->pixels);
+        const uint8_t* sp = gray->payload.data();
 
         int def_thresh, def_min, def_max; bool def_inv;
         {

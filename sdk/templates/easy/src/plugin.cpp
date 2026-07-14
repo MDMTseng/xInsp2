@@ -41,11 +41,13 @@ public:
     // time the inspection script does:
     //     auto out = xi::use("{{NAME}}").process(in_pack);
     //
-    // Image ops example — output a self-describing xi/image BLOB (spec 30):
+    // Image ops example — read + produce self-describing xi/image BLOBs (spec 30)
+    // with the <xi/xi_cv.hpp> sugar (dt-typed cv::Mat views, zero-copy):
     //
-    //   auto src = in.image("src");                  // read-only INPUT view
+    //   auto src = in.image_blob("src");             // {w,h,c,dt,payload}, fail-loud
     //   if (!src) { out.fault("missing_input", "src"); return; }
     //   const int w = src->width, h = src->height;
+    //   cv::Mat srcMat = xi::as_cv_read(*src);       // typed by the descriptor's dt
     //   // {"t":"xi/image","w","h","c","dt"} — the convention descriptor.
     //   xi::mp::Writer dw;                            // <xi/xi_mp.hpp>
     //   dw.map(5);
@@ -55,18 +57,16 @@ public:
     //   xi_image_handle bh = out.blob_mint(dw.bytes().data(),
     //                          (int32_t)dw.bytes().size(), (int64_t)w * h, &pp);
     //   if (!bh) { out.fault("no_blob_plane", "binary"); return; }
-    //   cv::Mat binMat(h, w, CV_8UC1, pp);           // aliases the blob payload
-    //   cv::threshold(xi::as_cv_read(xi::Image::view(w, h, src->channels,
-    //       static_cast<const uint8_t*>(src->pixels))), binMat, 128, 255,
-    //       cv::THRESH_BINARY);                       // writes IN PLACE, zero-copy
+    //   cv::Mat binMat = xi::as_cv_write_blob(pp, w, h, 1, "u8");  // writable payload
+    //   cv::threshold(srcMat, binMat, 128, 255, cv::THRESH_BINARY); // writes IN PLACE
     //   out.adopt_blob("binary", bh);                // pack co-owns (addref)
     //   host_->image_release(bh);                    // drop our mint ref
     //   out.i64("threshold_used", 128);              // scalars: i64/f64/str/boolean
     //
-    // Read the INPUT via in.image() (its pixels are a zero-copy pool span
+    // Read the INPUT via in.image_blob() (its payload is a zero-copy pool span
     // shared with other consumers — read it, never mutate it) and produce a
     // SEPARATE OUTPUT by minting a headed blob buffer and writing straight into
-    // its 64B-aligned payload. NEVER write through the input's pixel pointer —
+    // its 64B-aligned payload. NEVER write through the input's payload pointer —
     // that corrupts every other consumer's view of the same pool slot.
     //
     // The zero-copy producer path is blob_mint -> fill payload in place ->

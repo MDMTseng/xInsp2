@@ -23,12 +23,12 @@ public:
     using xi::Plugin::Plugin;
 
     void process(xi::PackIn& in, xi::PackOut& out) override {
-        // in.image() returns nullopt when "src" is absent or not an image
-        // entry. Its pixels are a zero-copy pool span shared with other
-        // consumers — read them, never write through them.
-        auto src = in.image("src");
-        if (!src || !src->pixels) {
-            out.fault("missing_input", "src", "invert: no 'src' image in input");
+        // in.image_blob() returns nullopt when "src" is absent, not a blob, or
+        // not an xi/image. Its payload is a zero-copy pool span shared with other
+        // consumers — read it, never write through it.
+        auto src = in.image_blob("src");
+        if (!src || src->dt != "u8") {
+            out.fault("missing_input", "src", "invert: no u8 'src' xi/image in input");
             return;
         }
 
@@ -39,7 +39,7 @@ public:
         // the successor to the old adopt_image pool-handle hand-off).
         const int w = src->width, h = src->height, c = src->channels;
         const int n = w * h * c;
-        const uint8_t* sp = static_cast<const uint8_t*>(src->pixels);
+        const uint8_t* sp = src->payload.data();
 
         xi::mp::Writer dw;                        // {"t":"xi/image","w","h","c","dt"}
         dw.map(5);
