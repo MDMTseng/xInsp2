@@ -8,6 +8,7 @@
 // seal guard, and sort_idx recycle sanity.
 
 #include "xi/xi_pack.hpp"
+#include "xi/xi_image_blob_mint.hpp"   // xi::mint_image (convention-layer producer)
 #include "xi/xi_image_pool.hpp"
 
 #include <array>

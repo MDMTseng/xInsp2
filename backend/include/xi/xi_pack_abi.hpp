@@ -27,6 +27,7 @@
 
 #include "xi_abi.h"          // xi_pack_handle / xi_pack_v1 / xi_pack_image
 #include "xi_pack.hpp"      // xi::Pack / xi::PackBuilder (the container)
+#include "xi_image_blob_mint.hpp" // xi::make_image_desc (the @1 image-slot adapter's convention helper)
 #include "xi_ingress.hpp"   // xi::ingress::canonicalize_into (the foreign-mp gate)
 #include "xi_image_pool.hpp" // ImagePool::publish_pack_iface (the door slot)
 #include "xi_trigger_bus.hpp"// TriggerBus::emit_pack / set_pack_releaser

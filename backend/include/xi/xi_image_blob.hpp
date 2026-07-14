@@ -18,6 +18,7 @@
 // over an ImageBlobView lives in the opt-in <xi/xi_cv.hpp>; the SDK accessors
 // PackIn::image_blob / ScriptPack::image_blob wrap this over their get_blob.
 //
+#include "xi_image_dt.hpp"  // xi::image_blob_dt_elem_size (the ONE dtype table)
 #include "xi_mp.hpp"        // xi::mp::Reader / Element / Kind (canonical decode)
 #include "xi_mp_build.hpp"  // xi::mp::skip_value / as_i64 (read helpers)
 
@@ -27,17 +28,6 @@
 #include <string_view>
 
 namespace xi {
-
-// Element byte size for the `xi/image` "dt" convention strings; 0 = unknown
-// (the ONE dtype table the convention layer owns — the core owns no type space).
-inline int64_t image_blob_dt_elem_size(std::string_view dt) {
-    if (dt == "u8")  return 1;
-    if (dt == "u16") return 2;
-    if (dt == "i32") return 4;
-    if (dt == "f32") return 4;
-    if (dt == "f64") return 8;
-    return 0;
-}
 
 // A parsed `xi/image` self-describing blob: logical shape {w,h,c}, the element
 // dtype string, and the payload span (borrowed — valid as long as the caller's

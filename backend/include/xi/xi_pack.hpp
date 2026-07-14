@@ -338,6 +338,15 @@ inline xi_image_handle alloc_canvas(size_t n) {
     ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
     return ImagePool::instance().create(int32_t(n), 1, 1);
 }
+// Mint an UNINITIALISED buffer of n bytes (no zero-fill). The caller MUST write
+// every byte it will expose — used by the mint-then-fully-overwrite path
+// (mint_blob for a caller that copies the whole payload) to avoid the zero-then-
+// copy double write (doc 28 finding A③). NOT for partial-write canvases.
+inline xi_image_handle alloc_uninit(size_t n) {
+    if (n == 0 || n > size_t(INT32_MAX)) return XI_IMAGE_NULL;
+    ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
+    return ImagePool::instance().create_uninit(int32_t(n), 1, 1);
+}
 inline void addref(xi_image_handle h) {
     if (h) ImagePool::instance().addref(h);
 }
@@ -449,14 +458,23 @@ private:
 // descriptor, a negative length, or an over-cap total returns an empty BufRef.
 // The payload region is zero-filled canvas (alloc_canvas) — a producer that
 // writes only part of it leaves the rest honestly zero.
-inline BufRef mint_blob(const void* desc, int32_t desc_len, int64_t payload_len) {
+// Shared mint impl. `zero_payload` = true mints a zero-filled canvas (unwritten
+// payload bytes read as zero — the mint_blob contract); false mints an
+// uninitialised payload for a caller that will overwrite ALL of it (the add_blob
+// copy path — avoids the zero-then-copy double write, doc 28 finding A③). Either
+// way the head (magic + desc_len + descriptor) is written and the pad
+// [8+desc_len, payload_off) is zeroed — the pad rides the wire verbatim, so it
+// must be deterministic regardless of the payload policy.
+inline BufRef mint_blob_impl(const void* desc, int32_t desc_len,
+                             int64_t payload_len, bool zero_payload) {
     if (!desc || desc_len <= 0 || payload_len < 0) return {};
     const uint8_t* d = static_cast<const uint8_t*>(desc);
     if (!blob_desc_is_canonical_map(d, uint32_t(desc_len))) return {};
     const uint64_t payload_off = blob_payload_off(uint32_t(desc_len));
     const uint64_t total = payload_off + uint64_t(payload_len);
     if (total > uint64_t(INT32_MAX)) return {};                    // pool per-buffer cap
-    xi_image_handle h = pack_pool::alloc_canvas(size_t(total));
+    xi_image_handle h = zero_payload ? pack_pool::alloc_canvas(size_t(total))
+                                     : pack_pool::alloc_uninit(size_t(total));
     if (!h) return {};
     uint8_t* base = pack_pool::writable(h);
     // payload_off is a multiple of kBlobPayloadAlign, so a 64B-aligned base (the
@@ -467,8 +485,18 @@ inline BufRef mint_blob(const void* desc, int32_t desc_len, int64_t payload_len)
     pack_mp_detail::put_u32_le(base + 0, kBlobMagic);
     pack_mp_detail::put_u32_le(base + 4, uint32_t(desc_len));
     std::memcpy(base + 8, d, size_t(desc_len));
-    // The pad [8+desc_len, payload_off) is already zero (alloc_canvas).
+    if (!zero_payload) {
+        // The uninit path must zero the head pad itself (alloc_canvas would have).
+        const size_t pad_beg = size_t(8) + size_t(desc_len);
+        if (payload_off > pad_beg)
+            std::memset(base + pad_beg, 0, size_t(payload_off) - pad_beg);
+    }
     return BufRef{h, base + payload_off, payload_len};
+}
+// Mint a self-describing pool buffer with a ZERO-FILLED canvas payload (a
+// producer may write only part of it — the rest reads honestly zero).
+inline BufRef mint_blob(const void* desc, int32_t desc_len, int64_t payload_len) {
+    return mint_blob_impl(desc, desc_len, payload_len, /*zero_payload=*/true);
 }
 
 // A borrowed const view of a Blob entry: the descriptor (canonical msgpack map)
@@ -518,39 +546,11 @@ private:
     std::vector<KV> kvs_;
 };
 
-// Convention: element byte size for the xi/image "dt" strings. Unknown -> 0.
-inline int64_t image_dtype_elem_size(std::string_view dt) {
-    if (dt == "u8")  return 1;
-    if (dt == "u16") return 2;
-    if (dt == "i32") return 4;
-    if (dt == "f32") return 4;
-    if (dt == "f64") return 8;
-    return 0;
-}
-
-// Build an xi/image descriptor: {"t":"xi/image","w","h","c","dt"}. Convention
-// helper (the SDK's mint_image / as_cv read this exact shape). Returns empty on
-// an unknown dtype.
-inline mp::Bytes make_image_desc(int32_t w, int32_t h, int32_t c,
-                                 std::string_view dt = "u8") {
-    if (image_dtype_elem_size(dt) == 0) return {};
-    return BlobDesc("xi/image")
-        .i64("w", w).i64("h", h).i64("c", c).str("dt", dt)
-        .build();
-}
-
-// Mint an xi/image blob: build the descriptor + mint_blob with payload sized
-// w*h*c*elem_size(dt). The convenience the SDK image producer sits on. Empty
-// BufRef on a bad shape / unknown dtype.
-inline BufRef mint_image(int32_t w, int32_t h, int32_t c, std::string_view dt = "u8") {
-    if (w <= 0 || h <= 0 || c <= 0) return {};
-    const int64_t elem = image_dtype_elem_size(dt);
-    if (elem == 0) return {};
-    mp::Bytes desc = make_image_desc(w, h, c, dt);
-    if (desc.empty()) return {};
-    return mint_blob(desc.data(), int32_t(desc.size()),
-                     int64_t(w) * h * c * elem);
-}
+// The `xi/image` producer helpers (make_image_desc / mint_image) and the "dt"
+// element-size table are NOT here — they are CONVENTION-LAYER sugar over the
+// type-agnostic blob mechanism above, and live in <xi/xi_image_blob_mint.hpp>
+// (write) + <xi/xi_image_blob.hpp> (read). The core container knows no domain
+// type — no "xi/image", no dtype ladder (doc 28 finding A②).
 
 namespace pack_detail {
 
@@ -1121,9 +1121,15 @@ public:
                   const void* payload, int64_t payload_len) {
         assert(!sealed_ && "add after seal");
         if (spent_()) return false;
-        BufRef ref = mint_blob(desc, desc_len, payload_len);
+        // When we have the whole payload in hand, mint UNINIT and copy over it —
+        // the memcpy writes every payload byte, so pre-zeroing would be a wasted
+        // full-buffer pass (doc 28 finding A③). With no payload, keep the zeroed
+        // canvas (the entry is an honestly-zero blob of payload_len bytes).
+        const bool have_payload = payload && payload_len > 0;
+        BufRef ref = mint_blob_impl(desc, desc_len, payload_len,
+                                    /*zero_payload=*/!have_payload);
         if (!ref) return false;
-        if (payload && payload_len > 0)
+        if (have_payload)
             std::memcpy(ref.payload(), payload, size_t(payload_len));
         return adopt_blob(key, ref);   // addref rc2; ref drop -> rc1; pack holds rc1
     }
