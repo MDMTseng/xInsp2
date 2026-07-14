@@ -44,7 +44,13 @@ contiguous slab** + N pool-backed EXTERN buffers, resolved behind one API (D1
   the builder's staging vectors recycle through a per-thread scratch pool, so
   a steady stream of packs on one lane's thread is heap-free after warmup —
   the ImagePool discipline in miniature. Destruction returns the slab in one
-  shot ("the slab dies with the pack").
+  shot ("the slab dies with the pack"). Both freelists sit behind a
+  **trivially-destructible thread_local pointer** (the same teardown-ordering
+  hardening the pixpool magazine carries): a `Pack` legitimately outliving its
+  producer thread and dropped inside a *later* thread_local destructor — or
+  during static teardown — finds the pointer null and frees its slab outright
+  instead of touching a freelist vector that was already destroyed. The one
+  recycle pool a dropped pack reaches never becomes a teardown UAF.
 - **NEW first-class entries (additive):** `PackTag::Tensor` — logical shape
   `{w,h,c}` + a `PackDtype` (`U8…F64`, carried in `DirEntry::type_id`) over a
   pool buffer, via `add_tensor` / `get_tensor` / `get_tensor_of<T>` (dtype
@@ -132,8 +138,12 @@ became `slab_bytes()`.
 A pack under construction (`PackBuilder`) is never shareable; `seal()` is the
 one-way flip — it hash-sorts the staged entries and writes the one slab
 (directory + order table + payload), producing an immutable `Pack` and
-emptying the builder (no double-seal, no write-after-seal; asserts guard
-both). A sealed `Pack` is **single-owner and move-only** in C++: its
+emptying the builder (no double-seal, no write-after-seal). A spent or
+moved-from builder holds no staging scratch, so every mutator and a second
+`seal()` refuse **structurally** (`spent_()` guard → no-op / empty pack) — not
+assert-only: in a release build the guard still holds, so misuse is a
+deterministic refusal, never a null-scratch dereference. A sealed `Pack` is
+**single-owner and move-only** in C++: its
 destruction *is* the whole lifecycle end — the slab returned to the recycle
 pool in one shot, every pool handle released exactly once. Borrowed views
 (`get_str`/`get_bin`/`get_mp`/`raw_at` spans, `key_at` string_views) stay
