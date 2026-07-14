@@ -1,16 +1,45 @@
 #pragma once
 //
-// xi_pack.hpp — the v3 uniform keyed-buffer pack container, SLAB representation
-// (pack-v3 migration; design C, validated by backend/tests/proto/xi_pack_c.hpp
-// + bench_pack_c.cpp — the proto stays as the experiment record, out of include/;
-// see docs/new_gen/29-pack-c-prototype-record.md).
+// xi_pack.hpp — the uniform keyed-buffer pack container, SLAB representation,
+// SELF-DESCRIBING BLOB plane (decision ⑤-final,
+// docs/new_gen/30-self-describing-blob-plane.md; supersedes the @3 image/tensor/
+// type_id surface of doc 28 finding ⑤).
 //
 // A pack is ONE thing:  key(string) -> entry, where an entry is
-// (type tag, const-span bytes). There is no image/metadata split — an image
-// is simply an entry whose tag says "image" and whose pixels live in a pool
-// buffer. See docs/new_gen/07-uniform-keyed-buffer-plane.md for the decision.
+// (type tag, const-span bytes). There is no image/tensor special case in the
+// core: every non-scalar payload is a SELF-DESCRIBING BLOB — a pool buffer whose
+// head describes its own payload. `xi/image` is just a convention type carried
+// in a blob's descriptor. The core owns buffers and dispatch, not images.
 //
-// REPRESENTATION (what changed from the Arena+msgpack-entry container):
+// BLOB HEAD FORMAT (spec 30). A blob is a pool buffer whose base is 64B-aligned
+// (pool guarantee):
+//
+//     +0   u32  magic 'XBD1' (0x31444258 LE)   — fail-loud discriminator
+//     +4   u32  desc_len                        — bytes of descriptor msgpack
+//     +8   canonical msgpack map (the descriptor, string keys)
+//     +8+desc_len … zero pad …
+//     +payload_off = align_up(8 + desc_len, 64) — payload, 64B-aligned
+//     +payload_off + payload_len = total buffer length
+//
+//   * The descriptor is a CANONICAL msgpack map (same canonical rules as pack
+//     ingress; validated fail-loud wherever foreign bytes arrive). The core
+//     validates canonical form ONLY — it interprets no key. `"t"` (a type string,
+//     namespaced by convention, e.g. "xi/image") is required BY CONVENTION and
+//     read only as sugar (type_of); the core owns no type space.
+//   * Alignment: base is 64B-aligned AND payload_off is a multiple of 64, so the
+//     payload is always 64B-aligned (SIMD / cv::Mat wrap / GPU upload). Cost:
+//     ≤ ~64-128B per blob — noise at MB scale, accepted at KB scale.
+//   * Zero-copy: producers mint a described buffer FIRST (mint_blob writes the
+//     head and exposes the aligned payload region), fill the payload in place
+//     (camera DMA lands at base+payload_off), then adopt into a pack — zero
+//     copies. add_blob copies bytes into a freshly minted buffer.
+//   * ONE validation seam: blob_head_validate(base,len) — magic, desc_len
+//     bounds, canonical-msgpack well-formedness of the descriptor map, and
+//     payload_off ≤ len. Used by adopt_blob and exported for the door/wire
+//     packages to reuse (same fail-loud discipline as the add_mp canonicalize
+//     seam).
+//
+// REPRESENTATION (unchanged in shape from the slab migration):
 //
 //   One sealed pack = ONE contiguous SLAB + N pool-backed EXTERN buffers.
 //
@@ -27,53 +56,35 @@
 //   * INSERTION ORDER IS FIRST-CLASS: every DirEntry carries its insertion
 //     ordinal and the slab carries the ordinal->dir-index order table, so
 //     key_at/tag_at/for_each present exactly the order entries were added —
-//     the contract the expose/record walkers depend on. Hash order is an
-//     internal detail nothing outside find() sees.
+//     the contract the expose/record walkers depend on.
 //   * INLINE entries store the entry's CANONICAL MSGPACK VALUE verbatim
-//     (④A memory==wire, doc 28 finding ④): i64=int64 0xd3+8, f64=float64
-//     0xcb+8 (NaN flattened at add), bool=0xc2/0xc3, str=str32, small bin=
-//     bin32, nested msgpack (Mp)=its canonical bytes. raw_at(i) IS the wire
-//     bytes; a typed read skips the fixed-width header (one branch, zero copy).
-//   * EXTERN entries (Image, Tensor, Bin >= kPackLargeThreshold) live in the
-//     production ImagePool exactly as before — owner-neutral mint through
-//     pack_pool below, pack co-owns via the pool refcount, frozen image ABI
-//     untouched. The slab payload holds a 24-byte ExtRecord {handle, logical
-//     shape w/h/c, byte length} per EXTERN entry; the DirEntry points at it.
-//   * The slab buffer RECYCLES through the same per-thread freelist the old
-//     arena chunks used (pack_detail::SlabPool — the previous ArenaPool with
-//     the honest name), and the builder's staging vectors recycle through a
-//     per-thread scratch pool, so a steady stream of packs on one lane's
-//     thread is heap-free after warmup — the ImagePool discipline preserved.
+//     (④A memory==wire): i64=int64 0xd3+8, f64=float64 0xcb+8 (NaN flattened at
+//     add), bool=0xc2/0xc3, str=str32, small bin=bin32, nested msgpack (Mp)=its
+//     canonical bytes. raw_at(i) IS the wire bytes; a typed read skips the
+//     fixed-width header (one branch, zero copy).
+//   * EXTERN entries (Bin >= kPackLargeThreshold, and every Blob) live in the
+//     production ImagePool — owner-neutral mint through pack_pool below, pack
+//     co-owns via the pool refcount. The slab payload holds a 16-byte ExtRecord
+//     {handle, total_len} per EXTERN entry; the DirEntry points at it. A Blob's
+//     total_len is the WHOLE self-describing buffer (head + desc + pad +
+//     payload); a Bin's is its byte length.
+//   * The slab buffer RECYCLES through the per-thread SlabPool and the builder's
+//     staging vectors through a per-thread scratch pool, so a steady stream of
+//     packs on one lane's thread is heap-free after warmup — the ImagePool
+//     discipline preserved.
 //
-// WIRE / AT-REST FORMAT: UNCHANGED. The canonical msgpack container (doc 07
-// max-width profile via xi_mp.hpp) remains the serialization truth. memory ==
-// wire is RESTORED for inline entries (④A, doc 28 finding ④): the inline
-// payload IS the canonical value, so the walk API below (for_each_entry /
-// canonical_value) SPLICES each inline entry's stored bytes verbatim rather
-// than re-encoding — the identity is structural, not a walker convention.
-// EXTERN entries (Image/Tensor/large-bin) still build their wire shape from
-// the pool buffer at the edge. (Slab-verbatim wire, as the prototype's
-// serialize() showed, is a follow-up candidate, NOT this migration.)
+// WIRE / AT-REST FORMAT: memory == wire is RESTORED for inline entries (④A):
+// the inline payload IS the canonical value, so the walk API (for_each_entry /
+// canonical_value) SPLICES each inline entry's stored bytes verbatim rather than
+// re-encoding. A Blob has no single scalar canonical value (its wire arm — the
+// self-describing buffer verbatim — is the wire package's contract, package C);
+// canonical_value returns false for a Blob, exactly as it did for the retired
+// Image/Tensor tags.
 //
 // SEMANTICS KEPT: Pack is move-only, sealed-immutable, single-owner; borrowed
-// views (get_str/get_bin/get_mp/raw_at spans, key_at string_views) are valid
-// for the life of the owning Pack — the slab is a stable heap block, so views
-// survive a Pack move, exactly like the old arena chunks. Drop-on-crash is
-// EXACTLY destruction: the directory walk releases each pool handle once and
-// the slab returns to the recycle pool; a moved-from Pack owns nothing.
-//
-// API DELTAS from the arena representation (recorded for downstream agents):
-//   * raw_at(i) returns the entry's canonical msgpack value for every inline
-//     entry (memory == wire, ④A) — the wire bytes verbatim, exactly what the
-//     pre-slab arena container returned. Empty for an EXTERN entry (resolve
-//     with get_image/get_tensor/get_bin). canonical_value(i, writer) splices
-//     these same bytes.
-//   * arena_bytes() is gone; slab_bytes() reports the slab footprint.
-//   * NEW: first-class typed tensors — PackTag::Tensor entries carry a dtype
-//     (PackDtype in DirEntry::type_id) + logical shape {w,h,c}; see
-//     add_tensor / get_tensor / get_tensor_of<T>. Images stay the u8 (w,h,c)
-//     entries they always were. DirEntry::type_id is also the future custom-
-//     blob type space (>= kPackTypeUserBase via add_blob).
+// views (get_str/get_bin/get_blob spans, key_at string_views) are valid for the
+// life of the owning Pack. Drop-on-crash is EXACTLY destruction: the directory
+// walk releases each pool handle once and the slab returns to the recycle pool.
 //
 
 #include "xi_abi.h"
@@ -103,12 +114,12 @@ namespace xi {
 //   they are AGAIN the pack's inline STORAGE encoding: add_* encode the
 //   canonical value into the slab at add-time (write_*), and the typed getters
 //   decode the fixed-width header at a known offset (read_*). canonical_value
-//   then splices the stored bytes verbatim — no re-encode. The same readers
-//   serve any other fixed-offset consumer (the XEX1 parse/dump helpers).
+//   then splices the stored bytes verbatim — no re-encode.
 //
 //   Fixed-width forms only (int64 0xd3, float64 0xcb, str32 0xdb, bin32 0xc6)
 //   — the canonical max-width profile of doc 07. Everything is 100% standard
-//   msgpack; a stock decoder reads it.
+//   msgpack; a stock decoder reads it. The blob-head u32 helpers below are
+//   LITTLE-endian (the blob magic/desc_len are raw LE u32, NOT msgpack).
 // ===================================================================
 namespace pack_mp_detail {
 
@@ -124,6 +135,16 @@ inline void put_u32_be(uint8_t* p, uint32_t v) {
 inline uint32_t get_u32_be(const uint8_t* p) {
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
            (uint32_t(p[2]) << 8)  |  uint32_t(p[3]);
+}
+// Little-endian u32 — the blob head's magic + desc_len are raw LE words (spec
+// 30), distinct from the big-endian msgpack length fields above.
+inline void put_u32_le(uint8_t* p, uint32_t v) {
+    p[0] = uint8_t(v);       p[1] = uint8_t(v >> 8);
+    p[2] = uint8_t(v >> 16); p[3] = uint8_t(v >> 24);
+}
+inline uint32_t get_u32_le(const uint8_t* p) {
+    return  uint32_t(p[0])        | (uint32_t(p[1]) << 8) |
+           (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
 }
 
 // Encoded-size constants for the canonical forms.
@@ -168,8 +189,7 @@ inline void write_bin(uint8_t* out, const void* data, size_t n) {
 }
 
 // Fixed-offset readers over TRUSTED canonical bytes (assert-only tag checks,
-// zero validation cost, zero-copy views) — the C3 fast read path for callers
-// that hold canonical wire bytes (offset-table reads, the XEX1 loaders).
+// zero validation cost, zero-copy views).
 inline int64_t read_i64(const uint8_t* p) {
     assert(p[0] == xi::mp::tag::Int64 && "bytes are not a canonical int64");
     return int64_t(get_u64_be(p + 1));
@@ -204,22 +224,12 @@ namespace pack_detail {
 // ===================================================================
 // SlabPool — a per-thread freelist of recyclable slab buffers.
 //
-// This IS the old ArenaPool with the honest post-migration name: a sealed
-// pack's slab is BORROWED here at seal() and RETURNED here when the pack is
-// destroyed, so a steady stream of packs built and dropped on one thread
-// reuses the same handful of buffers instead of hitting the heap allocator
-// per pack. Scoped THREAD-LOCAL (the per-lane cache: a pack is built, sealed,
-// read, and dropped within one lane worker's thread), so the recycle needs no
-// lock. A pack that legitimately outlives its producer thread still frees
-// correctly — its slab simply returns to whichever thread's pool drops it,
-// or, if that pool is full, frees outright. Bounded (kMaxFree) so an idle
-// thread does not hoard memory.
-//
-// DECISION (migration ruling 7): the slab source stays this existing
-// per-thread freelist rather than the prototype's magazine+overflow-shelf
-// size-class allocator — the freelist already gives steady-state heap-free
-// builds with best-fit reuse (cap >= need), is the smaller diff, and EXTERN
-// buffers get their size-class recycling from the production ImagePool.
+// A sealed pack's slab is BORROWED here at seal() and RETURNED here when the
+// pack is destroyed, so a steady stream of packs built and dropped on one thread
+// reuses the same handful of buffers instead of hitting the heap allocator per
+// pack. Scoped THREAD-LOCAL (per-lane cache), so the recycle needs no lock. A
+// pack that legitimately outlives its producer thread still frees correctly.
+// Bounded (kMaxFree) so an idle thread does not hoard memory.
 // ===================================================================
 struct SlabBuf {
     std::unique_ptr<uint8_t[]> data;
@@ -255,13 +265,9 @@ private:
 // The SlabPool hides behind a trivially-destructible thread_local POINTER (the
 // pixpool-magazine doctrine, xi_image_pool.hpp): the pointer slot itself has no
 // destructor, so it stays readable (as null) even after the owning Owner
-// thread_local has been destroyed. A Pack legitimately outlives its producer
-// thread and may be destroyed inside a LATER thread_local destructor on the
-// same thread (or during static teardown) — that late release() must NOT touch
-// a SlabPool whose free_ vector was already destroyed. With the pointer null it
-// falls through to a plain heap free instead (SlabBuf's unique_ptr). This is the
-// same hardening ImagePool::instance() and the pixpool shelf/magazine carry;
-// SlabPool is the one recycle pool a dropped Pack reaches, so it needs it too.
+// thread_local has been destroyed — a Pack destroyed inside a LATER
+// thread_local destructor (or during static teardown) falls through to a plain
+// heap free instead of touching a destroyed free_ vector.
 inline SlabPool* tls_slab_pool() {
     thread_local SlabPool* slot = nullptr;
     struct Owner {
@@ -272,15 +278,11 @@ inline SlabPool* tls_slab_pool() {
     thread_local Owner owner{&slot};
     return slot;
 }
-// Borrow a slab (>= need). During normal operation the pool is live; the null
-// path only happens if a build were somehow attempted during teardown.
 inline SlabBuf slab_acquire(size_t need, size_t default_cap) {
     if (SlabPool* p = tls_slab_pool()) return p->acquire(need, default_cap);
     size_t cap = need > default_cap ? need : default_cap;
     return SlabBuf{std::unique_ptr<uint8_t[]>(new uint8_t[cap]), cap};
 }
-// Return a slab for reuse. If the pool is gone (late teardown), b frees its
-// slab outright as it goes out of scope — never a UAF on a dead free_ vector.
 inline void slab_release(SlabBuf&& b) {
     if (SlabPool* p = tls_slab_pool()) p->release(std::move(b));
 }
@@ -293,53 +295,57 @@ inline uint64_t hash_key(std::string_view s) {
     return h;
 }
 
+// align_up to a power-of-two boundary (blob payload offset / slab alignment).
+inline constexpr uint64_t align_up(uint64_t v, uint64_t a) {
+    return (v + (a - 1)) & ~(a - 1);
+}
+
 } // namespace pack_detail
 
 // ===================================================================
 // pack_pool — thin TYPELESS facade over ImagePool (unchanged boundary).
 //
-// The pool is image-shaped (create(w,h,ch)); a typeless large buffer of N
-// bytes is just a (N,1,1) entry whose pixels ARE the bytes, and an image is a
-// native (w,h,c) entry. Either way the handle is minted here, released here,
-// and resolved to a raw const span. This is the ONLY mint path in the pack
-// layer, satisfying doc 07's "handles are mintable only by the domain's own
-// allocator". See docs/new_gen/09-bufferpool-audit.md for the reuse verdict.
+// The pool is image-shaped (create(w,h,ch)); a typeless buffer of N bytes is a
+// (N,1,1) entry whose pixels ARE the bytes. The handle is minted here, released
+// here, and resolved to a raw span. This is the ONLY mint path in the pack
+// layer (doc 07's "handles are mintable only by the domain's own allocator").
 //
-// OWNER-NEUTRAL MINT (cross-plane owner-sweep data-loss fix). A buffer minted
-// INTO a pack is governed by the pack alone: the pack's directory walk
-// releases it exactly once on destruction, and a LEAKED pack is reclaimed by
-// the PACK registry's own owner sweep (sweep_packs_for -> pack destroy ->
-// handle release). Tagging it with the producing INSTANCE's ImagePool owner
-// (current_owner()) was therefore redundant AND harmful: PackRegistry::retain
-// bumps only the pack-registry rc, never the pool rc, so the buffer stayed at
-// pool rc 1 — and the instance's image-plane sweep (ImagePool::release_all_for
-// on producer teardown) freed it out from under a co-owner still holding the
-// PACK. Minting owner-0 makes the image sweep skip pack buffers so the pack
-// solely governs them. Standalone mints keep the instance owner and are still
-// leak-swept; the ADOPT path (adopt_image: pool addref -> rc 2 -> spared+
-// orphaned by the sweep) was already correct. Diagnostic-only side effect:
-// stats_by_owner attributes pack buffers to owner 0.
+// OWNER-NEUTRAL MINT (cross-plane owner-sweep data-loss fix): a buffer minted
+// INTO a pack is governed by the pack alone. Minting owner-0 makes the image
+// sweep skip pack buffers so the pack solely governs them (its directory walk
+// releases each exactly once on destruction; a leaked pack is reclaimed by the
+// PACK registry's own owner sweep).
+//
+// ZERO-FILL DISCIPLINE (doc 28 zeroinit verdict):
+//   * alloc_bytes(src,n) is a COPY path — it full-memcpy's a non-null src over
+//     the whole buffer, so the pool's zero-fill is pure waste; it mints an
+//     UNINITIALISED buffer (create_uninit) and copies. A NULL src is a HARD
+//     REJECT (fail-loud, returns XI_IMAGE_NULL) — a copy path with nothing to
+//     copy is a caller bug, never a silently-zeroed buffer.
+//   * alloc_canvas(n) is the WRITABLE-CANVAS path (mint_blob's payload region,
+//     a producer fills it in place) — it KEEPS zero-fill (external contract:
+//     an unwritten canvas byte reads as zero, and the head's pad bytes must be
+//     zero). Uses the default create().
 // ===================================================================
 namespace pack_pool {
 
-// Mint a typeless buffer of n bytes and copy src into it. 0 on failure
-// (n==0, over the pool's per-buffer cap, or pool exhausted).
+// Mint an UNINITIALISED typeless buffer of n bytes and copy src into it. src
+// MUST be non-null (a copy path with a null src is a caller bug — fail-loud).
+// 0 on failure (n==0, null src, over the pool's per-buffer cap, or exhausted).
 inline xi_image_handle alloc_bytes(const void* src, size_t n) {
-    if (n == 0 || n > size_t(INT32_MAX)) return XI_IMAGE_NULL;
+    if (n == 0 || n > size_t(INT32_MAX) || !src) return XI_IMAGE_NULL;  // null src: HARD REJECT
     ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
-    xi_image_handle h = ImagePool::instance().create(int32_t(n), 1, 1);
-    if (h && src) std::memcpy(ImagePool::instance().data(h), src, n);
+    xi_image_handle h = ImagePool::instance().create_uninit(int32_t(n), 1, 1);
+    if (h) std::memcpy(ImagePool::instance().data(h), src, n);
     return h;
 }
-// Mint an image buffer (w*h*c bytes) and copy pixels in. 0 on failure.
-inline xi_image_handle alloc_image(int32_t w, int32_t h, int32_t c, const void* px) {
+// Mint a ZERO-FILLED writable canvas of n bytes (the producer fills it in
+// place). 0 on failure. Keeps the create() zero-fill: unwritten canvas bytes
+// (and, for a blob head, the pad between descriptor and payload) read as zero.
+inline xi_image_handle alloc_canvas(size_t n) {
+    if (n == 0 || n > size_t(INT32_MAX)) return XI_IMAGE_NULL;
     ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
-    xi_image_handle handle = ImagePool::instance().create(w, h, c);
-    if (handle && px) {
-        std::memcpy(ImagePool::instance().data(handle),
-                    px, size_t(w) * size_t(h) * size_t(c));
-    }
-    return handle;
+    return ImagePool::instance().create(int32_t(n), 1, 1);
 }
 inline void addref(xi_image_handle h) {
     if (h) ImagePool::instance().addref(h);
@@ -348,6 +354,11 @@ inline void release(xi_image_handle h) {
     // Safe even for a pack destroyed during static teardown: the pool
     // singleton is intentionally leaked (ImagePool::instance), never destroyed.
     if (h) ImagePool::instance().release(h);
+}
+// Writable data pointer (mint_blob writes the head + hands out the payload
+// region). Owner-neutral pack buffers only.
+inline uint8_t* writable(xi_image_handle h) {
+    return h ? ImagePool::instance().data(h) : nullptr;
 }
 inline std::span<const uint8_t> view(xi_image_handle h) {
     if (!h) return {};
@@ -363,78 +374,215 @@ inline std::span<const uint8_t> view(xi_image_handle h) {
 // ===================================================================
 // Entry type tags. The tag is the entry's stored type; the payload is raw
 // in-memory bytes (scalars/str/bin) or canonical msgpack (Mp), or an EXTERN
-// pool-buffer reference (Bin above threshold, Image, Tensor). Unknown/opaque
-// nested msgpack rides as Mp — forward compatibility by construction.
-// Values are FROZEN 1:1 against XI_PACK_TAG_* in xi_abi.h; Tensor is APPENDED
-// (=7) exactly as Bool (=6) was.
+// pool-buffer reference (Bin above threshold, Blob). Unknown/opaque nested
+// msgpack rides as Mp — forward compatibility by construction.
+//
+// Values are FROZEN for the surviving tags (I64=0..Bool=6, matching the frozen
+// @1 door's XI_PACK_TAG_* in xi_abi.h). The retired Image(4) and Tensor(7) tags
+// leave permanent gaps; Blob is APPENDED (=8), append-only discipline preserved.
+// A Blob is ALWAYS EXTERN. (Wire/door tag reconciliation — XI_PACK_TAG_BLOB — is
+// packages B/C.)
 // ===================================================================
-enum class PackTag : uint8_t { I64, F64, Str, Bin, Image, Mp, Bool, Tensor };
-
-// Element dtype for Tensor entries — rides in DirEntry::type_id.
-enum class PackDtype : uint16_t { U8 = 0, U16 = 1, I32 = 2, F32 = 3, F64 = 4 };
-inline constexpr uint32_t pack_dtype_elem_size(PackDtype d) {
-    constexpr uint32_t k[] = {1, 2, 4, 4, 8};
-    return k[uint16_t(d)];
-}
-// C++ element type -> PackDtype (drives get_tensor_of<T>). Unsupported T = no
-// specialization = compile error, so a bogus element type can't slip through.
-template <class T> struct pack_dtype_of;                  // intentionally undefined
-template <> struct pack_dtype_of<uint8_t>  { static constexpr PackDtype value = PackDtype::U8;  };
-template <> struct pack_dtype_of<uint16_t> { static constexpr PackDtype value = PackDtype::U16; };
-template <> struct pack_dtype_of<int32_t>  { static constexpr PackDtype value = PackDtype::I32; };
-template <> struct pack_dtype_of<float>    { static constexpr PackDtype value = PackDtype::F32; };
-template <> struct pack_dtype_of<double>   { static constexpr PackDtype value = PackDtype::F64; };
-
-// DirEntry::type_id space: 0 = "the tag speaks for itself"; Tensor entries
-// carry their PackDtype here; values >= kPackTypeUserBase are the caller's
-// typed-blob space (add_blob) for future custom payloads.
-inline constexpr uint16_t kPackTypeUserBase = 0x100;
-
-// A borrowed const view of an image entry: dimensions + a zero-copy span over
-// the pool buffer's pixels. Valid for the lifetime of the owning Pack.
-struct PackImageView {
-    int32_t width    = 0;
-    int32_t height   = 0;
-    int32_t channels = 0;
-    std::span<const uint8_t> pixels;
+enum class PackTag : uint8_t {
+    I64  = 0,
+    F64  = 1,
+    Str  = 2,
+    Bin  = 3,
+    Mp   = 5,
+    Bool = 6,
+    Blob = 8,
 };
 
-// A borrowed const view of a tensor entry: logical shape {w,h,c} + dtype +
-// a zero-copy span over the pool buffer's element bytes. `handle` is the
-// backing pool buffer, BORROWED (not addref'd) — pair with pack_pool::addref
-// (or PackBuilder::adopt_tensor, which addrefs) to keep it past the pack.
-struct PackTensorView {
-    int32_t  width    = 0;
-    int32_t  height   = 0;
-    int32_t  channels = 0;
-    PackDtype dtype   = PackDtype::U8;
-    uint32_t elem_size = 1;              // bytes per element
-    std::span<const uint8_t> bytes;      // w*h*c*elem_size raw element bytes
-    xi_image_handle handle = XI_IMAGE_NULL;  // backing pool buffer (borrowed)
-};
-
-// A borrowed const view of a user-typed blob (a Bin entry read together with
-// its DirEntry::type_id): 0 = a plain bin, >= kPackTypeUserBase = the
-// producer's declared payload type (add_blob / adopt_bin).
-struct PackBlobView {
-    uint16_t type_id = 0;
-    std::span<const uint8_t> bytes;
-};
-
-// Element-typed tensor view — get_tensor_of<T>: same buffer, but `data`
-// already carries the element type and `count` is in ELEMENTS.
-template <class T>
-struct PackTensorOf {
-    const T* data = nullptr;
-    size_t   count = 0;                  // elements, not bytes
-    int32_t  width = 0, height = 0, channels = 0;
-    bool ok() const { return data != nullptr; }
-};
-
-// Bytes at/above this size go to a pool buffer instead of the slab (D1
-// storage duality). Small enough that scalars/short strings stay inline;
-// large enough that kilobyte metadata does not churn the pool.
+// Bytes at/above this size go to a pool buffer instead of the slab (D1 storage
+// duality). Small enough that scalars/short strings stay inline; large enough
+// that kilobyte metadata does not churn the pool.
 inline constexpr size_t kPackLargeThreshold = 4096;
+
+// ===================================================================
+// The self-describing blob head (spec 30).
+// ===================================================================
+
+// 'XBD1' little-endian — the fail-loud blob discriminator.
+inline constexpr uint32_t kBlobMagic = 0x31444258u;   // 'X''B''D''1' LE
+inline constexpr uint64_t kBlobPayloadAlign = 64;     // payload 64B-aligned
+
+// The offset of a blob's payload for a given descriptor length: the head
+// (8 bytes) + descriptor, rounded up to the 64B payload alignment.
+inline constexpr uint64_t blob_payload_off(uint32_t desc_len) {
+    return pack_detail::align_up(uint64_t(8) + desc_len, kBlobPayloadAlign);
+}
+
+// Validate that `desc`/`desc_len` is a well-formed CANONICAL msgpack MAP with
+// string keys (the descriptor contract). Reuses the ingress/mp machinery: the
+// top element must be a Map, and canonicalize(desc) must reproduce the bytes
+// byte-identically (which enforces canonical widths, string keys, no duplicate
+// keys, no foreign ext, no trailing bytes). The core validates FORM only — it
+// interprets no key. Pool-handle ext is rejected (reject_all policy) so a
+// forged handle can never ride a descriptor.
+inline bool blob_desc_is_canonical_map(const uint8_t* desc, uint32_t desc_len) {
+    if (!desc || desc_len == 0) return false;
+    mp::Reader peek(desc, desc_len);
+    mp::Element e;
+    if (peek.next(e) != mp::Status::Ok || e.kind != mp::Kind::Map) return false;
+    mp::Writer out;
+    if (mp::canonicalize(desc, desc_len, out) != mp::Status::Ok) return false;
+    return out.size() == desc_len &&
+           std::memcmp(out.bytes().data(), desc, desc_len) == 0;
+}
+
+// THE ONE blob validation seam (spec 30). Fail-loud: magic, desc_len in bounds,
+// canonical-map descriptor, payload_off ≤ len. Used by adopt_blob and exported
+// for the door/wire packages to reuse. Returns true iff `base`/`len` is a
+// well-formed self-describing blob buffer.
+inline bool blob_head_validate(const uint8_t* base, size_t len) {
+    if (!base || len < 8) return false;
+    if (pack_mp_detail::get_u32_le(base) != kBlobMagic) return false;
+    uint32_t desc_len = pack_mp_detail::get_u32_le(base + 4);
+    if (uint64_t(8) + desc_len > len) return false;                 // desc overrun
+    if (!blob_desc_is_canonical_map(base + 8, desc_len)) return false;
+    return blob_payload_off(desc_len) <= len;                       // payload_off in bounds
+}
+
+// A minted, described pool buffer whose payload region is exposed for in-place
+// fill (RAII: releases its own mint ref on drop). A producer mints, fills the
+// payload, adopts into a builder (which addrefs), and lets the BufRef drop — the
+// pack then holds the buffer alone. Move-only.
+class BufRef {
+public:
+    BufRef() = default;
+    BufRef(xi_image_handle h, uint8_t* payload, int64_t payload_len)
+        : handle_(h), payload_(payload), payload_len_(payload_len) {}
+    BufRef(BufRef&& o) noexcept { move_(std::move(o)); }
+    BufRef& operator=(BufRef&& o) noexcept {
+        if (this != &o) { reset_(); move_(std::move(o)); }
+        return *this;
+    }
+    BufRef(const BufRef&) = delete;
+    BufRef& operator=(const BufRef&) = delete;
+    ~BufRef() { reset_(); }
+
+    explicit operator bool() const { return handle_ != XI_IMAGE_NULL; }
+    xi_image_handle handle()      const { return handle_; }
+    uint8_t*        payload()     const { return payload_; }      // 64B-aligned, writable
+    int64_t         payload_len() const { return payload_len_; }
+
+private:
+    void reset_() {
+        if (handle_) pack_pool::release(handle_);
+        handle_ = XI_IMAGE_NULL; payload_ = nullptr; payload_len_ = 0;
+    }
+    void move_(BufRef&& o) {
+        handle_ = o.handle_; payload_ = o.payload_; payload_len_ = o.payload_len_;
+        o.handle_ = XI_IMAGE_NULL; o.payload_ = nullptr; o.payload_len_ = 0;
+    }
+    xi_image_handle handle_ = XI_IMAGE_NULL;
+    uint8_t*        payload_ = nullptr;
+    int64_t         payload_len_ = 0;
+};
+
+// Mint a self-describing pool buffer: write the head (magic + desc_len + the
+// canonical descriptor + zero pad) and expose the 64B-aligned payload region for
+// in-place fill. The descriptor is validated fail-loud (canonical map); a bad
+// descriptor, a negative length, or an over-cap total returns an empty BufRef.
+// The payload region is zero-filled canvas (alloc_canvas) — a producer that
+// writes only part of it leaves the rest honestly zero.
+inline BufRef mint_blob(const void* desc, int32_t desc_len, int64_t payload_len) {
+    if (!desc || desc_len <= 0 || payload_len < 0) return {};
+    const uint8_t* d = static_cast<const uint8_t*>(desc);
+    if (!blob_desc_is_canonical_map(d, uint32_t(desc_len))) return {};
+    const uint64_t payload_off = blob_payload_off(uint32_t(desc_len));
+    const uint64_t total = payload_off + uint64_t(payload_len);
+    if (total > uint64_t(INT32_MAX)) return {};                    // pool per-buffer cap
+    xi_image_handle h = pack_pool::alloc_canvas(size_t(total));
+    if (!h) return {};
+    uint8_t* base = pack_pool::writable(h);
+    pack_mp_detail::put_u32_le(base + 0, kBlobMagic);
+    pack_mp_detail::put_u32_le(base + 4, uint32_t(desc_len));
+    std::memcpy(base + 8, d, size_t(desc_len));
+    // The pad [8+desc_len, payload_off) is already zero (alloc_canvas).
+    return BufRef{h, base + payload_off, payload_len};
+}
+
+// A borrowed const view of a Blob entry: the descriptor (canonical msgpack map)
+// and the 64B-aligned payload span, both zero-copy over the pool buffer, valid
+// for the owning Pack's life. `handle` is the backing buffer, BORROWED (not
+// addref'd) — pair with adopt_blob (which addrefs) to carry it into another pack.
+struct BlobView {
+    std::span<const uint8_t> desc;      // canonical msgpack descriptor map
+    std::span<const uint8_t> payload;   // 64B-aligned payload bytes
+    int64_t         payload_len = 0;
+    xi_image_handle handle = XI_IMAGE_NULL;
+};
+
+// ---- descriptor convenience (CONVENTION layer; the core owns no type space) --
+// A small writer that produces a canonical descriptor map from a type string +
+// ordered key/value pairs. The SDK image helper sits on this. "t" is a
+// convention (put it first); the core neither requires nor interprets it.
+class BlobDesc {
+public:
+    // Start a descriptor and stamp the convention type key "t" first.
+    explicit BlobDesc(std::string_view type) { str("t", type); }
+    BlobDesc() = default;
+
+    BlobDesc& str(std::string_view key, std::string_view v) {
+        kvs_.push_back(KV{std::string(key), Kind::Str, 0, std::string(v)});
+        return *this;
+    }
+    BlobDesc& i64(std::string_view key, int64_t v) {
+        kvs_.push_back(KV{std::string(key), Kind::I64, v, {}});
+        return *this;
+    }
+    // Emit the canonical msgpack map bytes.
+    mp::Bytes build() const {
+        mp::Writer w;
+        w.map(uint32_t(kvs_.size()));
+        for (const KV& kv : kvs_) {
+            w.key(kv.key);
+            if (kv.kind == Kind::Str) w.str(kv.s);
+            else                      w.int_(kv.i);
+        }
+        return w.take();
+    }
+
+private:
+    enum class Kind { Str, I64 };
+    struct KV { std::string key; Kind kind; int64_t i; std::string s; };
+    std::vector<KV> kvs_;
+};
+
+// Convention: element byte size for the xi/image "dt" strings. Unknown -> 0.
+inline int64_t image_dtype_elem_size(std::string_view dt) {
+    if (dt == "u8")  return 1;
+    if (dt == "u16") return 2;
+    if (dt == "i32") return 4;
+    if (dt == "f32") return 4;
+    if (dt == "f64") return 8;
+    return 0;
+}
+
+// Build an xi/image descriptor: {"t":"xi/image","w","h","c","dt"}. Convention
+// helper (the SDK's mint_image / as_cv read this exact shape). Returns empty on
+// an unknown dtype.
+inline mp::Bytes make_image_desc(int32_t w, int32_t h, int32_t c,
+                                 std::string_view dt = "u8") {
+    if (image_dtype_elem_size(dt) == 0) return {};
+    return BlobDesc("xi/image")
+        .i64("w", w).i64("h", h).i64("c", c).str("dt", dt)
+        .build();
+}
+
+// Mint an xi/image blob: build the descriptor + mint_blob with payload sized
+// w*h*c*elem_size(dt). The convenience the SDK image producer sits on. Empty
+// BufRef on a bad shape / unknown dtype.
+inline BufRef mint_image(int32_t w, int32_t h, int32_t c, std::string_view dt = "u8") {
+    if (w <= 0 || h <= 0 || c <= 0) return {};
+    const int64_t elem = image_dtype_elem_size(dt);
+    if (elem == 0) return {};
+    mp::Bytes desc = make_image_desc(w, h, c, dt);
+    if (desc.empty()) return {};
+    return mint_blob(desc.data(), int32_t(desc.size()),
+                     int64_t(w) * h * c * elem);
+}
 
 namespace pack_detail {
 
@@ -472,19 +620,19 @@ struct DirEntry {                    // 32 bytes exactly
     uint32_t len;                    // inline byte length / sizeof(ExtRecord)
     uint8_t  tag;                    // PackTag
     uint8_t  storage;                // kStorageInline | kStorageExtern
-    uint16_t type_id;                // 0 | PackDtype (Tensor) | user blob type
+    uint16_t reserved;               // reserved-zero (was type_id; dtype/blob-type retired)
 };
 static_assert(sizeof(DirEntry) == 32, "DirEntry must be 32 bytes");
 
-// The EXTERN side-record, stored 8-aligned in the payload: the pool handle +
-// the entry's LOGICAL shape/length (the pool's own dims are the storage shape
-// — (n,1,1) for bins/tensors — so the logical shape lives here).
-struct ExtRecord {                   // 24 bytes
+// The EXTERN side-record, stored 8-aligned in the payload: the pool handle + the
+// entry's total byte length (a Bin's byte length, or a Blob's WHOLE
+// self-describing buffer length). The logical shape retired with images/tensors
+// — a Blob's shape lives in its descriptor, not the core struct.
+struct ExtRecord {                   // 16 bytes
     xi_image_handle handle;          // XI_IMAGE_NULL if the mint failed
-    int32_t  w, h, c;                // logical shape (bin: {n,1,1})
-    uint32_t len;                    // logical byte length
+    uint64_t total_len;              // logical byte length (Bin) / whole buffer (Blob)
 };
-static_assert(sizeof(ExtRecord) == 24, "ExtRecord must be 24 bytes");
+static_assert(sizeof(ExtRecord) == 16, "ExtRecord must be 16 bytes");
 
 // ---- builder staging -------------------------------------------------------
 struct TmpEntry {
@@ -492,25 +640,24 @@ struct TmpEntry {
     uint32_t key_off, key_len;       // payload-relative (rebased at seal)
     uint32_t off, len;               // payload-relative
     uint8_t  tag, storage;
-    uint16_t type_id;
     xi_image_handle handle;          // EXTERN: the ref this builder owns
 };
 
-// Staging (payload bytes + entry rows) lives in a per-thread SCRATCH recycle,
-// so a steady stream of builds on one thread is heap-free after warmup — the
-// same discipline SlabPool gives the sealed slabs.
+// Staging (payload bytes + entry rows + the seal-time sort permutation) lives in
+// a per-thread SCRATCH recycle, so a steady stream of builds on one thread is
+// heap-free after warmup — the same discipline SlabPool gives the sealed slabs.
+// (③ doc 28: sort_idx recycles HERE instead of a per-PackBuilder member that
+// malloc'd/freed on every seal().)
 struct BuilderScratch {
     std::vector<uint8_t>  payload;
     std::vector<TmpEntry> entries;
-    void clear() { payload.clear(); entries.clear(); }   // capacity kept
+    std::vector<uint32_t> sort_idx;                      // seal-time permutation
+    void clear() { payload.clear(); entries.clear(); sort_idx.clear(); }  // capacity kept
 };
 
 // ONE pool, shared by get and put — two separate thread_locals here would
 // silently defeat the recycle. Hidden behind a trivially-destructible
-// thread_local POINTER for the same teardown reason as SlabPool above: a
-// builder abandoned during static/thread teardown (scratch_put from a late
-// destructor) must not touch a freelist vector that was already destroyed —
-// with the pointer null it just deletes the scratch outright.
+// thread_local POINTER for the same teardown reason as SlabPool above.
 using ScratchFreelist = std::vector<std::unique_ptr<BuilderScratch>>;
 inline ScratchFreelist* tls_scratch_pool() {
     thread_local ScratchFreelist* slot = nullptr;
@@ -545,17 +692,14 @@ class PackBuilder;
 // ===================================================================
 // Pack — a sealed, immutable, single-owner keyed buffer over one slab.
 //
-// Only produced by PackBuilder::seal(); there is no public constructor, so a
-// pre-seal (mutable) pack can never be handed out as a Pack. Move-only:
-// exactly one owner at a time, whose destruction is the whole lifecycle end —
-// directory walked once to release every pool handle, slab returned to the
-// per-thread recycle pool. A moved-from Pack owns nothing and releases
-// nothing, so a drop can never double-release.
+// Only produced by PackBuilder::seal(). Move-only: exactly one owner at a time,
+// whose destruction is the whole lifecycle end — directory walked once to
+// release every pool handle, slab returned to the per-thread recycle pool. A
+// moved-from Pack owns nothing and releases nothing.
 //
 // LOOKUP: binary search on the hash-sorted directory (equal-hash runs
 // memcmp-verified, first-inserted wins on duplicate keys). ITERATION
-// (key_at/tag_at/for_each/for_each_entry) is INSERTION order via the slab's
-// ordinal->dir order table.
+// (key_at/tag_at/for_each/for_each_entry) is INSERTION order via the order table.
 // ===================================================================
 class Pack {
 public:
@@ -590,22 +734,15 @@ public:
         }
     }
 
-    // Insertion-ordered index accessors — the O(1) primitives the C-ABI
-    // generic walk (key_at/tag_at) is built on. UB if i >= size().
+    // Insertion-ordered index accessors — the O(1) primitives the C-ABI generic
+    // walk (key_at/tag_at) is built on. UB if i >= size().
     std::string_view key_at(size_t i) const { return key_of(dir_at(i)); }
     PackTag          tag_at(size_t i) const { return PackTag(dir_at(i).tag); }
-    // The DirEntry::type_id extension: 0, a PackDtype (Tensor), or a user
-    // blob type (>= kPackTypeUserBase). UB if i >= size().
-    uint16_t         type_id_at(size_t i) const { return dir_at(i).type_id; }
 
     // RAW stored payload bytes of the i-th entry (insertion order). memory ==
-    // wire (④A): the inline payload IS the entry's canonical msgpack value, so
-    // raw_at(i) returns the exact wire bytes — int64 (0xd3+8), float64
-    // (0xcb+8, NaN flattened), bool (0xc2/0xc3), str32, bin32, or a nested Mp
-    // value verbatim. canonical_value(i, writer) splices exactly these bytes;
-    // the identity is structural, not a re-encode. Empty for an EXTERN entry
-    // (Image/Tensor, or a Bin above kPackLargeThreshold) — resolve those with
-    // get_image / get_tensor / get_bin. UB if i >= size().
+    // wire (④A): the inline payload IS the entry's canonical msgpack value.
+    // Empty for an EXTERN entry (a Bin above kPackLargeThreshold, or a Blob) —
+    // resolve those with get_bin / get_blob. UB if i >= size().
     std::span<const uint8_t> raw_at(size_t i) const {
         const pack_detail::DirEntry& e = dir_at(i);
         if (e.storage != pack_detail::kStorageInline) return {};
@@ -614,23 +751,17 @@ public:
 
     // ================= serialization walk API =========================
     // The port surface for the record/expose/ingress call sites: walk every
-    // entry in INSERTION order with full typed detail, and re-emit any
-    // non-pixel entry's canonical msgpack value byte-identically to the wire
-    // bytes (max-width profile, ruling-1 NaN flatten). Since ④A the inline
-    // payload IS that canonical value, so for an inline entry canonical_value
-    // is a verbatim splice of the raw span, not a re-encode.
-    // No slab internals leak through this surface.
+    // entry in INSERTION order with typed detail. No slab internals leak through.
     struct EntryView {
         size_t           ordinal = 0;      // insertion index
         std::string_view key;
         PackTag          tag = PackTag::I64;
-        uint16_t         type_id = 0;      // dtype for Tensor; user blob type
         bool             external = false; // payload lives in a pool buffer
-        // INLINE entries: the raw stored bytes (== raw_at(ordinal)).
+        // INLINE entries: the raw stored canonical bytes (== raw_at(ordinal)).
         std::span<const uint8_t> raw;
-        // EXTERN entries: logical shape + length + the pool handle (borrowed,
-        // NOT addref'd — pair with pack_pool::addref to keep it past the pack).
-        int32_t          w = 0, h = 0, c = 0;
+        // EXTERN entries: total byte length + the pool handle (borrowed, NOT
+        // addref'd). A Blob's bytes ARE its self-describing buffer (validate +
+        // parse the head to reach the descriptor/payload — get_blob does this).
         size_t           ext_len = 0;
         xi_image_handle  handle = XI_IMAGE_NULL;
     };
@@ -648,12 +779,10 @@ public:
         v.ordinal  = i;
         v.key      = key_of(e);
         v.tag      = PackTag(e.tag);
-        v.type_id  = e.type_id;
         v.external = e.storage == pack_detail::kStorageExtern;
         if (v.external) {
             const pack_detail::ExtRecord& r = ext_of(e);
-            v.w = r.w; v.h = r.h; v.c = r.c;
-            v.ext_len = r.len;
+            v.ext_len = size_t(r.total_len);
             v.handle  = r.handle;
         } else {
             v.raw = std::span<const uint8_t>(slab() + e.off, e.len);
@@ -661,42 +790,34 @@ public:
         return v;
     }
 
-    // Append the i-th entry's ONE canonical msgpack value to `w` — the exact
-    // wire bytes today's container serialization carries for that entry:
+    // Append the i-th entry's ONE canonical msgpack value to `w` — the exact wire
+    // bytes for a scalar/str/bin/mp entry:
     //   I64 -> int64 0xd3        F64 -> float64 0xcb (NaN already flattened)
     //   Bool -> 0xc2/0xc3        Str -> str32 0xdb
     //   Bin (inline OR pooled) -> bin32 0xc6 over the payload bytes
     //   Mp  -> the stored canonical bytes VERBATIM
     // memory == wire (④A): for an INLINE entry the stored payload IS that
-    // canonical value, so this is a verbatim splice of raw_at(i) — the identity
-    // is structural (a copy), not a re-encode that a walker must keep honest.
-    // A pooled Bin re-wraps its pool bytes as bin32. Image/Tensor entries have
-    // NO single canonical scalar form (the wire shape — descriptor map + pixel
-    // bin — is the dumper's contract, built from get_image/get_tensor): returns
-    // false, writer untouched. Also false for a pooled Bin whose buffer died
-    // (never emits a poisoned value).
+    // canonical value, so this is a verbatim splice of raw_at(i). A pooled Bin
+    // re-wraps its pool bytes as bin32. A Blob has NO single canonical scalar
+    // form (its wire arm is the self-describing buffer verbatim — the wire
+    // package's contract): returns false, writer untouched. Also false for a
+    // pooled Bin/Blob whose buffer died (never emits a poisoned value).
     bool canonical_value(size_t i, xi::mp::Writer& w) const {
         const pack_detail::DirEntry& e = dir_at(i);
-        if (PackTag(e.tag) == PackTag::Image || PackTag(e.tag) == PackTag::Tensor)
-            return false;
+        if (PackTag(e.tag) == PackTag::Blob) return false;
         if (e.storage == pack_detail::kStorageInline) {
-            // The inline payload is already the canonical wire value — splice it.
-            w.raw_canonical(slab() + e.off, e.len);
+            w.raw_canonical(slab() + e.off, e.len);   // inline payload IS canonical
             return true;
         }
         // EXTERN Bin: the pool bytes become a canonical bin32 on the wire.
         const pack_detail::ExtRecord& r = ext_of(e);
         auto v = pack_pool::view(r.handle);
-        if (!r.handle || v.size() < r.len) return false;   // F1 guard
-        w.bin(v.data(), r.len);
+        if (!r.handle || v.size() < r.total_len) return false;   // F1 guard
+        w.bin(v.data(), size_t(r.total_len));
         return true;
     }
 
     // ---- typed borrowed reads (skip the canonical msgpack header) ------
-    // The inline payload is canonical msgpack (④A), so a typed read decodes the
-    // fixed-width header at a known offset — one branch-free skip, zero heap,
-    // zero-copy for str/bin. pack_mp_detail's readers are the fixed-offset
-    // decoders over these trusted canonical bytes.
     std::optional<int64_t> get_i64(std::string_view key) const {
         const auto* e = find(key);
         if (!e || PackTag(e->tag) != PackTag::I64) return std::nullopt;
@@ -724,75 +845,43 @@ public:
         if (!e || PackTag(e->tag) != PackTag::Bin) return std::nullopt;
         if (e->storage == pack_detail::kStorageExtern) {
             // Guard the pooled span (F1): a null handle (pool exhaustion at
-            // build) or an under-sized pool view must report absence, never a
-            // poisoned {nullptr, n} span.
+            // build) or an under-sized pool view must report absence.
             const pack_detail::ExtRecord& r = ext_of(*e);
             auto v = pack_pool::view(r.handle);
-            if (!r.handle || v.size() < r.len) return std::nullopt;
-            return v.first(r.len);
+            if (!r.handle || v.size() < r.total_len) return std::nullopt;
+            return v.first(size_t(r.total_len));
         }
         // INLINE: the payload is a canonical bin32 — skip its header (④A).
         return pack_mp_detail::read_bin(slab() + e->off);
     }
-    // Image descriptor + zero-copy pixel span over the pool buffer.
-    std::optional<PackImageView> get_image(std::string_view key) const {
+    // Self-describing blob: validate the head, return the descriptor map view +
+    // the 64B-aligned payload span (both zero-copy over the pool buffer). nullopt
+    // on absent/wrong-tag key, a dead/under-sized pool buffer (F1 guard), or a
+    // buffer that fails blob_head_validate (defence in depth — adopt validated,
+    // but a Blob entry always re-derives its offsets from a validated head).
+    std::optional<BlobView> get_blob(std::string_view key) const {
         const auto* e = find(key);
-        if (!e || PackTag(e->tag) != PackTag::Image) return std::nullopt;
+        if (!e || PackTag(e->tag) != PackTag::Blob) return std::nullopt;
         const pack_detail::ExtRecord& r = ext_of(*e);
-        return PackImageView{r.w, r.h, r.c, pack_pool::view(r.handle)};
+        auto buf = pack_pool::view(r.handle);
+        if (!r.handle || buf.size() < r.total_len) return std::nullopt;   // F1 guard
+        if (!blob_head_validate(buf.data(), size_t(r.total_len))) return std::nullopt;
+        const uint32_t desc_len = pack_mp_detail::get_u32_le(buf.data() + 4);
+        const uint64_t payload_off = blob_payload_off(desc_len);
+        BlobView v;
+        v.desc        = buf.subspan(8, desc_len);
+        v.payload     = buf.subspan(size_t(payload_off), size_t(r.total_len) - size_t(payload_off));
+        v.payload_len = int64_t(r.total_len) - int64_t(payload_off);
+        v.handle      = r.handle;
+        return v;
     }
-    // Tensor: logical shape + dtype + zero-copy element bytes.
-    std::optional<PackTensorView> get_tensor(std::string_view key) const {
-        const auto* e = find(key);
-        if (!e || PackTag(e->tag) != PackTag::Tensor) return std::nullopt;
-        const pack_detail::ExtRecord& r = ext_of(*e);
-        auto v = pack_pool::view(r.handle);
-        if (!r.handle || v.size() < r.len) return std::nullopt;    // F1 guard
-        PackTensorView t;
-        t.width = r.w; t.height = r.h; t.channels = r.c;
-        t.dtype = PackDtype(e->type_id);
-        t.elem_size = pack_dtype_elem_size(t.dtype);
-        t.bytes = v.first(r.len);
-        t.handle = r.handle;               // borrowed — see PackTensorView
-        return t;
-    }
-    // User-typed blob: a Bin entry read TOGETHER with its type_id (0 = plain
-    // bin, >= kPackTypeUserBase = the producer's declared type). Same storage
-    // duality + F1 guard as get_bin — one span either way.
-    std::optional<PackBlobView> get_blob(std::string_view key) const {
-        const auto* e = find(key);
-        if (!e || PackTag(e->tag) != PackTag::Bin) return std::nullopt;
-        PackBlobView bv;
-        bv.type_id = e->type_id;
-        if (e->storage == pack_detail::kStorageExtern) {
-            const pack_detail::ExtRecord& r = ext_of(*e);
-            auto v = pack_pool::view(r.handle);
-            if (!r.handle || v.size() < r.len) return std::nullopt;   // F1 guard
-            bv.bytes = v.first(r.len);
-        } else {
-            // INLINE: the payload is a canonical bin32 — skip its header (④A).
-            bv.bytes = pack_mp_detail::read_bin(slab() + e->off);
-        }
-        return bv;
-    }
-    // DirEntry::type_id by key (the by-key sibling of type_id_at): nullopt if
-    // the key is absent.
-    std::optional<uint16_t> type_id_of(std::string_view key) const {
-        const auto* e = find(key);
-        return e ? std::optional<uint16_t>(e->type_id) : std::nullopt;
-    }
-    // Element-typed tensor read: nullopt unless the STORED dtype matches T —
-    // the producer/consumer contract stays as honest as every typed getter.
-    template <class T>
-    std::optional<PackTensorOf<T>> get_tensor_of(std::string_view key) const {
-        constexpr PackDtype want = pack_dtype_of<T>::value;
-        auto v = get_tensor(key);
-        if (!v || v->dtype != want) return std::nullopt;
-        PackTensorOf<T> t;
-        t.data  = reinterpret_cast<const T*>(v->bytes.data());
-        t.count = v->bytes.size() / sizeof(T);
-        t.width = v->width; t.height = v->height; t.channels = v->channels;
-        return t;
+    // Convenience SUGAR: the blob's convention type string "t". nullopt if the
+    // key is absent / not a blob / the descriptor has no string "t". The core
+    // reads only this one convention key, and only here.
+    std::optional<std::string_view> type_of(std::string_view key) const {
+        auto b = get_blob(key);
+        if (!b) return std::nullopt;
+        return desc_find_str(b->desc, "t");
     }
     // Opaque nested msgpack pass-through (unknown type tags, arrays, maps).
     std::optional<std::span<const uint8_t>> get_mp(std::string_view key) const {
@@ -805,15 +894,53 @@ public:
     template <class T> std::optional<T> get(std::string_view key) const;
 
     // ---- diagnostics / ABI hooks ---------------------------------------
-    // Slab footprint (header + directory + order table + payload).
     size_t slab_bytes()   const { return slab_.data ? size_t(header()->slab_bytes) : 0; }
-    // LIVE pool handles this pack owns (failed mints excluded — same count
-    // the old handle ledger reported).
     size_t handle_count() const { return slab_.data ? header()->ext_count : 0; }
-    // The raw slab (header/dir/order/payload) — the stable block the ABI door
-    // may point into. Valid for the Pack's life; STABLE ACROSS Pack MOVES
-    // (the slab is one heap allocation the move merely re-owns).
     const uint8_t* slab_data() const { return slab_.data.get(); }
+
+    // Read a string value for `key` from a canonical descriptor map (string keys,
+    // fixed-width forms). Convention-layer helper (type_of sits on it; exported
+    // so the SDK image accessors can read w/h/c/dt the same way). nullopt if the
+    // key is absent or its value is not a string.
+    static std::optional<std::string_view> desc_find_str(std::span<const uint8_t> desc,
+                                                         std::string_view key) {
+        mp::Reader r(desc.data(), desc.size());
+        mp::Element m;
+        if (r.next(m) != mp::Status::Ok || m.kind != mp::Kind::Map) return std::nullopt;
+        for (uint32_t i = 0; i < m.len; ++i) {
+            mp::Element k, v;
+            if (r.next(k) != mp::Status::Ok || k.kind != mp::Kind::Str) return std::nullopt;
+            std::string_view kk(reinterpret_cast<const char*>(k.data), k.len);
+            if (r.next(v) != mp::Status::Ok) return std::nullopt;
+            if (kk == key) {
+                if (v.kind != mp::Kind::Str) return std::nullopt;
+                return std::string_view(reinterpret_cast<const char*>(v.data), v.len);
+            }
+            skip_value(r, v);
+        }
+        return std::nullopt;
+    }
+    // Read an int value for `key` from a canonical descriptor map. Convention
+    // helper (SDK reads "w"/"h"/"c"). nullopt if absent or non-integer.
+    static std::optional<int64_t> desc_find_i64(std::span<const uint8_t> desc,
+                                               std::string_view key) {
+        mp::Reader r(desc.data(), desc.size());
+        mp::Element m;
+        if (r.next(m) != mp::Status::Ok || m.kind != mp::Kind::Map) return std::nullopt;
+        for (uint32_t i = 0; i < m.len; ++i) {
+            mp::Element k, v;
+            if (r.next(k) != mp::Status::Ok || k.kind != mp::Kind::Str) return std::nullopt;
+            std::string_view kk(reinterpret_cast<const char*>(k.data), k.len);
+            if (r.next(v) != mp::Status::Ok) return std::nullopt;
+            if (kk == key) {
+                if (v.kind == mp::Kind::Int)  return v.i;
+                if (v.kind == mp::Kind::UInt) return int64_t(v.u);
+                return std::nullopt;
+            }
+            skip_value(r, v);
+        }
+        return std::nullopt;
+    }
 
 private:
     friend class PackBuilder;
@@ -830,7 +957,6 @@ private:
     const uint32_t* order() const {
         return reinterpret_cast<const uint32_t*>(slab() + header()->order_offset);
     }
-    // The i-th entry in INSERTION order (via the ordinal->dir table).
     const pack_detail::DirEntry& dir_at(size_t ordinal) const {
         return dir()[order()[ordinal]];
     }
@@ -842,9 +968,20 @@ private:
         return *reinterpret_cast<const pack_detail::ExtRecord*>(slab() + e.off);
     }
 
-    // Binary search on the hash-sorted directory; equal-hash runs are
-    // memcmp-verified. Duplicate keys: the run is (hash, key, ordinal)-sorted,
-    // so the first key match is the FIRST-INSERTED entry (behavior preserved).
+    // Advance a Reader past the children of an already-read container element
+    // `v` (a descriptor value that is a nested map/array). Scalars/str/bin have
+    // already consumed their payload in next(); only container children remain.
+    static void skip_value(mp::Reader& r, const mp::Element& v) {
+        uint64_t remaining = 0;
+        if (v.kind == mp::Kind::Array) remaining = v.len;
+        else if (v.kind == mp::Kind::Map) remaining = uint64_t(v.len) * 2;
+        while (remaining--) {
+            mp::Element c;
+            if (r.next(c) != mp::Status::Ok) return;
+            skip_value(r, c);
+        }
+    }
+
     const pack_detail::DirEntry* find(std::string_view key) const {
         if (!slab_.data) return nullptr;
         const pack_detail::DirEntry* d = dir();
@@ -864,9 +1001,6 @@ private:
     }
 
     void destroy() {
-        // Drop-on-crash == this exact path: walk the directory, release each
-        // pool handle exactly once (single owner), return the slab to the
-        // per-thread recycle pool.
         if (!slab_.data) return;
         const pack_detail::DirEntry* d = dir();
         const uint32_t n = header()->entry_count;
@@ -878,7 +1012,7 @@ private:
     }
     void move_from(Pack&& o) noexcept {
         slab_ = std::move(o.slab_);
-        o.slab_ = {};    // moved-from owns nothing → never double-releases
+        o.slab_ = {};
     }
 
     pack_detail::SlabBuf slab_;
@@ -891,12 +1025,10 @@ template <> inline std::optional<bool>    Pack::get<bool>(std::string_view k) co
 // ===================================================================
 // PackBuilder — the pre-seal, insertion-ordered entry table.
 //
-// The ONLY way to populate a pack. add_* assert the builder is not yet sealed
-// (post-seal writes assert — doc 07 lifecycle step 2). Staging lives in the
-// per-thread scratch recycle; seal() sorts the directory, writes the slab in
-// one pass, and hands it to an immutable Pack. A builder abandoned without
-// seal() (a producer that faults mid-build) releases every pool handle it
-// minted or adopted — no leak on the error path.
+// The ONLY way to populate a pack. add_* assert the builder is not yet sealed.
+// Staging lives in the per-thread scratch recycle; seal() sorts the directory,
+// writes the slab in one pass, and hands it to an immutable Pack. A builder
+// abandoned without seal() releases every pool handle it minted or adopted.
 // ===================================================================
 class PackBuilder {
 public:
@@ -920,25 +1052,19 @@ public:
     bool sealed() const { return sealed_; }
 
     // memory == wire (④A): the inline payload IS the entry's canonical msgpack
-    // value, encoded here at add-time through the ONE canonical truth
-    // (pack_mp_detail's fixed-width forms == xi::mp::Writer). raw_at(i) is then
-    // the wire bytes verbatim and canonical_value is a copy, not a re-encode.
+    // value, encoded here at add-time through the ONE canonical truth.
     void add_i64(std::string_view key, int64_t v) {
         if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::I64);
-        e.off = bump_(uint32_t(pack_mp_detail::kI64Size), 1);   // 0xd3 + 8
+        e.off = bump_(uint32_t(pack_mp_detail::kI64Size), 1);
         e.len = uint32_t(pack_mp_detail::kI64Size);
         pack_mp_detail::write_i64(s_->payload.data() + e.off, v);
         s_->entries.push_back(e);
     }
-    // NaN is flattened to the canonical quiet pattern AT ADD (ruling 1 — the
-    // same bit test xi::mp::Writer::float_ applies, here inside write_f64), so
-    // the stored canonical bytes, get_f64, AND the canonical walk all agree
-    // byte-for-byte with what the old arena encoding stored.
     void add_f64(std::string_view key, double v) {
         if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::F64);
-        e.off = bump_(uint32_t(pack_mp_detail::kF64Size), 1);   // 0xcb + 8
+        e.off = bump_(uint32_t(pack_mp_detail::kF64Size), 1);
         e.len = uint32_t(pack_mp_detail::kF64Size);
         pack_mp_detail::write_f64(s_->payload.data() + e.off, v);
         s_->entries.push_back(e);
@@ -946,7 +1072,7 @@ public:
     void add_bool(std::string_view key, bool v) {
         if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::Bool);
-        e.off = bump_(uint32_t(pack_mp_detail::kBoolSize), 1);  // 0xc2 / 0xc3
+        e.off = bump_(uint32_t(pack_mp_detail::kBoolSize), 1);
         e.len = uint32_t(pack_mp_detail::kBoolSize);
         pack_mp_detail::write_bool(s_->payload.data() + e.off, v);
         s_->entries.push_back(e);
@@ -954,28 +1080,26 @@ public:
     void add_str(std::string_view key, std::string_view v) {
         if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::Str);
-        const size_t enc = pack_mp_detail::str_size(v.size());  // 0xdb + 4 + n
+        const size_t enc = pack_mp_detail::str_size(v.size());
         e.off = bump_(uint32_t(enc), 1);
         e.len = uint32_t(enc);
         pack_mp_detail::write_str(s_->payload.data() + e.off, v);
         s_->entries.push_back(e);
     }
-    // Binary: small stays inline (raw bytes in the slab); large is minted into
-    // a pool buffer (D1). Either way get_bin returns one span.
+    // Binary: small stays inline (raw canonical bin32 in the slab); large is
+    // minted into a pool buffer (D1). Either way get_bin returns one span.
     void add_bin(std::string_view key, const void* data, size_t n) {
         assert(!sealed_ && "add after seal");
         if (spent_()) return;
-        if (n >= kPackLargeThreshold) {
+        if (n >= kPackLargeThreshold && data) {
             xi_image_handle h = pack_pool::alloc_bytes(data, n);
             if (h) {
-                push_extern_(key, PackTag::Bin, 0, h,
-                             int32_t(n), 1, 1, uint32_t(n));
+                push_extern_(key, PackTag::Bin, h, n);
                 return;
             }
             // Pool exhausted / alloc failed. NEVER store a live-looking extern
-            // entry with a null handle — that is the F1 bug where get_bin
-            // surfaced a {nullptr, n} span. Fall back to INLINE slab storage
-            // so the bytes still ride, honestly (no silent data loss).
+            // entry with a null handle (the F1 bug). Fall back to INLINE slab
+            // storage so the bytes still ride, honestly (no silent data loss).
             std::fprintf(stderr,
                 "[xinsp2] pack add_bin('%.*s'): pool alloc failed for %zu bytes; "
                 "storing inline\n",
@@ -983,117 +1107,57 @@ public:
         }
         // INLINE bin: store the canonical bin32 value (memory == wire, ④A).
         pack_detail::TmpEntry e = begin_(key, PackTag::Bin);
-        const size_t enc = pack_mp_detail::bin_size(n);         // 0xc6 + 4 + n
+        const size_t enc = pack_mp_detail::bin_size(n);
         e.off = bump_(uint32_t(enc), 1);
         e.len = uint32_t(enc);
         pack_mp_detail::write_bin(s_->payload.data() + e.off, data, n);
         s_->entries.push_back(e);
     }
-    // Image: pixels always pooled (aligned raw buffer); descriptor dims ride
-    // the entry's ExtRecord. Copies the caller's pixels into a fresh
-    // pack-owned buffer. A failed mint stores a null-handle entry (get_image
-    // reports empty pixels with the dims kept) — same behavior as before.
-    void add_image(std::string_view key, int32_t w, int32_t h, int32_t c,
-                   const void* pixels) {
-        assert(!sealed_ && "add after seal");
-        if (spent_()) return;
-        xi_image_handle handle = pack_pool::alloc_image(w, h, c, pixels);
-        push_extern_(key, PackTag::Image, 0, handle, w, h, c,
-                     uint32_t(int64_t(w) * h * c));
-    }
-    // Adopt an ALREADY-pooled handle (zero-copy) as an image entry — addref so
-    // the pack becomes a co-owner and releases its ref on drop.
-    void adopt_image(std::string_view key, int32_t w, int32_t h, int32_t c,
-                     xi_image_handle handle) {
-        assert(!sealed_ && "add after seal");
-        if (spent_()) return;
-        pack_pool::addref(handle);
-        push_extern_(key, PackTag::Image, 0, handle, w, h, c,
-                     uint32_t(int64_t(w) * h * c));
-    }
-    // Tensor: a first-class typed element buffer — logical shape {w,h,c},
-    // dtype in the DirEntry type_id, bytes = w*h*c*elem_size(dtype) copied
-    // into a pooled (typeless) buffer. Returns false on mint failure (pool
-    // exhausted / zero-sized) — nothing is added (unlike add_bin there is no
-    // honest inline fallback for a tensor's typed contract).
-    bool add_tensor(std::string_view key, int32_t w, int32_t h, int32_t c,
-                    PackDtype dtype, const void* elems) {
-        assert(!sealed_ && "add after seal");
-        if (spent_()) return false;
-        if (w <= 0 || h <= 0 || c <= 0) return false;
-        const uint64_t bytes =
-            uint64_t(w) * uint64_t(h) * uint64_t(c) * pack_dtype_elem_size(dtype);
-        xi_image_handle hnd = pack_pool::alloc_bytes(elems, size_t(bytes));
-        if (!hnd) return false;
-        push_extern_(key, PackTag::Tensor, uint16_t(dtype), hnd,
-                     w, h, c, uint32_t(bytes));
-        return true;
-    }
-    // Adopt an ALREADY-pooled handle (zero-copy) as a TENSOR entry — addref so
-    // the pack becomes a co-owner. This is the zero-copy chain the v3 door's
-    // get_tensor enables (its view carries the backing handle): consume a
-    // tensor from one pack, adopt it into the next, no element copy. Fails
-    // closed (false, nothing added, no addref) on a bad shape, a null/dead
-    // handle, or a pool buffer smaller than the logical w*h*c*elem_size bytes
-    // the shape claims — an adopted tensor can never surface a short span.
-    bool adopt_tensor(std::string_view key, int32_t w, int32_t h, int32_t c,
-                      PackDtype dtype, xi_image_handle handle) {
-        assert(!sealed_ && "add after seal");
-        if (spent_()) return false;
-        if (w <= 0 || h <= 0 || c <= 0 || !handle) return false;
-        const uint64_t bytes =
-            uint64_t(w) * uint64_t(h) * uint64_t(c) * pack_dtype_elem_size(dtype);
-        if (bytes > uint64_t(INT32_MAX)) return false;
-        auto v = pack_pool::view(handle);          // {} for a dead handle
-        if (v.size() < size_t(bytes)) return false;
-        pack_pool::addref(handle);
-        push_extern_(key, PackTag::Tensor, uint16_t(dtype), handle,
-                     w, h, c, uint32_t(bytes));
-        return true;
-    }
-    // Adopt an ALREADY-pooled handle (zero-copy) as a Bin entry — the honest
-    // sibling of adopt_image for byte payloads (historically a producer had to
-    // masquerade a byte buffer as an Image entry with fake dims to get
-    // zero-copy adoption). type_id is 0 (plain bin) or the caller's user blob
-    // type (>= kPackTypeUserBase) — the zero-copy sibling of add_blob. The
-    // entry's logical length is the pool buffer's full byte size. Fails closed
-    // on a null/dead handle or a reserved (non-zero, sub-user-base) type_id.
-    bool adopt_bin(std::string_view key, uint16_t type_id,
-                   xi_image_handle handle) {
+
+    // ---- self-describing blobs (spec 30) -------------------------------
+    // Adopt an ALREADY-minted, self-describing pool buffer as a Blob entry
+    // (zero-copy). Validates the head fail-loud (blob_head_validate over the
+    // whole buffer) and addrefs so the pack co-owns it; the caller keeps its own
+    // ref (a BufRef releases it on drop). Fails closed (false, nothing added, no
+    // addref) on a null/dead handle or a buffer that is not a valid blob.
+    bool adopt_blob(std::string_view key, xi_image_handle handle) {
         assert(!sealed_ && "add after seal");
         if (spent_()) return false;
         if (!handle) return false;
-        if (type_id != 0 && type_id < kPackTypeUserBase) return false;
-        auto v = pack_pool::view(handle);          // {} for a dead handle
-        if (v.empty() || v.size() > size_t(INT32_MAX)) return false;
+        auto v = pack_pool::view(handle);
+        if (!blob_head_validate(v.data(), v.size())) return false;
         pack_pool::addref(handle);
-        push_extern_(key, PackTag::Bin, type_id, handle,
-                     int32_t(v.size()), 1, 1, uint32_t(v.size()));
+        push_extern_(key, PackTag::Blob, handle, v.size());
         return true;
     }
-    // Typed blob hook (future custom payloads): a Bin-tagged pooled entry
-    // carrying a caller-declared type_id (>= kPackTypeUserBase) readable via
-    // type_id_at / EntryView::type_id. get_bin resolves it like any large bin.
-    bool add_blob(std::string_view key, uint16_t type_id,
-                  const void* data, size_t n) {
+    // Ergonomic overload: adopt a freshly minted BufRef (the buffer whose head
+    // mint_blob wrote). addref (pack co-owns rc); the BufRef still releases its
+    // OWN mint ref on drop, so the pack holds it alone afterward.
+    bool adopt_blob(std::string_view key, const BufRef& ref) {
+        return adopt_blob(key, ref.handle());
+    }
+    // Convenience: mint a self-describing buffer, copy `payload` into its aligned
+    // region, and adopt it — the copy path (foreign bytes / a producer that has
+    // the payload in hand). Returns false on an invalid descriptor, a bad length,
+    // or pool exhaustion (nothing added). The pack owns the buffer alone after.
+    bool add_blob(std::string_view key, const void* desc, int32_t desc_len,
+                  const void* payload, int64_t payload_len) {
         assert(!sealed_ && "add after seal");
         if (spent_()) return false;
-        assert(type_id >= kPackTypeUserBase && "user blob type_id below the user base");
-        xi_image_handle h = pack_pool::alloc_bytes(data, n);
-        if (!h) return false;
-        push_extern_(key, PackTag::Bin, type_id, h, int32_t(n), 1, 1, uint32_t(n));
-        return true;
+        BufRef ref = mint_blob(desc, desc_len, payload_len);
+        if (!ref) return false;
+        if (payload && payload_len > 0)
+            std::memcpy(ref.payload(), payload, size_t(payload_len));
+        return adopt_blob(key, ref);   // addref rc2; ref drop -> rc1; pack holds rc1
     }
+
     // Opaque nested msgpack (already canonical): copied verbatim into the slab.
     //
     // GUARD: this is the path for INTERNAL producers whose bytes are canonical
-    // BY CONSTRUCTION (they came out of xi::mp::Writer / a trusted plugin). It
-    // does NOT validate — it trusts. FOREIGN / untrusted bytes (inbound comms
-    // payloads, third-party chunk data, old replay files) must NOT come here:
-    // they go through xi::ingress::canonicalize_entry / canonicalize_into
-    // (xi_ingress.hpp), which validates structure, normalizes to the profile,
-    // and refuses forged pool-handle ext BEFORE producing the canonical bytes
-    // this method then stores. "The safe path is the only path" (doc 07 Ingress).
+    // BY CONSTRUCTION. It does NOT validate — it trusts. FOREIGN / untrusted
+    // bytes must go through xi::ingress::canonicalize_entry / canonicalize_into
+    // (xi_ingress.hpp), which validates, normalizes, and refuses forged
+    // pool-handle ext BEFORE producing the canonical bytes this method stores.
     void add_mp(std::string_view key, const void* mp, size_t n) {
         if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::Mp);
@@ -1103,14 +1167,10 @@ public:
         s_->entries.push_back(e);
     }
 
-    // Flip immutable: sort the directory, write the slab in one pass, hand it
-    // to a Pack. The builder is spent afterwards (scratch recycled).
+    // Flip immutable: sort the directory, write the slab in one pass, hand it to
+    // a Pack. The builder is spent afterwards (scratch recycled).
     Pack seal(int64_t ts_us = 0) {
         assert(!sealed_ && "double seal");
-        // A spent/moved-from builder owns no scratch: return an empty Pack
-        // deterministically instead of dereferencing a null s_ in a release
-        // build (where the assert is compiled out). The invariant is now
-        // structural, not assert-only.
         if (spent_()) return Pack{};
         sealed_ = true;
         auto& sc = *s_;
@@ -1118,21 +1178,36 @@ public:
         const uint32_t dir_off     = uint32_t(sizeof(pack_detail::PackHeader));
         const uint32_t order_off   = dir_off + n * uint32_t(sizeof(pack_detail::DirEntry));
         const uint32_t payload_off = (order_off + n * 4u + 7u) & ~7u;   // 8-aligned
-        const uint64_t slab_bytes  = payload_off + sc.payload.size();
+        const uint64_t slab_bytes  = uint64_t(payload_off) + sc.payload.size();
+
+        // uint32 seal-size guard (round-1 doc 28): DirEntry off/len and
+        // payload_off are uint32; a slab past 4 GiB would silently truncate every
+        // offset. Fail LOUD at seal rather than mint a corrupt pack. (Inline Mp
+        // has no large-threshold, so a pathological nested Mp is the one way
+        // here; large bins/blobs already went EXTERN.)
+        if (slab_bytes > uint64_t(UINT32_MAX)) {
+            std::fprintf(stderr,
+                "[xinsp2] pack seal REFUSED: slab %llu bytes exceeds the uint32 "
+                "offset limit (%u entries) — returning an empty pack rather than "
+                "truncating offsets.\n",
+                (unsigned long long)slab_bytes, n);
+            abandon_();          // release every minted/adopted handle — no leak
+            return Pack{};
+        }
 
         pack_detail::SlabBuf slab =
             pack_detail::slab_acquire(size_t(slab_bytes), kDefaultSlab);
         uint8_t* base = slab.data.get();
 
-        // Directory order: (key_hash, key bytes, ordinal) — deterministic,
-        // binary-searchable, collision runs adjacent, first-inserted-wins on
-        // duplicate keys. The sort permutes an index array; TmpEntry order in
-        // the scratch stays insertion order (their index IS the ordinal).
-        sort_idx_.resize(n);
-        for (uint32_t i = 0; i < n; ++i) sort_idx_[i] = i;
+        // Directory order: (key_hash, key bytes, ordinal). The sort permutes an
+        // index array (sc.sort_idx, recycled with the scratch — ③); TmpEntry
+        // order in the scratch stays insertion order (their index IS the ordinal).
+        std::vector<uint32_t>& sort_idx = sc.sort_idx;
+        sort_idx.resize(n);
+        for (uint32_t i = 0; i < n; ++i) sort_idx[i] = i;
         const uint8_t* pay = sc.payload.data();
         const pack_detail::TmpEntry* te = sc.entries.data();
-        std::sort(sort_idx_.begin(), sort_idx_.end(),
+        std::sort(sort_idx.begin(), sort_idx.end(),
                   [pay, te](uint32_t ia, uint32_t ib) {
                       const auto& a = te[ia]; const auto& b = te[ib];
                       if (a.hash != b.hash) return a.hash < b.hash;
@@ -1160,7 +1235,7 @@ public:
         auto* dir   = reinterpret_cast<pack_detail::DirEntry*>(base + dir_off);
         auto* order = reinterpret_cast<uint32_t*>(base + order_off);
         for (uint32_t i = 0; i < n; ++i) {
-            const uint32_t ord = sort_idx_[i];
+            const uint32_t ord = sort_idx[i];
             const pack_detail::TmpEntry& t = te[ord];
             pack_detail::DirEntry d{};
             d.key_hash = t.hash;
@@ -1171,7 +1246,7 @@ public:
             d.len      = t.len;
             d.tag      = t.tag;
             d.storage  = t.storage;
-            d.type_id  = t.type_id;
+            d.reserved = 0;
             std::memcpy(&dir[i], &d, sizeof d);
             order[ord] = i;
         }
@@ -1194,9 +1269,6 @@ private:
         return id;
     }
 
-    // True once the builder is spent (sealed) or moved-from — in both states
-    // s_ is null, so every mutator refuses deterministically (see spent-guard
-    // at each add_*) instead of dereferencing null in a release build.
     bool spent_() const { return sealed_ || !s_; }
 
     pack_detail::TmpEntry begin_(std::string_view key, PackTag tag) {
@@ -1212,26 +1284,21 @@ private:
         e.handle  = XI_IMAGE_NULL;
         return e;
     }
-    // Register an EXTERN entry: its ExtRecord goes into the payload now (the
-    // slab copy at seal carries it verbatim); the handle also rides the
-    // TmpEntry so an abandoned builder can release it.
-    void push_extern_(std::string_view key, PackTag tag, uint16_t type_id,
-                      xi_image_handle handle, int32_t w, int32_t h, int32_t c,
-                      uint32_t len) {
+    // Register an EXTERN entry: its ExtRecord {handle, total_len} goes into the
+    // payload now (the slab copy at seal carries it verbatim); the handle also
+    // rides the TmpEntry so an abandoned builder can release it.
+    void push_extern_(std::string_view key, PackTag tag,
+                      xi_image_handle handle, uint64_t total_len) {
         pack_detail::TmpEntry e = begin_(key, tag);
         e.storage = pack_detail::kStorageExtern;
-        e.type_id = type_id;
         e.handle  = handle;
         e.off     = bump_(uint32_t(sizeof(pack_detail::ExtRecord)), 8);
         e.len     = uint32_t(sizeof(pack_detail::ExtRecord));
-        pack_detail::ExtRecord r{handle, w, h, c, len};
+        pack_detail::ExtRecord r{handle, total_len};
         std::memcpy(s_->payload.data() + e.off, &r, sizeof r);
         if (handle) ++ext_live_;
         s_->entries.push_back(e);
     }
-    // Bump-allocate n payload bytes at `align`; returns the payload-relative
-    // offset. payload_offset is 8-aligned in the slab, so payload-relative
-    // alignment survives the rebase for align <= 8.
     uint32_t bump_(uint32_t n, uint32_t align) {
         size_t off = (s_->payload.size() + (align - 1)) & ~size_t(align - 1);
         s_->payload.resize(off + n);
@@ -1239,8 +1306,6 @@ private:
     }
     void abandon_() {
         if (!s_) return;
-        // A builder abandoned without seal() still owns any handles it minted
-        // (e.g. a producer that faults mid-build) — release them, no leak.
         for (const auto& e : s_->entries)
             if (e.storage == pack_detail::kStorageExtern)
                 pack_pool::release(e.handle);
@@ -1250,7 +1315,6 @@ private:
     }
 
     pack_detail::BuilderScratch* s_ = nullptr;
-    std::vector<uint32_t> sort_idx_;   // seal-time permutation (reused capacity)
     uint32_t ext_live_ = 0;            // live (non-null) handles this builder owns
     bool sealed_ = false;
 };

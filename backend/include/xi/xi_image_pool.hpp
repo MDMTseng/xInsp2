@@ -353,7 +353,21 @@ public:
 
     // ---- create / release -------------------------------------------
 
+    // create() returns ZEROED pixels (the documented external contract).
+    // create_uninit() is the identical mint but SKIPS the zero-fill — for a
+    // caller that immediately full-overwrites the buffer (pack_pool::alloc_bytes
+    // memcpy's a non-null src over every byte), where the memset is pure waste
+    // (doc 28 zeroinit verdict). NEVER use create_uninit for a writable canvas a
+    // consumer may read before writing — that path keeps create()'s zero-fill.
     xi_image_handle create(int32_t w, int32_t h, int32_t ch) {
+        return create_(w, h, ch, /*zero_fill=*/true);
+    }
+    xi_image_handle create_uninit(int32_t w, int32_t h, int32_t ch) {
+        return create_(w, h, ch, /*zero_fill=*/false);
+    }
+
+private:
+    xi_image_handle create_(int32_t w, int32_t h, int32_t ch, bool zero_fill) {
         // D-P1-7: validate dimensions BEFORE entering counter / slot
         // bookkeeping. The original `(size_t)w * h * ch` cast applies
         // only to the first multiplicand; `h * ch` is int32 mul first,
@@ -385,7 +399,9 @@ public:
         // path for the hot same-size case: the memset writes warm, already-
         // faulted-in pages instead of malloc + zero + first-touch faults.
         // Flip kZeroFillCreate ONLY with proof no caller reads-before-write.
-        if (kZeroFillCreate)
+        // zero_fill=false (create_uninit) skips it for a caller that immediately
+        // full-overwrites the buffer.
+        if (kZeroFillCreate && zero_fill)
             std::memset(entry->buf.mem, 0, (size_t)pixels);
         entry->width    = w;
         entry->height   = h;
@@ -420,6 +436,7 @@ public:
         return ((uint64_t)gen << SLOT_BITS) | (uint64_t)idx;
     }
 
+public:
     void addref(xi_image_handle h) {
         if (auto* e = lookup(h)) {
             e->refcount.fetch_add(1, std::memory_order_relaxed);

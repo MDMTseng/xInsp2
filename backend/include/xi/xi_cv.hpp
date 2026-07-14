@@ -116,6 +116,17 @@ inline cv::Mat to_cv(const Image& img) { return as_cv_mat(img).clone(); }
 // Naming-symmetric alias of from_cv_mat().
 inline Image to_image(const cv::Mat& m) { return from_cv_mat(m); }
 
+// TODO(selfdesc-D): the self-describing-blob plane (spec 30) makes `xi/image` a
+// convention type carried in a Pack Blob's descriptor. The consumer-side sugar
+// that wraps a Pack `xi/image` blob as a cv::Mat — reading w/h/c/dt from the
+// descriptor via xi::Pack::desc_find_str/desc_find_i64 over BlobView::desc and
+// viewing BlobView::payload — belongs here, but it couples <xi/xi_pack.hpp> +
+// OpenCV and has NO core consumer yet (the producer/consumer fleet migrates in
+// package D). The core descriptor builder + mint_image live in xi_pack.hpp
+// (xi::BlobDesc / xi::make_image_desc / xi::mint_image); package D adds the
+// cv accessors here on top of them. Nothing above operates on Pack blobs — the
+// as_cv_* helpers here are the SEPARATE xi::Image (plugin SDK) plane, untouched.
+
 // Encode an Image to a compressed buffer (".jpg"/".jpeg"/".png"). Bakes in the
 // RGB->BGR flip OpenCV's encoders expect, so an image built from an RGB overlay
 // comes out with the right colours (DM-2 / DM-12). Generic — no "preview" notion.
