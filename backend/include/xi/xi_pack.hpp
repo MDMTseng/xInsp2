@@ -88,6 +88,7 @@
 //
 
 #include "xi_abi.h"
+#include "xi_blob_head.hpp"   // the self-describing blob head format + blob_head_validate seam (spec 30)
 #include "xi_image_pool.hpp"
 #include "xi_mp.hpp"
 
@@ -136,16 +137,9 @@ inline uint32_t get_u32_be(const uint8_t* p) {
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
            (uint32_t(p[2]) << 8)  |  uint32_t(p[3]);
 }
-// Little-endian u32 — the blob head's magic + desc_len are raw LE words (spec
-// 30), distinct from the big-endian msgpack length fields above.
-inline void put_u32_le(uint8_t* p, uint32_t v) {
-    p[0] = uint8_t(v);       p[1] = uint8_t(v >> 8);
-    p[2] = uint8_t(v >> 16); p[3] = uint8_t(v >> 24);
-}
-inline uint32_t get_u32_le(const uint8_t* p) {
-    return  uint32_t(p[0])        | (uint32_t(p[1]) << 8) |
-           (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
-}
+// (put_u32_le / get_u32_le — the blob head's LE u32 words — moved to
+// xi_blob_head.hpp so the plugin-safe wire parser can reuse them; still in
+// namespace pack_mp_detail, included above.)
 
 // Encoded-size constants for the canonical forms.
 inline constexpr size_t kI64Size  = 9;   // 0xd3 + 8
@@ -295,10 +289,7 @@ inline uint64_t hash_key(std::string_view s) {
     return h;
 }
 
-// align_up to a power-of-two boundary (blob payload offset / slab alignment).
-inline constexpr uint64_t align_up(uint64_t v, uint64_t a) {
-    return (v + (a - 1)) & ~(a - 1);
-}
+// (align_up — moved to xi_blob_head.hpp; still in namespace pack_detail.)
 
 } // namespace pack_detail
 
@@ -399,49 +390,11 @@ enum class PackTag : uint8_t {
 inline constexpr size_t kPackLargeThreshold = 4096;
 
 // ===================================================================
-// The self-describing blob head (spec 30).
+// The self-describing blob head (spec 30) — format constants + the ONE
+// validation seam (kBlobMagic / blob_payload_off / blob_desc_is_canonical_map /
+// blob_head_validate) live in xi_blob_head.hpp (included above), so the
+// plugin-safe wire parser reuses the exact same seam. The verbs below sit on it.
 // ===================================================================
-
-// 'XBD1' little-endian — the fail-loud blob discriminator.
-inline constexpr uint32_t kBlobMagic = 0x31444258u;   // 'X''B''D''1' LE
-inline constexpr uint64_t kBlobPayloadAlign = 64;     // payload 64B-aligned
-
-// The offset of a blob's payload for a given descriptor length: the head
-// (8 bytes) + descriptor, rounded up to the 64B payload alignment.
-inline constexpr uint64_t blob_payload_off(uint32_t desc_len) {
-    return pack_detail::align_up(uint64_t(8) + desc_len, kBlobPayloadAlign);
-}
-
-// Validate that `desc`/`desc_len` is a well-formed CANONICAL msgpack MAP with
-// string keys (the descriptor contract). Reuses the ingress/mp machinery: the
-// top element must be a Map, and canonicalize(desc) must reproduce the bytes
-// byte-identically (which enforces canonical widths, string keys, no duplicate
-// keys, no foreign ext, no trailing bytes). The core validates FORM only — it
-// interprets no key. Pool-handle ext is rejected (reject_all policy) so a
-// forged handle can never ride a descriptor.
-inline bool blob_desc_is_canonical_map(const uint8_t* desc, uint32_t desc_len) {
-    if (!desc || desc_len == 0) return false;
-    mp::Reader peek(desc, desc_len);
-    mp::Element e;
-    if (peek.next(e) != mp::Status::Ok || e.kind != mp::Kind::Map) return false;
-    mp::Writer out;
-    if (mp::canonicalize(desc, desc_len, out) != mp::Status::Ok) return false;
-    return out.size() == desc_len &&
-           std::memcmp(out.bytes().data(), desc, desc_len) == 0;
-}
-
-// THE ONE blob validation seam (spec 30). Fail-loud: magic, desc_len in bounds,
-// canonical-map descriptor, payload_off ≤ len. Used by adopt_blob and exported
-// for the door/wire packages to reuse. Returns true iff `base`/`len` is a
-// well-formed self-describing blob buffer.
-inline bool blob_head_validate(const uint8_t* base, size_t len) {
-    if (!base || len < 8) return false;
-    if (pack_mp_detail::get_u32_le(base) != kBlobMagic) return false;
-    uint32_t desc_len = pack_mp_detail::get_u32_le(base + 4);
-    if (uint64_t(8) + desc_len > len) return false;                 // desc overrun
-    if (!blob_desc_is_canonical_map(base + 8, desc_len)) return false;
-    return blob_payload_off(desc_len) <= len;                       // payload_off in bounds
-}
 
 // A minted, described pool buffer whose payload region is exposed for in-place
 // fill (RAII: releases its own mint ref on drop). A producer mints, fills the

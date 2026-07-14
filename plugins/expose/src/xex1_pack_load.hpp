@@ -81,9 +81,18 @@ inline LoadResult build_pack(ParsedFrame&& pf) {
             case XI_PACK_TAG_MP:
                 b.add_mp(e.key, vp, vn);   // nested msgpack (already through ingress)
                 break;
-            case XI_PACK_TAG_IMAGE:
-                b.add_image(e.key, e.w, e.h, e.c, pf.at(e.px_off));
+            case XI_PACK_TAG_BLOB: {
+                // The parser blob_head_validate'd the whole buffer; extract the
+                // descriptor + payload from the validated head and rebuild. The
+                // rebuilt buffer is byte-identical (the head format is
+                // deterministic), so memory == wire == disk round-trips.
+                const uint8_t* buf = pf.at(e.blob_off);
+                const uint32_t desc_len = xi::pack_mp_detail::get_u32_le(buf + 4);
+                const uint64_t payload_off = xi::blob_payload_off(desc_len);
+                b.add_blob(e.key, buf + 8, (int32_t)desc_len,
+                           buf + payload_off, (int64_t)((uint64_t)e.blob_len - payload_off));
                 break;
+            }
             default: break;   // unreachable: the parser refused unknown tags
         }
     }

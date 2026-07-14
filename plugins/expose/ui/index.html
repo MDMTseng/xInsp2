@@ -179,33 +179,68 @@
   // Normalize an XEX1-v3 canonical frame dump { v:3, channel, seq, frame:{...} }
   // into the same shape the UI renders. v3 (the finalized dump) carries every
   // entry as a [tag, value] pair — tag is the pack-plane XI_PACK_TAG_* — so an
-  // image descriptor { w,h,c,px } is identified by ITS TAG, never by shape:
-  // tag 4 (image) -> images[] with raw pixels (lossless, no JPEG); every other
-  // tag -> values (a bin entry surfaces as a Uint8Array value).
+  // entry's type is identified by ITS TAG, never by shape: tag 8 (BLOB, spec 30)
+  // -> blobs[] (+ images[] for xi/image blobs, rasterized lossless); every other
+  // tag -> values (a bin entry surfaces as a Uint8Array value). The retired
+  // IMAGE(4)/TENSOR(7) tags are permanent gaps.
   //
-  // E2: an image descriptor MAY carry a nested `preview` map
-  // { w,h,c, enc:"jpeg", q, data:<jpeg bin> } beside its (then-empty) raw px —
-  // expose's WS-SEND-only full-resolution compressed substitution. Surface it so
-  // the UI can decode the JPEG directly; raw-pixel fields stay for lossless frames.
-  const XEX1_TAG_IMAGE = 4;
+  // A BLOB value is EITHER the entire self-describing buffer verbatim (a
+  // Uint8Array — record_save/disk + the non-preview WS path) OR, on expose's
+  // WS-SEND path for an xi/image blob, a map { desc:<bin>, preview:{enc:"jpeg",
+  // q, data:<jpeg bin>} } — a full-resolution compressed substitution (never
+  // persisted). The FE reads dims/type from the descriptor either way.
+  const XEX1_TAG_BLOB = 8;
+
+  // Validate + split a self-describing blob buffer (spec 30) into { t, desc,
+  // descBytes, payload }. Throws on a bad head — the fail-loud discipline the
+  // C++ blob_head_validate seam enforces at ingress.
+  function parseBlobBuffer(buf) {
+    if (!(buf instanceof Uint8Array) || buf.length < 8) throw new Error("blob too short");
+    // magic 'XBD1' (bytes X,B,D,1)
+    if (buf[0] !== 0x58 || buf[1] !== 0x42 || buf[2] !== 0x44 || buf[3] !== 0x31) throw new Error("bad blob magic");
+    const descLen = (buf[4] | (buf[5] << 8) | (buf[6] << 16) | (buf[7] << 24)) >>> 0;  // u32 LE
+    if (8 + descLen > buf.length) throw new Error("blob desc_len overrun");
+    const payloadOff = (8 + descLen + 63) & ~63;                                       // align_up(8+desc_len, 64)
+    if (payloadOff > buf.length) throw new Error("blob payload_off out of range");
+    const descBytes = buf.subarray(8, 8 + descLen);
+    const desc = new MsgpackReader(descBytes, 0).read();
+    if (!desc || typeof desc !== "object") throw new Error("blob descriptor is not a map");
+    return { t: desc.t, desc, descBytes, payload: buf.subarray(payloadOff) };
+  }
+
   function normalizeXEX1v3(body) {
     const frame = (body && body.frame) || {};
-    const values = {}, images = [];
+    const values = {}, images = [], blobs = [];
     for (const k in frame) {
       const e = frame[k];
       if (!Array.isArray(e) || e.length !== 2) continue;   // not a [tag, value] pair
       const tag = e[0], v = e[1];
-      if (tag === XEX1_TAG_IMAGE && v && typeof v === "object" && v.px instanceof Uint8Array) {
-        const im = { key: k, w: v.w, h: v.h, c: v.c, pixels: v.px };
-        if (v.preview && typeof v.preview === "object" && v.preview.data instanceof Uint8Array)
-          im.preview = { w: v.preview.w, h: v.preview.h, c: v.preview.c,
-                         enc: v.preview.enc, q: v.preview.q, data: v.preview.data };
+      if (tag !== XEX1_TAG_BLOB) { values[k] = v; continue; }
+      if (v instanceof Uint8Array) {
+        // Verbatim buffer (disk / non-preview wire).
+        let b;
+        try { b = parseBlobBuffer(v); } catch (err) { console.warn("XEX1 bad blob", k, err); continue; }
+        blobs.push({ key: k, t: b.t, descBytes: b.descBytes, payload: b.payload, desc: b.desc });
+        if (b.t === "xi/image" && b.desc)
+          images.push({ key: k, t: "xi/image", w: b.desc.w, h: b.desc.h, c: b.desc.c,
+                        dt: b.desc.dt, pixels: b.payload });
+      } else if (v && typeof v === "object" && v.preview && typeof v.preview === "object") {
+        // WS-SEND preview arm: { desc:<bin>, preview:{enc,q,data} }.
+        let desc = {};
+        if (v.desc instanceof Uint8Array && v.desc.length) {
+          try { const dv = new MsgpackReader(v.desc, 0).read(); if (dv && typeof dv === "object") desc = dv; }
+          catch (err) { /* leave desc empty */ }
+        }
+        const im = { key: k, t: desc.t, w: desc.w, h: desc.h, c: desc.c, dt: desc.dt };
+        if (v.preview.data instanceof Uint8Array)
+          im.preview = { enc: v.preview.enc, q: v.preview.q, data: v.preview.data };
         images.push(im);
+        blobs.push({ key: k, t: desc.t, desc });
       } else {
         values[k] = v;
       }
     }
-    return { v: 3, channel: body.channel, seq: body.seq, values, images, frame };
+    return { v: 3, channel: body.channel, seq: body.seq, values, images, blobs, frame };
   }
 
   // Decode an XEX1 frame. v1 -> the raw map { v:1, channel, seq, json,
