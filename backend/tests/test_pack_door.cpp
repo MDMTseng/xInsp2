@@ -667,6 +667,43 @@ static void test_pack_v4_door() {
     CHECK(fi4->get_blob(A, "roi",  &dptr, &dlen, &yptr, &ylen) == 1);
     CHECK(ylen == 4 && static_cast<const uint8_t*>(yptr)[0] == 9);
 
+    // ---- finding A①: the @1 get_image adapter must NOT lie about an xi/image
+    // blob it cannot faithfully present. A u16 image, or one whose payload does
+    // not match w*h*c (u8), fails CLOSED rather than reporting a bogus length.
+    {
+        auto img_desc = [](const char* dt, int w, int h, int c) {
+            xi::mp::Writer d; d.map(5);
+            d.key("t"); d.str("xi/image"); d.key("w"); d.int_(w);
+            d.key("h"); d.int_(h); d.key("c"); d.int_(c); d.key("dt"); d.str(dt);
+            return xi::mp::Bytes(d.bytes());
+        };
+        xi_pack_builder b2 = fi->builder_new();
+        const xi::mp::Bytes du16 = img_desc("u16", 2, 2, 1);           // 2*2*1*2 = 8 bytes
+        const uint8_t u16px[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        CHECK(fi4->builder_add_blob(b2, "u16img", du16.data(), (int32_t)du16.size(),
+                                    u16px, 8) == 1);
+        const xi::mp::Bytes dmis = img_desc("u8", 3, 3, 1);            // claims 9, payload 4
+        const uint8_t four[4] = { 1, 2, 3, 4 };
+        CHECK(fi4->builder_add_blob(b2, "mis", dmis.data(), (int32_t)dmis.size(),
+                                    four, 4) == 1);
+        xi_pack_handle B2 = fi->builder_seal(b2);
+        xi_pack_image iv2{};
+        CHECK(fi->get_image(B2, "u16img", &iv2) == 0);   // non-u8: door won't lie
+        CHECK(fi->get_image(B2, "mis",    &iv2) == 0);   // payload != w*h*c: fail closed
+        CHECK(fi4->get_blob(B2, "u16img", &dptr, &dlen, &yptr, &ylen) == 1);  // @4 still serves it
+        fi->release(B2);
+    }
+    // finding B①: add_image refuses a non-positive dim rather than dropping it via
+    // a wrapped length (void slot, so we assert the entry never appears).
+    {
+        xi_pack_builder b3 = fi->builder_new();
+        fi->builder_add_image(b3, "bad_w", 0, 4, 1, nullptr);   // w<=0 → refused
+        fi->builder_add_image(b3, "bad_c", 4, 4, -1, nullptr);  // c<=0 → refused
+        xi_pack_handle B3 = fi->builder_seal(b3);
+        CHECK(fi->count(B3) == 0);                              // neither entry added
+        fi->release(B3);
+    }
+
     // ---- ordinal walk: entry_at parity with v1 key_at/tag_at (no type_id) ----
     CHECK(fi->count(A) == 3);                                // seq, img, roi (bad refused)
     for (int32_t i = 0; i < 3; ++i) {

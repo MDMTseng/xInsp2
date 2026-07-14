@@ -23,10 +23,13 @@ pool buffer (base is 64B-aligned):
 
 - The descriptor is a **canonical msgpack map, string keys** (same canonical
   rules as pack ingress; validated fail-loud wherever foreign bytes arrive).
-- Required key: `"t"` — the type string, namespaced by convention
+- Convention key `"t"` — the type string, namespaced by convention
   (`"toolbox-id/type-name"`, e.g. `"xi/image"`, `"acme-scan/profile3d"`).
-  Collisions are avoided by namespace, not by a central registry: **the core
-  owns no type space**.
+  Required **by convention** (every typed consumer reads it), but the core seam
+  does **not** enforce its presence — `blob_head_validate` checks the descriptor
+  is a canonical map and interprets no key (**the core owns no type space**). A
+  `"t"`-less blob is well-formed to the core; `type_of` simply returns none.
+  Collisions are avoided by namespace, not by a central registry.
 - Convention keys for raster/tensor data (used by `xi/image` and friends):
   `"w"`,`"h"`,`"c"` (int), `"dt"` (str: `"u8"|"u16"|"i32"|"f32"|"f64"`).
   Toolboxes add their own keys freely — the core never reads any of them.
@@ -66,9 +69,14 @@ handles); `add_blob(desc, bytes, len)` copies into a freshly minted buffer.
   - `add_blob(key, desc, payload, len)` — mint + copy convenience
   - `get_blob(key) -> {desc: mp view, payload: span, payload_len}`
   - `type_of(key) -> string_view` (reads `"t"` from the descriptor — sugar)
-  - image/tensor-named core verbs are deleted; `xi_cv.hpp` & SDK grow the
-    convention helpers instead (`mint_image(w,h,c,dt)` builds the descriptor
-    and calls mint_blob; `as_cv`/`as_cv_write` parse it).
+  - image/tensor-named verbs are NOT in the core container; the convention
+    helpers live one layer up: `xi_image_blob_mint.hpp` (write —
+    `make_image_desc` / `mint_image(w,h,c,dt)` build the descriptor + call
+    mint_blob) and `xi_image_blob.hpp` (read — `read_image_blob`), with the
+    OpenCV sugar (`as_cv`/`as_cv_write`) in the opt-in `xi_cv.hpp`. The single
+    `"dt"` element-size table is `image_blob_dt_elem_size` (read header),
+    reused by the write side — the core knows no `xi/image`, no dtype ladder
+    (doc 28 finding A②).
 - Validation is **one seam**: `blob_head_validate(base,len)` — it lives in the
   lightweight, plugin-safe `backend/include/xi/xi_blob_head.hpp` (depends only on
   `xi_mp.hpp`; `xi_pack.hpp` includes it) so the host container, the C door, AND

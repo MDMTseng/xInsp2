@@ -85,17 +85,29 @@ inline bool blob_desc_is_canonical_map(const uint8_t* desc, uint32_t desc_len) {
            std::memcmp(out.bytes().data(), desc, desc_len) == 0;
 }
 
-// THE ONE blob validation seam (spec 30). Fail-loud: magic, desc_len in bounds,
-// canonical-map descriptor, payload_off ≤ len. Used by adopt_blob/get_blob (host
-// side) AND the wire parser (ingress side). Returns true iff `base`/`len` is a
-// well-formed self-describing blob buffer.
-inline bool blob_head_validate(const uint8_t* base, size_t len) {
+// Cheap OFFSET-safety guard: magic + the length fields are in bounds so a
+// consumer's desc/payload subspans cannot escape `len`. Does NOT re-canonicalize
+// the descriptor. This is the READ-path check for a Blob whose head was already
+// FULLY validated (blob_head_validate, below) at adopt/ingress and is immutable
+// thereafter — re-canonicalizing on every get_blob is a per-frame tax (doc 28
+// finding A④), while the offsets must still be re-derived safely from the head.
+inline bool blob_head_bounds_ok(const uint8_t* base, size_t len) {
     if (!base || len < 8) return false;
     if (pack_mp_detail::get_u32_le(base) != kBlobMagic) return false;
     uint32_t desc_len = pack_mp_detail::get_u32_le(base + 4);
     if (uint64_t(8) + desc_len > len) return false;                 // desc overrun
-    if (!blob_desc_is_canonical_map(base + 8, desc_len)) return false;
     return blob_payload_off(desc_len) <= len;                       // payload_off in bounds
+}
+
+// THE ONE blob validation seam (spec 30). Fail-loud: magic, desc_len in bounds,
+// payload_off ≤ len (blob_head_bounds_ok), AND a canonical-map descriptor. Used
+// by adopt_blob and the wire parser (ingress side) — every route that admits a
+// blob buffer FROM ANOTHER SOURCE. Returns true iff `base`/`len` is a well-formed
+// self-describing blob buffer.
+inline bool blob_head_validate(const uint8_t* base, size_t len) {
+    if (!blob_head_bounds_ok(base, len)) return false;
+    uint32_t desc_len = pack_mp_detail::get_u32_le(base + 4);
+    return blob_desc_is_canonical_map(base + 8, desc_len);
 }
 
 // ---------------------------------------------------------------------------

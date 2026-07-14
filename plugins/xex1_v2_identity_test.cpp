@@ -48,6 +48,7 @@
 // in the wire bytes exactly.
 //
 #include <xi/xi_pack.hpp>       // xi::Pack / xi::PackBuilder (the slab container)
+#include <xi/xi_image_blob_mint.hpp> // xi::make_image_desc (convention-layer producer)
 #include <xi/xi_image_pool.hpp>  // ImagePool (pooled image pixels) + leak oracle
 #include <xi/xi_mp.hpp>          // xi::mp::Writer/Reader (the canonical codec)
 
