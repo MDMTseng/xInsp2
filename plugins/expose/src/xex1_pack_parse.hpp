@@ -38,6 +38,7 @@
 #include <vector>
 
 #include <xi/xi_abi.h>        // XI_PACK_TAG_* (the entry tag vocabulary)
+#include <xi/xi_blob_head.hpp> // xi::blob_head_validate — the ONE blob head seam (plugin-safe, spec 30)
 #include <xi/xi_ingress.hpp>  // xi::ingress::canonicalize_entry (the untrusted edge)
 #include <xi/xi_mp.hpp>       // xi::mp::Reader (decode the trusted canonical body)
 
@@ -49,11 +50,13 @@ namespace xex1 {
 struct ParsedEntry {
     std::string key;
     uint8_t     tag = 0;              // XI_PACK_TAG_* (from the wire, enforced)
-    // Non-image: the entry's complete canonical value bytes.
+    // Scalar/str/bin/mp: the entry's complete canonical value bytes.
     size_t off = 0, len = 0;
-    // Image (tag == XI_PACK_TAG_IMAGE): dims + raw pixel span.
-    int32_t w = 0, h = 0, c = 0;
-    size_t px_off = 0; uint32_t px_len = 0;
+    // Blob (tag == XI_PACK_TAG_BLOB, spec 30): the ENTIRE self-describing buffer
+    // (magic + desc_len + descriptor + pad + payload) as a span into body — the
+    // verbatim bin payload, already blob_head_validate'd.
+    size_t   blob_off = 0;
+    uint32_t blob_len = 0;
 };
 
 // The outcome of a parse. Meaningful only when ok(); `body` OWNS the canonical
@@ -104,39 +107,14 @@ inline mp::Status skip_value(mp::Reader& r, int depth = 0) {
     return mp::Status::Ok;
 }
 
-// Decode the canonical value at [p,p+n) as an image descriptor map {w,h,c,px}.
-// Returns false when the shape is anything else (the caller then REFUSES the
-// frame — the tag SAID image, so a non-descriptor value is forged/corrupt).
-inline bool as_image(const uint8_t* p, size_t n,
-                     int32_t& w, int32_t& h, int32_t& c,
-                     const uint8_t*& px, uint32_t& px_len) {
-    mp::Reader r(p, n);
-    mp::Element top;
-    if (r.next(top) != mp::Status::Ok || top.kind != mp::Kind::Map || top.len != 4) return false;
-    bool hw = false, hh = false, hc = false, hpx = false;
-    for (uint32_t i = 0; i < 4; ++i) {
-        mp::Element k;
-        if (r.next(k) != mp::Status::Ok || k.kind != mp::Kind::Str) return false;
-        std::string_view key((const char*)k.data, k.len);
-        mp::Element v;
-        if (r.next(v) != mp::Status::Ok) return false;
-        if      (key == "w"  && v.kind == mp::Kind::Int) { w = (int32_t)v.i; hw = true; }
-        else if (key == "h"  && v.kind == mp::Kind::Int) { h = (int32_t)v.i; hh = true; }
-        else if (key == "c"  && v.kind == mp::Kind::Int) { c = (int32_t)v.i; hc = true; }
-        else if (key == "px" && v.kind == mp::Kind::Bin) { px = v.data; px_len = v.len; hpx = true; }
-        else return false;   // any other key/type -> not an image descriptor
-    }
-    return hw && hh && hc && hpx;
-}
-
-// The host ImagePool caps a single image at 1 GiB (ImagePool::create,
-// xi_image_pool.hpp: `pixels > (int64_t(1) << 30)` -> handle 0). Mirror that
-// bound here — this plugin-safe header deliberately includes no host pool
-// header, so the value is restated; KEEP IN SYNC. Without this check a 1-4 GiB
-// image entry passes the px_len (uint32) validation, then create() returns the
-// null handle and the frame silently rebuilds with a null-view image (data
-// loss). Refuse it at parse time instead, loud, like every other bad entry.
-constexpr uint64_t kImagePoolMaxBytes = uint64_t(1) << 30;
+// The host ImagePool caps a single pool buffer at 1 GiB (ImagePool::create,
+// xi_image_pool.hpp: `pixels > (int64_t(1) << 30)` -> handle 0). A blob's whole
+// self-describing buffer is minted through that pool, so mirror the bound here —
+// this plugin-safe header deliberately includes no host pool header, so the
+// value is restated; KEEP IN SYNC. Without this check a 1-4 GiB blob entry
+// passes the bin (uint32) length validation, then the rebuild's mint returns
+// null and the frame silently loses the entry. Refuse it at parse, loud.
+constexpr uint64_t kPoolMaxBytes = uint64_t(1) << 30;
 
 }  // namespace parse_detail
 
@@ -242,33 +220,33 @@ inline ParsedFrame parse_frame_v3(const uint8_t* data, size_t size) {
                     case XI_PACK_TAG_STR: agree = (head.kind == mp::Kind::Str);   break;
                     case XI_PACK_TAG_BIN: agree = (head.kind == mp::Kind::Bin);   break;
                     case XI_PACK_TAG_MP:  agree = true; break;   // opaque: any one canonical value
-                    case XI_PACK_TAG_IMAGE: {
-                        const uint8_t* px = nullptr;
-                        if (!parse_detail::as_image(vp, vn, pe.w, pe.h, pe.c, px, pe.px_len)) break;
-                        // Dim sanity on untrusted input: positive dims whose
-                        // product IS the pixel payload — a forged {w,h,c} larger
-                        // than px would otherwise make the pack builder read out
-                        // of bounds.
-                        if (pe.w <= 0 || pe.h <= 0 || pe.c <= 0) break;
-                        const uint64_t need = (uint64_t)pe.w * (uint64_t)pe.h * (uint64_t)pe.c;
-                        if (need != (uint64_t)pe.px_len) break;
-                        // Align with the host ImagePool's per-image cap (see
-                        // kImagePoolMaxBytes above): an entry bigger than the
-                        // pool will ever allocate must fail HERE, explicitly,
-                        // not decode to a null-view image downstream. Distinct
-                        // message (this is an oversize refusal, not a
-                        // tag/value contradiction).
-                        if (need > parse_detail::kImagePoolMaxBytes) {
+                    case XI_PACK_TAG_BLOB: {
+                        // A persisted blob is the ENTIRE self-describing buffer as
+                        // one `bin` (spec 30 — memory == wire). The value MUST be a
+                        // bin whose bytes pass the ONE core head seam
+                        // (blob_head_validate): magic 'XBD1', desc_len in bounds, a
+                        // CANONICAL descriptor map, payload_off <= len. A forged /
+                        // corrupt blob is refused whole (fail loud), exactly like
+                        // every other bad entry. (ingress canonicalized the FRAME,
+                        // but a bin's bytes are opaque to msgpack — the descriptor
+                        // inside is validated only HERE.)
+                        if (head.kind != mp::Kind::Bin) break;
+                        if (!xi::blob_head_validate(head.data, head.len)) break;
+                        // Align with the host pool's 1 GiB per-buffer cap (see
+                        // kPoolMaxBytes): an oversize blob must fail HERE, not
+                        // decode to a failed mint on rebuild. Distinct message.
+                        if ((uint64_t)head.len > parse_detail::kPoolMaxBytes) {
                             out.error = "entry '" + pe.key +
-                                        "' image exceeds the 1 GiB ImagePool cap (" +
-                                        std::to_string(need) + " bytes)";
+                                        "' blob exceeds the 1 GiB pool cap (" +
+                                        std::to_string(head.len) + " bytes)";
                             return out;
                         }
-                        pe.px_off = (size_t)(px - body.data());
+                        pe.blob_off = (size_t)(head.data - body.data());
+                        pe.blob_len = head.len;
                         agree = true;
                         break;
                     }
-                    default: break;   // unknown tag in a v3 frame: forged/corrupt
+                    default: break;   // unknown tag (incl. the retired IMAGE=4): forged/corrupt
                 }
                 if (!agree) {
                     out.error = "entry '" + pe.key + "' tag contradicts its value (forged or corrupt dump)";

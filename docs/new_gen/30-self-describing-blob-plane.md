@@ -1,4 +1,4 @@
-# 30 — Self-describing blob plane (decision ⑤-final, supersedes the @3 tensor/type_id surface)
+﻿# 30 — Self-describing blob plane (decision ⑤-final, supersedes the @3 tensor/type_id surface)
 
 Date: 2026-07-14. Decided by CT: **full uniformity** — the image/tensor core
 special case retires; every non-scalar payload is a **self-describing blob**.
@@ -30,6 +30,11 @@ pool buffer (base is 64B-aligned):
 - Convention keys for raster/tensor data (used by `xi/image` and friends):
   `"w"`,`"h"`,`"c"` (int), `"dt"` (str: `"u8"|"u16"|"i32"|"f32"|"f64"`).
   Toolboxes add their own keys freely — the core never reads any of them.
+  **Sugar boundary (CT, 2026-07-14):** convention-layer sugar stops at 
+  `xi/image` (preview/record/examples all consume it). Every other type's 
+  payload layout, interpretation, and any internal sub-alignment is the 
+  owning toolbox's business, recorded in its own descriptor keys — the SDK 
+  grows no per-type helpers for types the framework itself doesn't consume.
 - `xi/image` **is just a convention type**: `{"t":"xi/image","w":…,"h":…,"c":…,"dt":"u8"}`.
   There is no image tag, no tensor tag, no dtype enum, no w/h/c in any core
   struct. SDK helpers (mint_image / as_cv / get_image-style accessors) live at
@@ -64,9 +69,13 @@ handles); `add_blob(desc, bytes, len)` copies into a freshly minted buffer.
   - image/tensor-named core verbs are deleted; `xi_cv.hpp` & SDK grow the
     convention helpers instead (`mint_image(w,h,c,dt)` builds the descriptor
     and calls mint_blob; `as_cv`/`as_cv_write` parse it).
-- Validation is **one seam**: `blob_head_validate(base,len)` used by
-  adopt_blob, the C door, and wire ingress — same fail-loud discipline as the
-  add_mp canonicalize seam.
+- Validation is **one seam**: `blob_head_validate(base,len)` — it lives in the
+  lightweight, plugin-safe `backend/include/xi/xi_blob_head.hpp` (depends only on
+  `xi_mp.hpp`; `xi_pack.hpp` includes it) so the host container, the C door, AND
+  the wire-ingress parser (compiled into the `record_replay` source plugin, which
+  must not pull the host pool) all refuse through the SAME code. Used by
+  adopt_blob/get_blob, the door, and wire ingress — same fail-loud discipline as
+  the add_mp canonicalize seam.
 
 ## ABI doors
 

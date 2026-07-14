@@ -45,6 +45,38 @@ namespace xex1 {
 // The per-image encode verdict the wire walk acts on.
 enum class PreviewOutcome { Compressed, RawFallback, CodecDown };
 
+namespace preview_detail {
+
+// Read the xi/image CONVENTION fields (t/w/h/c/dt) out of a blob's canonical
+// descriptor map — plugin-safe (mp::Reader only; no host container). xi/image
+// descriptors are FLAT ({t,w,h,c,dt}); a nested value means "not our shape" and
+// bails to false (the blob then rides the wire verbatim, unpreviewed). Missing
+// fields stay at their caller-initialized defaults.
+inline bool read_image_desc(const uint8_t* desc, size_t n,
+                            std::string_view& t, int64_t& w, int64_t& h,
+                            int64_t& c, std::string_view& dt) {
+    mp::Reader r(desc, n);
+    mp::Element m;
+    if (r.next(m) != mp::Status::Ok || m.kind != mp::Kind::Map) return false;
+    for (uint32_t i = 0; i < m.len; ++i) {
+        mp::Element k, v;
+        if (r.next(k) != mp::Status::Ok || k.kind != mp::Kind::Str) return false;
+        std::string_view key((const char*)k.data, k.len);
+        if (r.next(v) != mp::Status::Ok) return false;
+        const bool is_int = (v.kind == mp::Kind::Int || v.kind == mp::Kind::UInt);
+        const int64_t iv  = (v.kind == mp::Kind::Int) ? v.i : (int64_t)v.u;
+        if      (key == "t"  && v.kind == mp::Kind::Str) t  = std::string_view((const char*)v.data, v.len);
+        else if (key == "dt" && v.kind == mp::Kind::Str) dt = std::string_view((const char*)v.data, v.len);
+        else if (key == "w"  && is_int) w = iv;
+        else if (key == "h"  && is_int) h = iv;
+        else if (key == "c"  && is_int) c = iv;
+        else if (v.kind == mp::Kind::Array || v.kind == mp::Kind::Map) return false;  // non-flat: not xi/image
+    }
+    return true;
+}
+
+}  // namespace preview_detail
+
 // Walk a sealed pack to the canonical XEX1-v3 frame, substituting a compressed
 // preview for each IMAGE entry's raw pixels. `enc` is:
 //   PreviewOutcome enc(const uint8_t* px, int w, int h, int c,
@@ -108,34 +140,48 @@ inline std::vector<uint8_t> encode_pack_v3_wire(const xi::PackIn& in,
                 if (m) e.value.assign(m->first, m->first + m->second);
                 break;
             }
-            case XI_PACK_TAG_IMAGE: {
-                auto im = in.image(key.c_str());
-                if (!im || !im->pixels) continue;
-                e.w = im->width; e.h = im->height; e.c = im->channels;
-                e.px = static_cast<const uint8_t*>(im->pixels);
-                e.px_len = im->length > 0 ? (size_t)im->length : 0;
+            case XI_PACK_TAG_BLOB: {
+                auto bl = in.blob(key.c_str());
+                if (!bl || !bl->desc || !bl->payload) continue;
+                // Default: the whole self-describing buffer rides verbatim (the
+                // shared raw dump), contiguous [desc-8 .. payload+payload_len).
+                const uint8_t* buf = bl->desc - 8;
+                e.blob     = buf;
+                e.blob_len = (size_t)((bl->payload + bl->payload_len) - buf);
 
-                // The preview substitution — the ONE line that differs from the
-                // shared raw dump. Fail-open, per image.
-                int q = 0;
-                std::vector<uint8_t> jpeg;
-                const PreviewOutcome oc = enc(e.px, e.w, e.h, e.c, q, jpeg);
-                if (oc == PreviewOutcome::Compressed && !jpeg.empty()) {
-                    jpeg_store.push_back(std::move(jpeg));
-                    const std::vector<uint8_t>& owned = jpeg_store.back();
-                    e.preview = true;
-                    e.pv_q    = q;
-                    e.pv_jpeg = owned.data();
-                    e.pv_len  = owned.size();
-                } else {
-                    // RawFallback / CodecDown / empty jpeg -> emit RAW px (e.px
-                    // already set). Never drop the image.
-                    if (oc == PreviewOutcome::CodecDown && codec_down_out) *codec_down_out = true;
-                    if (raw_fallback_out) *raw_fallback_out = true;
+                // Preview substitution applies ONLY to an xi/image u8 blob whose
+                // payload is raw w*h*c pixels. Parse the convention descriptor;
+                // anything else rides verbatim. Fail-open, per image.
+                std::string_view t, dt;
+                int64_t bw = 0, bh = 0, bc = 0;
+                if (preview_detail::read_image_desc(bl->desc, (size_t)bl->desc_len,
+                                                    t, bw, bh, bc, dt) &&
+                    t == "xi/image" && dt == "u8" &&
+                    bw > 0 && bh > 0 && bc > 0 &&
+                    (int64_t)bl->payload_len == bw * bh * bc) {
+                    int q = 0;
+                    std::vector<uint8_t> jpeg;
+                    const PreviewOutcome oc = enc(bl->payload, (int)bw, (int)bh, (int)bc, q, jpeg);
+                    if (oc == PreviewOutcome::Compressed && !jpeg.empty()) {
+                        jpeg_store.push_back(std::move(jpeg));
+                        const std::vector<uint8_t>& owned = jpeg_store.back();
+                        e.preview = true;
+                        e.pv_w    = (int32_t)bw;
+                        e.pv_h    = (int32_t)bh;
+                        e.pv_c    = (int32_t)bc;
+                        e.pv_q    = q;
+                        e.pv_jpeg = owned.data();
+                        e.pv_len  = owned.size();
+                    } else {
+                        // RawFallback / CodecDown / empty jpeg -> the verbatim
+                        // buffer (already set) rides. Never drop the image.
+                        if (oc == PreviewOutcome::CodecDown && codec_down_out) *codec_down_out = true;
+                        if (raw_fallback_out) *raw_fallback_out = true;
+                    }
                 }
                 break;
             }
-            default: continue;   // unknown tag: skip (opaque forward-compat)
+            default: continue;   // unknown tag (incl. the retired IMAGE): skip (opaque forward-compat)
         }
         entries.push_back(std::move(e));
     }

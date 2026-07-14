@@ -270,22 +270,44 @@
             "note": "scalar/str entries, canonical int64/float64/str32 verbatim on the wire"
         },
         {
-            "file": "v3_image.bin",
+            "file": "v3_blob_image.bin",
             "v": 3,
             "channel": "c",
             "seq": 3,
             "fields": [
                 {
                     "key": "frame",
-                    "kind": "image",
+                    "kind": "blob",
+                    "t": "xi/image",
+                    "desc_b64": "3wAAAAXbAAAAAXTbAAAACHhpL2ltYWdl2wAAAAF30wAAAAAAAAAC2wAAAAFo0wAAAAAAAAAC2wAAAAFj0wAAAAAAAAAB2wAAAAJkdNsAAAACdTg=",
+                    "desc_size": 83,
+                    "payload_b64": "ChQeKA==",
+                    "payload_size": 4,
                     "w": 2,
                     "h": 2,
                     "c": 1,
-                    "b64": "ChQeKA==",
-                    "size": 4
+                    "dt": "u8"
                 }
             ],
-            "note": "image descriptor {w,h,c,px} with raw pixels inlined as bin (doc 07 D2)"
+            "note": "xi/image blob: self-describing buffer (head+descriptor+payload) inlined as one bin (spec 30)"
+        },
+        {
+            "file": "v3_blob_data.bin",
+            "v": 3,
+            "channel": "c",
+            "seq": 4,
+            "fields": [
+                {
+                    "key": "roi",
+                    "kind": "blob",
+                    "t": "acme/roi",
+                    "desc_b64": "3wAAAALbAAAAAXTbAAAACGFjbWUvcm9p2wAAAAFu0wAAAAAAAAAD",
+                    "desc_size": 39,
+                    "payload_b64": "qrvM",
+                    "payload_size": 3
+                }
+            ],
+            "note": "generic (non-image) blob: custom descriptor + opaque payload (self-describing, spec 30)"
         },
         {
             "file": "v3_bool.bin",
@@ -328,6 +350,26 @@
                 }
             ],
             "note": "nested canonical msgpack (array of maps) rides verbatim — doc 07 D3"
+        },
+        {
+            "file": "v3_preview.bin",
+            "v": 3,
+            "channel": "c",
+            "seq": 5,
+            "fields": [
+                {
+                    "key": "frame",
+                    "kind": "preview",
+                    "w": 4,
+                    "h": 2,
+                    "c": 1,
+                    "q": 80,
+                    "enc": "jpeg",
+                    "data_b64": "ao+02f4jSG2St9wBJktwlbrfBClOc5i9",
+                    "data_size": 24
+                }
+            ],
+            "note": "WS-preview arm: { preview:{w,h,c,enc:jpeg,q,data} } — behavior-equivalent to the old IMAGE preview"
         }
     ]
 }

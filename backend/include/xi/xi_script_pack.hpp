@@ -94,21 +94,22 @@ public:
         if (!host || !host->get_interface) return;
         fi_ = static_cast<const xi_pack_v1*>(host->get_interface("xi.pack", 1));
         if (!fi_ || !fi_->builder_new) { fi_ = nullptr; return; }
-        // The xi.pack@3 slab supplement (tensor / user-typed blob adders).
-        // OPTIONAL: null on a host predating @3 — the v1 adders work
-        // regardless; add_tensor/add_blob then fail closed (return false).
-        fi3_ = static_cast<const xi_pack_v3*>(host->get_interface("xi.pack", 3));
+        // The xi.pack@4 blob supplement (self-describing blob adder, spec 30).
+        // OPTIONAL: null on a host with no blob plane — the v1 adders (incl.
+        // add_image over the @1 blob-adapter slot) work regardless; add_blob
+        // then fail-closes (returns false).
+        fi4_ = static_cast<const xi_pack_v4*>(host->get_interface("xi.pack", 4));
         b_ = fi_->builder_new();
     }
 
     // Move-only (like the host PackBuilder): exactly one owner of the
     // host-side builder id, so scope exit abandons it exactly once.
     ScriptPackBuilder(ScriptPackBuilder&& o) noexcept
-        : fi_(o.fi_), fi3_(o.fi3_), b_(o.b_) { o.b_ = XI_PACK_BUILDER_NULL; }
+        : fi_(o.fi_), fi4_(o.fi4_), b_(o.b_) { o.b_ = XI_PACK_BUILDER_NULL; }
     ScriptPackBuilder& operator=(ScriptPackBuilder&& o) noexcept {
         if (this != &o) {
             abandon();
-            fi_ = o.fi_; fi3_ = o.fi3_; b_ = o.b_;
+            fi_ = o.fi_; fi4_ = o.fi4_; b_ = o.b_;
             o.b_ = XI_PACK_BUILDER_NULL;
         }
         return *this;
@@ -186,25 +187,35 @@ public:
         return add_image(key, img.width, img.height, img.channels, img.read());
     }
 
-    // ---- xi.pack@3 typed adds (pack-v3). false on a host without the @3
-    // supplement, bad args, or pool exhaustion — nothing is added on false,
-    // exactly the fail-closed discipline of every add above.
-    // Typed tensor entry: w*h*c elements of XI_PACK_DTYPE_* are COPIED into a
-    // fresh host pool buffer (the same copy-only discipline as add_image — a
-    // script cannot adopt pool handles).
-    bool add_tensor(const char* key, int32_t w, int32_t h, int32_t c,
-                    int32_t dtype, const void* elems) {
-        if (!valid() || !key || !fi3_ || !fi3_->builder_add_tensor) return false;
-        if (w <= 0 || h <= 0 || c <= 0 || !elems) return false;
-        return fi3_->builder_add_tensor(b_, key, w, h, c, dtype, elems) == 1;
+    // ---- xi.pack@4 self-describing blob add (spec 30). false on a host with no
+    // blob plane, bad args, or pool exhaustion — nothing is added on false,
+    // exactly the fail-closed discipline of every add above. Copy-only (a script
+    // cannot adopt pool handles): `desc` is a canonical msgpack map (build it
+    // with xi::BlobDesc / xi::make_image_desc), `payload` is copied into the
+    // minted buffer's 64B-aligned payload region.
+    bool add_blob(const char* key, const void* desc, int32_t desc_len,
+                  const void* payload, int64_t payload_len) {
+        if (!valid() || !key || !fi4_ || !fi4_->builder_add_blob) return false;
+        if (!desc || desc_len <= 0) return false;
+        return fi4_->builder_add_blob(b_, key, desc, desc_len, payload, payload_len) == 1;
     }
-    // User-typed blob: a Bin entry carrying a script-declared type_id
-    // (>= XI_PACK_TYPE_USER_BASE) — a private producer<->consumer payload
-    // contract; read back via ScriptPack::get_blob / PackIn::blob.
-    bool add_blob(const char* key, int32_t type_id, const void* data, size_t n) {
-        if (!valid() || !key || !fi3_ || !fi3_->builder_add_blob) return false;
-        if (!data || n == 0) return false;
-        return fi3_->builder_add_blob(b_, key, type_id, data, (int32_t)n) == 1;
+    // Convenience: add an xi/image blob (build the {t,w,h,c,dt} descriptor +
+    // copy pixels). The blob-plane sibling of add_image, for a script that wants
+    // to name the dtype explicitly (add_image is u8). The descriptor is built
+    // inline with the canonical writer (same {t,w,h,c,dt} key order the host's
+    // make_image_desc produces), so the script side needs no host container.
+    bool add_image_blob(const char* key, int32_t w, int32_t h, int32_t c,
+                        std::string_view dt, const void* pixels, int64_t payload_len) {
+        if (!valid()) return false;
+        xi::mp::Writer d;
+        d.map(5);
+        d.key("t");  d.str("xi/image");
+        d.key("w");  d.int_(w);
+        d.key("h");  d.int_(h);
+        d.key("c");  d.int_(c);
+        d.key("dt"); d.str(dt);
+        const xi::mp::Bytes& db = d.bytes();
+        return add_blob(key, db.data(), int32_t(db.size()), pixels, payload_len);
     }
 
     // Nested canonical msgpack value (ONE complete scalar / str / bin / map /
@@ -287,7 +298,7 @@ private:
     };
 
     const xi_pack_v1* fi_  = nullptr;
-    const xi_pack_v3* fi3_ = nullptr;   // xi.pack@3 supplement; null pre-@3
+    const xi_pack_v4* fi4_ = nullptr;   // xi.pack@4 blob supplement; null with no blob plane
     xi_pack_builder   b_  = XI_PACK_BUILDER_NULL;
 };
 

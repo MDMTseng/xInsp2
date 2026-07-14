@@ -9,10 +9,13 @@
 //      mock_camera.cpp /Fe:mock_camera.dll
 //
 
-#include <xi/xi_abi.hpp>       // xi::Plugin, xi::PackOut, xi::Image, pool_image()/emit()
+#include <xi/xi_abi.hpp>       // xi::Plugin, xi::PackOut, xi::Image, new_pack()/emit()
+#include <xi/xi_mp.hpp>        // canonical msgpack Writer — build the xi/image blob descriptor
 #include <xi/xi_thread.hpp>    // xi::spawn_worker — SEH-safe capture thread
 #include <xi/xi_json.hpp>      // parses set_def/exchange (canonical over cmd.find)
 #include <xi/xi_contract.hpp>  // fail-loud command inputs + schema-skew errors
+
+#include <utility>
 
 #include "mock_camera_keys.gen.h"
 
@@ -226,60 +229,82 @@ private:
         if (thread_.joinable()) thread_.join();
     }
 
+    // Zero-copy xi/image emit (spec 30): mint a self-describing blob, paint into
+    // its 64B-aligned payload region IN PLACE (via a non-owning Image view over
+    // the payload), adopt it into the pack (which addrefs), then drop our mint
+    // ref. No per-frame image memcpy — the successor to the old adopt_image
+    // pool-handle hand-off (that @1 door adapter now copies raw pixels into a
+    // headed blob, so an in-tree producer mints the headed buffer directly).
+    template <class Paint>
+    bool add_image_blob_(xi::PackOut& f, const char* key,
+                         int w, int h, int c, Paint&& paint) {
+        xi::mp::Writer dw;                    // {"t":"xi/image","w","h","c","dt"}
+        dw.map(5);
+        dw.key("t");  dw.str("xi/image");
+        dw.key("w");  dw.int_(w);
+        dw.key("h");  dw.int_(h);
+        dw.key("c");  dw.int_(c);
+        dw.key("dt"); dw.str("u8");
+        void* pp = nullptr;
+        xi_image_handle bh = f.blob_mint(dw.bytes().data(), (int32_t)dw.bytes().size(),
+                                         (int64_t)w * h * c, &pp);
+        if (!bh || !pp) return false;
+        xi::Image v = xi::Image::view(w, h, c, static_cast<const uint8_t*>(pp));
+        paint(v);
+        bool ok = f.adopt_blob(key, bh);
+        host_->image_release(bh);             // pack holds its own addref now
+        return ok;
+    }
+
     void run_loop() {
         seq_.store(0);
         while (running_) {
             const int seq = seq_.load();
             // Snapshot config once per frame (set_def/exchange may retune it live).
             const int w = w_.load(), h = h_.load(), fps = fps_.load();
-
-            // Paint straight into a fresh host-pool slot: emit() then hands the
-            // frame over via the pool refcount path (zero heap-to-pool copy).
-            xi::Image img = pool_image(w, h, 3);
-            uint8_t* p = img.data();
-
-            // Background: gradient that shifts with frame
-            for (int y = 0; y < h; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    int i = (y * w + x) * 3;
-                    p[i + 0] = static_cast<uint8_t>((x * 200 / w + seq * 2) & 0xFF);
-                    p[i + 1] = static_cast<uint8_t>((y * 180 / h + seq * 3) & 0xFF);
-                    p[i + 2] = static_cast<uint8_t>(80 + (seq & 0x3F));
-                }
-            }
-
-            // Draw frame counter in top-left
-            // Black background box
-            for (int y = 2; y < 20; ++y) {
-                for (int x = 2; x < 80; ++x) {
-                    if (x < w && y < h) {
-                        int i = (y * w + x) * 3;
-                        p[i] = p[i+1] = p[i+2] = 0;
-                    }
-                }
-            }
-            draw_number(img, 4, 4, seq);
-
-            // v12: the sealed xi.pack@1 Pack is the sole data plane. Emit the
-            // frame's pixels (adopt_image is a zero-copy pool-handle addref, not a
-            // memcpy) plus a "seq" entry and the gain it was painted with.
-            //
-            // ex-feedback: apply the door-controlled brightness gain to THIS frame
-            // (saturating multiply; 1.0 is the identity). The pack ECHOES the gain
-            // so a closed-loop script controls against the actual per-frame plant
-            // state.
             const double g = gain_.load();
-            if (g != 1.0) {
-                const size_t n = (size_t)w * (size_t)h * 3;
-                for (size_t i = 0; i < n; ++i) {
-                    const double v = p[i] * g;
-                    p[i] = v >= 255.0 ? (uint8_t)255 : (uint8_t)(v + 0.5);
-                }
-            }
+
+            // v12 + spec 30: the sealed pack is the sole data plane. Emit the
+            // frame as a self-describing xi/image BLOB whose pixels are painted
+            // IN PLACE in the minted buffer — a true zero-copy hand-off (seq +
+            // the gain it was painted with ride alongside).
+            //
+            // ex-feedback: apply the door-controlled brightness gain to THIS
+            // frame (saturating multiply; 1.0 is the identity). The pack ECHOES
+            // the gain so a closed-loop script controls against the actual
+            // per-frame plant state.
             xi::PackOut f = new_pack();
             f.i64(keys::kSeq, seq);
             f.f64(keys::kGain, g);
-            f.adopt_image(keys::kFrame, w, h, 3, img.pool_handle());
+            add_image_blob_(f, keys::kFrame, w, h, 3, [&](xi::Image& img) {
+                uint8_t* p = img.data();
+                // Background: gradient that shifts with frame.
+                for (int y = 0; y < h; ++y) {
+                    for (int x = 0; x < w; ++x) {
+                        int i = (y * w + x) * 3;
+                        p[i + 0] = static_cast<uint8_t>((x * 200 / w + seq * 2) & 0xFF);
+                        p[i + 1] = static_cast<uint8_t>((y * 180 / h + seq * 3) & 0xFF);
+                        p[i + 2] = static_cast<uint8_t>(80 + (seq & 0x3F));
+                    }
+                }
+                // Frame counter in the top-left, on a black box.
+                for (int y = 2; y < 20; ++y) {
+                    for (int x = 2; x < 80; ++x) {
+                        if (x < w && y < h) {
+                            int i = (y * w + x) * 3;
+                            p[i] = p[i+1] = p[i+2] = 0;
+                        }
+                    }
+                }
+                draw_number(img, 4, 4, seq);
+                if (g != 1.0) {
+                    const size_t n = (size_t)w * (size_t)h * 3;
+                    for (size_t i = 0; i < n; ++i) {
+                        const double v = p[i] * g;
+                        p[i] = v >= 255.0 ? (uint8_t)255 : (uint8_t)(v + 0.5);
+                    }
+                }
+            });
             emit(std::move(f));
             seq_.fetch_add(1);
 

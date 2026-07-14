@@ -34,7 +34,8 @@
 
 #include <xi/xi_abi.h>
 #include <xi/xi_image_pool.hpp>   // ImagePool::make_host_api (the real pool)
-#include <xi/xi_pack_abi.hpp>     // install_pack_abi + pack_v1_iface (host pack ABI)
+#include <xi/xi_pack_abi.hpp>     // install_pack_abi + pack_v1_iface/pack_v4_iface (host pack ABI)
+#include <xi/xi_mp.hpp>           // canonical msgpack Writer — the xi/image blob descriptor
 #include "yyjson.h"
 
 #include <opencv2/opencv.hpp>
@@ -49,11 +50,13 @@
 #include <vector>
 #include <utility>
 
-// Load an image file into the input pack. A grayscale file stays a 1-channel
-// entry (plugins with a "gray" contract read it directly); anything else
-// becomes a 3-channel RGB entry (the xInsp2 pool convention). builder_add_image
-// copies the pixels into a host pool slot. false on error.
-static bool add_image_entry(const xi_pack_v1* fi, xi_pack_builder b,
+// Load an image file into the input pack as a self-describing xi/image BLOB
+// (spec 30): a grayscale file stays a 1-channel entry (plugins with a "gray"
+// contract read it directly); anything else becomes a 3-channel RGB entry (the
+// xInsp2 pool convention). The pixels come from a cv::Mat the loader owns, so a
+// copy into the pool is inherent — builder_add_blob (the @4 copy convenience)
+// synthesizes the head + copies the payload in one call. false on error.
+static bool add_image_entry(const xi_pack_v4* fi4, xi_pack_builder b,
                             const std::string& key, const std::string& path,
                             std::string& err) {
     cv::Mat raw = cv::imread(path, cv::IMREAD_UNCHANGED);
@@ -62,7 +65,22 @@ static bool add_image_entry(const xi_pack_v1* fi, xi_pack_builder b,
     if (raw.channels() == 1)      out = raw.isContinuous() ? raw : raw.clone();
     else if (raw.channels() == 4) cv::cvtColor(raw, out, cv::COLOR_BGRA2RGB);
     else                          cv::cvtColor(raw, out, cv::COLOR_BGR2RGB);
-    fi->builder_add_image(b, key.c_str(), out.cols, out.rows, out.channels(), out.data);
+    // {"t":"xi/image","w","h","c","dt"} — the convention descriptor the @1
+    // get_image adapter and the SDK image accessors read.
+    xi::mp::Writer dw;
+    dw.map(5);
+    dw.key("t");  dw.str("xi/image");
+    dw.key("w");  dw.int_(out.cols);
+    dw.key("h");  dw.int_(out.rows);
+    dw.key("c");  dw.int_(out.channels());
+    dw.key("dt"); dw.str("u8");
+    const int64_t payload_len = (int64_t)out.cols * out.rows * out.channels();
+    if (!fi4 || fi4->builder_add_blob(b, key.c_str(), dw.bytes().data(),
+                                      (int32_t)dw.bytes().size(),
+                                      out.data, payload_len) != 1) {
+        err = "cannot add image blob (no xi.pack@4 plane?): " + key;
+        return false;
+    }
     return true;
 }
 
@@ -181,7 +199,8 @@ int main(int argc, char** argv) {
     // its get_interface slot ("xi.pack", 1) — exactly what the backend wires.
     static xi_host_api host = xi::ImagePool::make_host_api();
     xi::install_pack_abi();
-    const xi_pack_v1* fi = xi::pack_v1_iface();
+    const xi_pack_v1* fi  = xi::pack_v1_iface();
+    const xi_pack_v4* fi4 = xi::pack_v4_iface();   // spec 30 blob door (image inputs)
 
 #ifdef _WIN32
     HMODULE dll = LoadLibraryA(dllpath.c_str());
@@ -246,7 +265,7 @@ int main(int argc, char** argv) {
     xi_pack_builder b = fi->builder_new();
     for (auto& kv : images) {
         std::string err;
-        if (!add_image_entry(fi, b, kv.first, kv.second, err)) {
+        if (!add_image_entry(fi4, b, kv.first, kv.second, err)) {
             std::fprintf(stderr, "%s\n", err.c_str());
             fi->builder_abandon(b);
             syms.destroy(inst);
@@ -336,7 +355,11 @@ int main(int argc, char** argv) {
                     val = "{\"$msgpack_bytes\":" + std::to_string(ml) + "}";
                 break;
             }
-            case XI_PACK_TAG_IMAGE: {
+            case XI_PACK_TAG_BLOB: {
+                // spec 30: a non-scalar entry is a self-describing blob. An
+                // "xi/image" blob parses through the @1 get_image adapter into
+                // an xi_pack_image we can save as PNG; any other blob type is
+                // reported by its payload size (get_blob), not written out.
                 xi_pack_image img{};
                 if (fi->get_image(out, key.c_str(), &img)) {
                     std::string path = out_dir + "/" + key + ".png";
@@ -344,6 +367,11 @@ int main(int argc, char** argv) {
                     val = "{\"$image\":[" + std::to_string(img.width) + "," +
                           std::to_string(img.height) + "," +
                           std::to_string(img.channels) + "]}";
+                } else if (fi4) {
+                    const void* dp = nullptr; int32_t dl = 0;
+                    const void* pp = nullptr; int64_t pl = 0;
+                    if (fi4->get_blob(out, key.c_str(), &dp, &dl, &pp, &pl))
+                        val = "{\"$blob_bytes\":" + std::to_string(pl) + "}";
                 }
                 break;
             }

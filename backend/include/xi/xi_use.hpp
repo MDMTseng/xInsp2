@@ -23,6 +23,7 @@
 #include "xi_clock.hpp"
 #include "xi_pack_contract.hpp"  // reserved $-keys + fault/provenance helpers (U1, doc 15)
 #include "xi_image.hpp"
+#include "xi_image_blob.hpp"     // xi::ImageBlobView + read_image_blob (xi/image consumer)
 #include "xi_script.hpp"   // XI_SCRIPT_EXPORT (A4 entry export macro)
 
 #include <chrono>
@@ -225,24 +226,13 @@ struct ScriptPackImage {
     std::span<const uint8_t> pixels;
 };
 
-// A borrowed tensor entry read out of a pack (xi.pack@3): logical shape +
-// element dtype (XI_PACK_DTYPE_*) + a zero-copy view over the pool buffer's
-// element bytes. Valid for the life of the owning ScriptPack.
-struct ScriptPackTensor {
-    int32_t width     = 0;
-    int32_t height    = 0;
-    int32_t channels  = 0;
-    int32_t dtype     = 0;   // XI_PACK_DTYPE_*
-    int32_t elem_size = 1;   // bytes per element
-    std::span<const uint8_t> bytes;   // w*h*c*elem_size raw element bytes
-};
-
-// A borrowed user-typed blob (xi.pack@3): a Bin entry together with its
-// producer-declared type_id (0 = plain bin, >= XI_PACK_TYPE_USER_BASE = a
-// private producer<->consumer payload contract).
+// A borrowed self-describing blob read out of a pack (xi.pack@4, spec 30): the
+// descriptor map bytes + the 64B-aligned payload span, both zero-copy over the
+// pool buffer. Valid for the life of the owning ScriptPack. Decode `desc` with
+// xi::mp::Reader — its "t" key names the type ("xi/image", "toolbox/type").
 struct ScriptPackBlob {
-    int32_t type_id = 0;
-    std::span<const uint8_t> bytes;
+    std::span<const uint8_t> desc;      // canonical msgpack descriptor map
+    std::span<const uint8_t> payload;   // 64B-aligned payload bytes
 };
 
 template <class Schema> class ScriptTypedPack;
@@ -313,36 +303,31 @@ public:
         return (valid() && fi_->tag_of) ? fi_->tag_of(h_, key) : -1;
     }
 
-    // ---- xi.pack@3 reads (pack-v3): tensor / user-typed blob / type_id.
-    // Resolved through the host's "xi.pack"@3 door per call (cheap strcmp
-    // resolver); std::nullopt / -1 on an older host without the supplement —
-    // the same absent-pack fail-loud discipline as every getter above.
-    std::optional<ScriptPackTensor> get_tensor(const char* key) const {
-        const xi_pack_v3* f3 = pack3_();
-        if (!valid() || !f3 || !f3->get_tensor) return std::nullopt;
-        xi_pack_tensor t{};
-        if (f3->get_tensor(h_, key, &t) != 1) return std::nullopt;
-        return ScriptPackTensor{ t.width, t.height, t.channels, t.dtype, t.elem_size,
-            std::span<const uint8_t>(static_cast<const uint8_t*>(t.data),
-                                     t.length > 0 ? (size_t)t.length : 0) };
-    }
+    // ---- xi.pack@4 reads (self-describing blobs, spec 30). Resolved through
+    // the host's "xi.pack"@4 door per call (cheap strcmp resolver); std::nullopt
+    // on a host with no blob plane — the same absent-pack fail-loud discipline as
+    // every getter above. Decode the descriptor with xi::mp::Reader ("t" names
+    // the type); get_image above is the xi/image-convention accessor over @1.
     std::optional<ScriptPackBlob> get_blob(const char* key) const {
-        const xi_pack_v3* f3 = pack3_();
-        if (!valid() || !f3 || !f3->get_blob) return std::nullopt;
-        int32_t type_id = 0; const void* p = nullptr; int32_t n = 0;
-        if (f3->get_blob(h_, key, &type_id, &p, &n) != 1) return std::nullopt;
-        return ScriptPackBlob{ type_id,
-            std::span<const uint8_t>(static_cast<const uint8_t*>(p),
-                                     n > 0 ? (size_t)n : 0) };
+        const xi_pack_v4* f4 = pack4_();
+        if (!valid() || !f4 || !f4->get_blob) return std::nullopt;
+        const void* d = nullptr; int32_t dl = 0;
+        const void* p = nullptr; int64_t pl = 0;
+        if (f4->get_blob(h_, key, &d, &dl, &p, &pl) != 1) return std::nullopt;
+        return ScriptPackBlob{
+            std::span<const uint8_t>(static_cast<const uint8_t*>(d), dl > 0 ? (size_t)dl : 0),
+            std::span<const uint8_t>(static_cast<const uint8_t*>(p), pl > 0 ? (size_t)pl : 0) };
     }
-    // Entry type_id by key / by insertion ordinal (-1 absent / OOB / pre-@3).
-    int32_t type_id_of(const char* key) const {
-        const xi_pack_v3* f3 = pack3_();
-        return (valid() && f3 && f3->type_id_of) ? f3->type_id_of(h_, key) : -1;
-    }
-    int32_t type_id_at(int32_t i) const {
-        const xi_pack_v3* f3 = pack3_();
-        return (valid() && f3 && f3->type_id_at) ? f3->type_id_at(h_, i) : -1;
+    // Convenience consumer accessor for an `xi/image` self-describing blob (spec
+    // 30): parse the descriptor's {w,h,c,dt} + payload into an ImageBlobView in
+    // ONE fail-loud call (nullopt on absent key, non-blob entry, "t" != "xi/image",
+    // or a malformed/undersized descriptor). Carries the real dtype (get_image
+    // above is the u8-assuming xi/image accessor over the @1 adapter). Wrap it as
+    // a cv::Mat with xi::as_cv_read(ImageBlobView) from <xi/xi_cv.hpp>.
+    std::optional<ImageBlobView> image_blob(const char* key) const {
+        auto b = get_blob(key);
+        if (!b) return std::nullopt;
+        return read_image_blob(b->desc, b->payload);
     }
 
     // ---- U1 pack-plane error path + provenance (docs/new_gen/15) ------------
@@ -388,13 +373,13 @@ public:
     const xi_pack_v1* iface()  const { return fi_; }
 
 private:
-    // The xi.pack@3 supplement, resolved fresh from the injected host table on
-    // each v3 read (NOT cached in a static: pre-injection the table is null,
+    // The xi.pack@4 blob supplement, resolved fresh from the injected host table
+    // on each blob read (NOT cached in a static: pre-injection the table is null,
     // and a once-cached null would wrongly stick for the process life).
-    static const xi_pack_v3* pack3_() {
+    static const xi_pack_v4* pack4_() {
         auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
         return (host && host->get_interface)
-                   ? static_cast<const xi_pack_v3*>(host->get_interface("xi.pack", 3))
+                   ? static_cast<const xi_pack_v4*>(host->get_interface("xi.pack", 4))
                    : nullptr;
     }
 

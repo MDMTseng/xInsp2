@@ -8,7 +8,7 @@
 // alone (pack-only end to end). Per pack it proves:
 //
 //   1. GENERIC WALK — for_each visits exactly the three entries with the right
-//      ABI tags (XI_PACK_TAG_I64 / XI_PACK_TAG_F64 / XI_PACK_TAG_IMAGE), the
+//      ABI tags (XI_PACK_TAG_I64 / XI_PACK_TAG_F64 / XI_PACK_TAG_BLOB), the
 //      same producer-agnostic enumeration expose/record_save do host-side, in
 //      script hands.
 //   2. TYPED-SCHEMA READS — ScriptTypedPack over a declared keyset returns the
@@ -55,9 +55,11 @@ XI_INSPECT_ENTRY(t, frame) {
         ++n;
         if (!keys.empty()) keys += ',';
         keys.append(k);
-        if (k == "seq"   && tag != XI_PACK_TAG_I64)   tags_ok = false;
-        if (k == "gain"  && tag != XI_PACK_TAG_F64)   tags_ok = false;
-        if (k == "frame" && tag != XI_PACK_TAG_IMAGE) tags_ok = false;
+        if (k == "seq"   && tag != XI_PACK_TAG_I64)  tags_ok = false;
+        if (k == "gain"  && tag != XI_PACK_TAG_F64)  tags_ok = false;
+        // "frame" is an "xi/image" self-describing blob now (spec 30); the raw
+        // walk tag is XI_PACK_TAG_BLOB (get_image still reads it via the adapter).
+        if (k == "frame" && tag != XI_PACK_TAG_BLOB) tags_ok = false;
     });
 
     // 2. typed-schema reads agree with the string-keyed reads.

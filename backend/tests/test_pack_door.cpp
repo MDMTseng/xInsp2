@@ -17,9 +17,10 @@
 //      The pack + its pooled image refs balance to baseline once dropped.
 //   5.-8. Creator-tag owner sweep, H1 pack source identity, F1 pool-exhaustion
 //      honesty, cross-plane owner-sweep co-ownership (see each section).
-//   9. The xi.pack@3 slab supplement end-to-end (tensor / user-typed blob /
-//      adopt_bin / adopt_tensor zero-copy chain / ordinal type_id+entry walk),
-//      driven plugin-style through host.get_interface("xi.pack", 3).
+//   9. The xi.pack@4 self-describing blob door end-to-end (blob_mint -> fill ->
+//      adopt_blob zero-copy path / add_blob copy / get_blob / the @1 get_image
+//      adapter over an xi/image blob / ordinal entry walk), driven plugin-style
+//      through host.get_interface("xi.pack", 4).
 //
 // The plugin-side door (blob_analysis's pack-in/pack-out) + the real end-to-end
 // mock_camera->blob_analysis flow are exercised in the PLUGIN test
@@ -78,17 +79,17 @@ static void test_door_probe() {
     const auto* fi = static_cast<const xi_pack_v1*>(v1);
     CHECK(fi->builder_new && fi->builder_seal && fi->get_i64 && fi->emit_pack);
 
-    // pack-v3: the xi.pack@3 slab supplement resolves alongside @1
-    // (Plugin::pack3_iface()) — same id, version 3, its own frozen vtable.
-    const void* v3 = host.get_interface("xi.pack", 3);
-    CHECK(v3 != nullptr);
-    CHECK(v3 == xi::pack_v3_iface());
-    CHECK(v3 != v1);
-    const auto* fi3 = static_cast<const xi_pack_v3*>(v3);
-    CHECK(fi3->builder_add_tensor && fi3->builder_adopt_tensor &&
-          fi3->builder_add_blob && fi3->builder_adopt_bin &&
-          fi3->get_tensor && fi3->get_blob && fi3->type_id_of &&
-          fi3->type_id_at && fi3->entry_at);
+    // blob plane (spec 30): the xi.pack@4 supplement resolves alongside @1
+    // (Plugin::pack4_iface()) — same id, version 4, its own frozen vtable. The
+    // retired @3 answers NULL forever.
+    CHECK(host.get_interface("xi.pack", 3) == nullptr);
+    const void* v4 = host.get_interface("xi.pack", 4);
+    CHECK(v4 != nullptr);
+    CHECK(v4 == xi::pack_v4_iface());
+    CHECK(v4 != v1);
+    const auto* fi4 = static_cast<const xi_pack_v4*>(v4);
+    CHECK(fi4->blob_mint && fi4->builder_adopt_blob && fi4->builder_add_blob &&
+          fi4->get_blob && fi4->entry_at);
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +163,9 @@ static void test_build_read_roundtrip() {
     CHECK(fi->get_i64(f, "label", &junk) == 0);       // wrong tag -> 0, no coercion
     CHECK(fi->tag_of(f, "nope") == -1);
     CHECK(fi->tag_of(f, "threshold") == XI_PACK_TAG_I64);
-    CHECK(fi->tag_of(f, "gray") == XI_PACK_TAG_IMAGE);
+    // The image entry is a self-describing "xi/image" BLOB now (the frozen @1
+    // get_image slot is a door adapter that parses it); tag_of reports BLOB.
+    CHECK(fi->tag_of(f, "gray") == XI_PACK_TAG_BLOB);
 
     // Generic enumeration (the expose/record_save walk): count + key_at/tag_at.
     CHECK(fi->count(f) == 7);
@@ -171,7 +174,7 @@ static void test_build_read_roundtrip() {
     CHECK(k0 && klen == 9 && std::string(k0, (size_t)klen) == "threshold");
     CHECK(fi->tag_at(f, 0) == XI_PACK_TAG_I64);
     CHECK(fi->tag_at(f, 2) == XI_PACK_TAG_BOOL);   // "pass" (insertion order)
-    CHECK(fi->tag_at(f, 5) == XI_PACK_TAG_IMAGE);
+    CHECK(fi->tag_at(f, 5) == XI_PACK_TAG_BLOB);   // "gray" is an xi/image blob
     CHECK(fi->key_at(f, 99, &klen) == nullptr && klen == 0);   // OOB
     CHECK(fi->tag_at(f, 99) == -1);
 
@@ -578,144 +581,119 @@ static void test_cross_plane_owner_sweep_keeps_coowned_pack_buffers() {
 }
 
 // ---------------------------------------------------------------------------
-// (9) The xi.pack@3 door end-to-end, plugin-style: BOTH vtables resolved via
-//     host.get_interface (exactly what a pack-capable plugin does at create),
-//     building/reading through the SAME builder/handle ids as v1.
-//     Covers: tensor add/get dtype round-trip (fail-closed both ways), the
-//     zero-copy adopt_tensor chain off get_tensor's backing handle, user-typed
-//     blob add/get (+ v1 get_bin compat), adopt_bin (the honest-Bin-tag
-//     replacement for the Image-dims masquerade), and ordinal-explicit
-//     iteration (type_id_at / entry_at) in parity with v1 key_at/tag_at.
+// (9) The xi.pack@4 self-describing blob door end-to-end, plugin-style: BOTH
+//     vtables resolved via host.get_interface (exactly what a pack-capable
+//     plugin does at create), building/reading through the SAME builder/handle
+//     ids as v1. Covers: blob_mint -> fill payload in place -> adopt_blob (the
+//     zero-copy producer path, 64B-aligned payload), add_blob copy convenience,
+//     get_blob (descriptor + payload), the @1 get_image adapter over an
+//     "xi/image" blob (+ fail-closed on a non-image blob and on get_bin), and
+//     ordinal entry_at parity with v1 key_at/tag_at.
 // ---------------------------------------------------------------------------
-static void test_pack_v3_door() {
-    SECTION("xi.pack@3: tensor/blob/adopt/ordinal iteration end-to-end");
+static void test_pack_v4_door() {
+    SECTION("xi.pack@4: blob mint/adopt/add/get + image adapter + ordinal walk");
     xi::install_pack_abi();
     xi_host_api host = xi::ImagePool::make_host_api();
     const auto* fi  = static_cast<const xi_pack_v1*>(host.get_interface("xi.pack", 1));
-    const auto* fi3 = static_cast<const xi_pack_v3*>(host.get_interface("xi.pack", 3));
-    CHECK(fi != nullptr && fi3 != nullptr);
+    const auto* fi4 = static_cast<const xi_pack_v4*>(host.get_interface("xi.pack", 4));
+    CHECK(fi != nullptr && fi4 != nullptr);
     size_t base_frames = xi::PackRegistry::instance().live_frames();
     int    base_live   = pool_live();
 
-    // ---- tensor add/get round-trip (dtype-aware) ----------------------------
-    float f32[6] = { 0.5f, -1.25f, 2.0f, 3.5f, -4.75f, 6.0f };   // 3x2x1
+    // An xi/image descriptor for a 3x2x1 u8 blob:
+    //   {"t":"xi/image","w":3,"h":2,"c":1,"dt":"u8"}
+    xi::mp::Writer dw;
+    dw.map(5);
+    dw.key("t");  dw.str("xi/image");
+    dw.key("w");  dw.int_(3);
+    dw.key("h");  dw.int_(2);
+    dw.key("c");  dw.int_(1);
+    dw.key("dt"); dw.str("u8");
+    const xi::mp::Bytes desc(dw.bytes());
+    const int64_t payload_len = 3 * 2 * 1;
+
     xi_pack_builder b = fi->builder_new();
     fi->builder_add_i64(b, "seq", 3);
-    CHECK(fi3->builder_add_tensor(b, "feat", 3, 2, 1, XI_PACK_DTYPE_F32, f32) == 1);
-    CHECK(fi3->builder_add_tensor(b, "bad", 3, 2, 1, 99, f32) == 0);    // bad dtype refused
-    CHECK(fi3->builder_add_tensor(b, "bad", 0, 2, 1, XI_PACK_DTYPE_F32, f32) == 0);  // bad shape
-    CHECK(pool_live() == base_live + 1);            // exactly ONE pool mint (the tensor)
-    // user-typed blob: type_id >= XI_PACK_TYPE_USER_BASE required.
-    const uint8_t payload[5] = { 9, 8, 7, 6, 5 };
-    CHECK(fi3->builder_add_blob(b, "roi", XI_PACK_TYPE_USER_BASE + 0x42,
-                                payload, 5) == 1);
-    CHECK(fi3->builder_add_blob(b, "bad", 5, payload, 5) == 0);   // reserved type_id refused
-    CHECK(pool_live() == base_live + 2);            // + the blob's pool buffer
+
+    // (a) blob_mint -> fill the 64B-aligned payload IN PLACE -> adopt_blob.
+    void* pptr = nullptr;
+    xi_image_handle h = fi4->blob_mint(desc.data(), (int32_t)desc.size(),
+                                       payload_len, &pptr);
+    CHECK(h != XI_IMAGE_NULL && pptr != nullptr);
+    CHECK((reinterpret_cast<uintptr_t>(pptr) & 63u) == 0);   // payload 64B-aligned
+    uint8_t* px = static_cast<uint8_t*>(pptr);
+    for (int i = 0; i < 6; ++i) px[i] = uint8_t(0x10 + i);
+    CHECK(fi4->builder_adopt_blob(b, "img", h) == 1);        // pack co-owns (addref)
+    host.image_release(h);                                   // caller drops its mint ref
+    CHECK(pool_live() == base_live + 1);                     // one pooled blob buffer
+
+    // (b) add_blob copy convenience, a custom convention type.
+    xi::mp::Writer dw2;
+    dw2.map(2); dw2.key("t"); dw2.str("acme/roi"); dw2.key("n"); dw2.int_(4);
+    const xi::mp::Bytes desc2(dw2.bytes());
+    const uint8_t roi[4] = { 9, 8, 7, 6 };
+    CHECK(fi4->builder_add_blob(b, "roi", desc2.data(), (int32_t)desc2.size(), roi, 4) == 1);
+    // An invalid (non-map) descriptor is refused, nothing added.
+    xi::mp::Writer bad; bad.int_(7);
+    CHECK(fi4->builder_add_blob(b, "bad", bad.bytes().data(),
+                                (int32_t)bad.bytes().size(), roi, 4) == 0);
+    CHECK(pool_live() == base_live + 2);
+
     xi_pack_handle A = fi->builder_seal(b);
     CHECK(A != XI_PACK_NULL);
 
-    // v1 sees the tensor's TAG (generic walker skip contract) but has no
-    // accessor for it — get_bin/get_image stay fail-closed on it.
-    CHECK(fi->tag_of(A, "feat") == XI_PACK_TAG_TENSOR);
+    // A blob's tag is XI_PACK_TAG_BLOB. v1 get_bin fails closed on it; the @1
+    // get_image adapter parses an "xi/image" blob and rejects a non-image one.
+    CHECK(fi->tag_of(A, "img") == XI_PACK_TAG_BLOB);
+    CHECK(fi->tag_of(A, "roi") == XI_PACK_TAG_BLOB);
     const void* jp = nullptr; int32_t jl = 0;
-    CHECK(fi->get_bin(A, "feat", &jp, &jl) == 0);
-    xi_pack_image jiv{};
-    CHECK(fi->get_image(A, "feat", &jiv) == 0);
+    CHECK(fi->get_bin(A, "img", &jp, &jl) == 0);             // a blob is not a plain bin
+    xi_pack_image iv{};
+    CHECK(fi->get_image(A, "img", &iv) == 1);                // xi/image adapter parses it
+    CHECK(iv.width == 3 && iv.height == 2 && iv.channels == 1 && iv.length == 6);
+    CHECK(iv.pixels && static_cast<const uint8_t*>(iv.pixels)[5] == 0x15);
+    CHECK(fi->get_image(A, "roi", &iv) == 0);                // not an xi/image blob
 
-    // v3 get_tensor: dims + dtype + elem_size + zero-copy bytes + handle.
-    xi_pack_tensor tv{};
-    CHECK(fi3->get_tensor(A, "feat", &tv) == 1);
-    CHECK(tv.width == 3 && tv.height == 2 && tv.channels == 1);
-    CHECK(tv.dtype == XI_PACK_DTYPE_F32 && tv.elem_size == 4 && tv.length == 24);
-    CHECK(tv.data != nullptr && tv.handle != XI_IMAGE_NULL);
-    if (tv.data) CHECK(std::memcmp(tv.data, f32, sizeof f32) == 0);
-    // fail-closed: a non-tensor key, an absent key.
-    xi_pack_tensor junk{};
-    CHECK(fi3->get_tensor(A, "seq", &junk) == 0);
-    CHECK(fi3->get_tensor(A, "nope", &junk) == 0);
+    // @4 get_blob: descriptor + payload, both zero-copy.
+    const void* dptr = nullptr; int32_t dlen = 0;
+    const void* yptr = nullptr; int64_t ylen = 0;
+    CHECK(fi4->get_blob(A, "img", &dptr, &dlen, &yptr, &ylen) == 1);
+    CHECK(dptr && dlen == (int32_t)desc.size() &&
+          std::memcmp(dptr, desc.data(), desc.size()) == 0);
+    CHECK(yptr && ylen == payload_len &&
+          static_cast<const uint8_t*>(yptr)[0] == 0x10);
+    CHECK(fi4->get_blob(A, "seq",  &dptr, &dlen, &yptr, &ylen) == 0);  // i64 is not a blob
+    CHECK(fi4->get_blob(A, "nope", &dptr, &dlen, &yptr, &ylen) == 0);
+    CHECK(fi4->get_blob(A, "roi",  &dptr, &dlen, &yptr, &ylen) == 1);
+    CHECK(ylen == 4 && static_cast<const uint8_t*>(yptr)[0] == 9);
 
-    // blob read: type_id + bytes; v1 get_bin still resolves the payload
-    // (a blob IS a Bin entry — v1 consumers just lose the type_id).
-    int32_t bt = 0; const void* bp = nullptr; int32_t bl = 0;
-    CHECK(fi3->get_blob(A, "roi", &bt, &bp, &bl) == 1);
-    CHECK(bt == XI_PACK_TYPE_USER_BASE + 0x42 && bl == 5 && bp != nullptr);
-    if (bp) CHECK(std::memcmp(bp, payload, 5) == 0);
-    CHECK(fi->get_bin(A, "roi", &bp, &bl) == 1 && bl == 5);
-    CHECK(fi3->get_blob(A, "seq", &bt, &bp, &bl) == 0);   // i64 is not a blob
-    CHECK(fi3->type_id_of(A, "roi") == XI_PACK_TYPE_USER_BASE + 0x42);
-    CHECK(fi3->type_id_of(A, "feat") == XI_PACK_DTYPE_F32);  // tensor: dtype rides type_id
-    CHECK(fi3->type_id_of(A, "seq") == 0);
-    CHECK(fi3->type_id_of(A, "nope") == -1);
-
-    // ---- ordinal-explicit iteration: entry_at/type_id_at parity with v1 ----
-    CHECK(fi->count(A) == 3);                         // seq, feat, roi (bad adds refused)
+    // ---- ordinal walk: entry_at parity with v1 key_at/tag_at (no type_id) ----
+    CHECK(fi->count(A) == 3);                                // seq, img, roi (bad refused)
     for (int32_t i = 0; i < 3; ++i) {
         int32_t kl = 0;
         const char* k = fi->key_at(A, i, &kl);
         xi_pack_entry e{};
-        CHECK(fi3->entry_at(A, i, &e) == 1);
+        CHECK(fi4->entry_at(A, i, &e) == 1);
         CHECK(e.key && k && e.key_len == kl &&
-              std::memcmp(e.key, k, (size_t)kl) == 0);      // same insertion order
+              std::memcmp(e.key, k, (size_t)kl) == 0);       // same insertion order
         CHECK(e.tag == fi->tag_at(A, i));
-        CHECK(e.type_id == fi3->type_id_at(A, i));
     }
     xi_pack_entry e0{};
-    CHECK(fi3->entry_at(A, 0, &e0) == 1 && e0.external == 0 &&
+    CHECK(fi4->entry_at(A, 0, &e0) == 1 && e0.external == 0 &&
           e0.tag == XI_PACK_TAG_I64);                        // "seq": inline
     xi_pack_entry e1{};
-    CHECK(fi3->entry_at(A, 1, &e1) == 1 && e1.external == 1 &&
-          e1.tag == XI_PACK_TAG_TENSOR);                     // "feat": pooled
-    CHECK(fi3->entry_at(A, 99, &e0) == 0);                   // OOB
-    CHECK(fi3->type_id_at(A, 99) == -1);
+    CHECK(fi4->entry_at(A, 1, &e1) == 1 && e1.external == 1 &&
+          e1.tag == XI_PACK_TAG_BLOB);                       // "img": pooled blob
+    CHECK(fi4->entry_at(A, 99, &e0) == 0);                   // OOB
 
-    // ---- zero-copy adopt chain: pack A's tensor rides into pack B ----------
-    xi_pack_builder b2 = fi->builder_new();
-    CHECK(fi3->builder_adopt_tensor(b2, "feat2", 3, 2, 1,
-                                    XI_PACK_DTYPE_F32, tv.handle) == 1);
-    // shape overclaim refused: 4x2x1 f32 = 32 bytes > the 24-byte buffer.
-    CHECK(fi3->builder_adopt_tensor(b2, "bad", 4, 2, 1,
-                                    XI_PACK_DTYPE_F32, tv.handle) == 0);
-    CHECK(fi3->builder_adopt_tensor(b2, "bad", 3, 2, 1,
-                                    XI_PACK_DTYPE_F32, XI_IMAGE_NULL) == 0);
-    CHECK(pool_live() == base_live + 2);              // adopt minted NOTHING new
-    xi_pack_handle B = fi->builder_seal(b2);
-    CHECK(B != XI_PACK_NULL);
+    // blob_mint refuses a non-canonical / non-map descriptor (nothing minted).
+    void* pp = reinterpret_cast<void*>(0x1);
+    CHECK(fi4->blob_mint(bad.bytes().data(), (int32_t)bad.bytes().size(), 4, &pp)
+          == XI_IMAGE_NULL);
+    CHECK(pp == nullptr);
 
-    // Drop A: B's adopted co-ownership must keep the element buffer alive.
     fi->release(A);
-    xi_pack_tensor tv2{};
-    CHECK(fi3->get_tensor(B, "feat2", &tv2) == 1);
-    CHECK(tv2.length == 24 && tv2.data != nullptr);
-    if (tv2.data) CHECK(std::memcmp(tv2.data, f32, sizeof f32) == 0);
-    CHECK(pool_live() == base_live + 1);              // blob buffer died with A; tensor lives in B
-    fi->release(B);
-    CHECK(pool_live() == base_live);                  // exactly-once release, no leak
-
-    // ---- adopt_bin: the honest Bin tag for a pooled byte buffer ------------
-    // (historically zero-copy byte adoption had to masquerade as an Image
-    // entry with fake dims — the v1 wart the @3 door retires.)
-    xi_image_handle raw = xi::ImagePool::instance().create(8, 1, 1);
-    CHECK(raw != XI_IMAGE_NULL);
-    uint8_t* rd = xi::ImagePool::instance().data(raw);
-    for (int i = 0; i < 8; ++i) rd[i] = uint8_t(0xA0 + i);
-    xi_pack_builder b3 = fi->builder_new();
-    CHECK(fi3->builder_adopt_bin(b3, "bytes", 0, raw) == 1);              // plain bin
-    CHECK(fi3->builder_adopt_bin(b3, "typed", XI_PACK_TYPE_USER_BASE + 7, raw) == 1);
-    CHECK(fi3->builder_adopt_bin(b3, "bad", 5, raw) == 0);                // reserved type_id
-    CHECK(fi3->builder_adopt_bin(b3, "bad", 0, XI_IMAGE_NULL) == 0);
-    xi_pack_handle C = fi->builder_seal(b3);
-    CHECK(C != XI_PACK_NULL);
-    xi::ImagePool::instance().release(raw);           // pack co-ownership keeps it
-    CHECK(fi->tag_of(C, "bytes") == XI_PACK_TAG_BIN); // honest tag, no masquerade
-    CHECK(fi->tag_of(C, "typed") == XI_PACK_TAG_BIN);
-    CHECK(fi->get_bin(C, "bytes", &bp, &bl) == 1 && bl == 8);
-    if (bp) CHECK(static_cast<const uint8_t*>(bp)[7] == 0xA7);
-    CHECK(fi3->get_blob(C, "typed", &bt, &bp, &bl) == 1 &&
-          bt == XI_PACK_TYPE_USER_BASE + 7 && bl == 8);
-    CHECK(fi3->type_id_of(C, "bytes") == 0);
-    fi->release(C);
-
-    CHECK(pool_live() == base_live);
+    CHECK(pool_live() == base_live);                         // exactly-once release, no leak
     CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
 }
 
@@ -864,7 +842,7 @@ int main() {
     test_has_source_pack_identity();
     test_bin_pool_exhaustion_no_null_span();
     test_cross_plane_owner_sweep_keeps_coowned_pack_buffers();
-    test_pack_v3_door();
+    test_pack_v4_door();
     test_add_mp_seam_canonicalize();
     test_reinit_creator_tag_ownerguard();
     if (g_failures == 0) {

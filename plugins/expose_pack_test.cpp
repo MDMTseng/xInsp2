@@ -117,19 +117,27 @@ static V3View decode_v3(const std::vector<uint8_t>& frame) {
                                             out.tags_ok = out.tags_ok && tag == XI_PACK_TAG_F64; }
                 else if (fkey == "label") { xi::mp::Element v; r.next(v); out.has_label = true; out.label = as_str(v);
                                             out.tags_ok = out.tags_ok && tag == XI_PACK_TAG_STR; }
-                else if (fkey == "frame") {  // image descriptor {w,h,c,px}, tagged IMAGE
-                    out.tags_ok = out.tags_ok && tag == XI_PACK_TAG_IMAGE;
-                    xi::mp::Element im;
-                    if (r.next(im) != xi::mp::Status::Ok || im.kind != xi::mp::Kind::Map) return out;
+                else if (fkey == "frame") {  // xi/image self-describing BLOB (spec 30)
+                    out.tags_ok = out.tags_ok && tag == XI_PACK_TAG_BLOB;
+                    // The blob value is the ENTIRE self-describing buffer as one
+                    // bin (magic + desc_len + descriptor + pad + payload). Validate
+                    // the head, then read w/h/c from the descriptor + px = payload.
+                    xi::mp::Element bin;
+                    if (r.next(bin) != xi::mp::Status::Ok || bin.kind != xi::mp::Kind::Bin) return out;
+                    if (!xi::blob_head_validate(bin.data, bin.len)) return out;
+                    const uint32_t desc_len = xi::pack_mp_detail::get_u32_le(bin.data + 4);
+                    const uint64_t payload_off = xi::blob_payload_off(desc_len);
                     out.has_image = true;
-                    for (uint32_t m = 0; m < im.len; ++m) {
-                        xi::mp::Element ik; r.next(ik); std::string ikey = as_str(ik);
-                        xi::mp::Element iv; r.next(iv);
+                    xi::mp::Reader dr(bin.data + 8, desc_len);
+                    xi::mp::Element dm; dr.next(dm);   // the descriptor map
+                    for (uint32_t m = 0; m < dm.len; ++m) {
+                        xi::mp::Element ik; dr.next(ik); std::string ikey = as_str(ik);
+                        xi::mp::Element iv; dr.next(iv);
                         if (ikey == "w") out.iw = iv.i;
                         else if (ikey == "h") out.ih = iv.i;
                         else if (ikey == "c") out.ic = iv.i;
-                        else if (ikey == "px") out.px.assign(iv.data, iv.data + iv.len);
                     }
+                    out.px.assign(bin.data + payload_off, bin.data + bin.len);
                 } else if (!skip_value(r)) return out;   // opaque entry value (e.g. mp)
             }
         } else if (!skip_value(r)) return out;

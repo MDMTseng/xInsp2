@@ -146,7 +146,9 @@ static void test_build_read_canonical() {
         CHECK(img && img->width == 4 && img->height == 4 && img->channels == 1);
         CHECK(img && img->pixels.size() == 16 && img->pixels[6] == 210);
         CHECK(sp.tag_of("seq") == XI_PACK_TAG_I64);
-        CHECK(sp.tag_of("gray") == XI_PACK_TAG_IMAGE);
+        // add_image stores an "xi/image" self-describing blob (spec 30); get_image
+        // above reads it back through the @1 adapter, but the raw tag is BLOB.
+        CHECK(sp.tag_of("gray") == XI_PACK_TAG_BLOB);
         CHECK(sp.tag_of("pass") == XI_PACK_TAG_BOOL);   // native bool entry
 
         // Bool reads back through the typed accessor (native tail).
@@ -176,7 +178,7 @@ static void test_build_read_canonical() {
         CHECK(tags[0] == XI_PACK_TAG_I64  && tags[1] == XI_PACK_TAG_F64 &&
               tags[2] == XI_PACK_TAG_STR  && tags[3] == XI_PACK_TAG_BIN &&
               tags[4] == XI_PACK_TAG_BOOL && tags[5] == XI_PACK_TAG_MP &&
-              tags[6] == XI_PACK_TAG_IMAGE);
+              tags[6] == XI_PACK_TAG_BLOB);   // "gray" is an xi/image blob
 
         // ---- (3) canonical bytes: stored arena bytes == xi::mp::Writer ----
         { xi::mp::Writer w; w.int_(42);
@@ -260,57 +262,58 @@ static void test_canonical_enforcement() {
 }
 
 // ---------------------------------------------------------------------------
-// (4b) xi.pack@3 on the script SDK (pack-v3): add_tensor/add_blob through
-//      ScriptPackBuilder, read back through ScriptPack::get_tensor/get_blob/
-//      type_id_* — the same fail-closed discipline as every typed accessor.
+// (4b) xi.pack@4 on the script SDK (self-describing blobs, spec 30): add_blob /
+//      add_image_blob through ScriptPackBuilder, read back through
+//      ScriptPack::get_blob (descriptor + payload) — same fail-closed discipline
+//      as every typed accessor.
 // ---------------------------------------------------------------------------
-static void test_script_pack_v3() {
-    SECTION("script SDK v3: tensor + user-typed blob round-trip");
+static void test_script_pack_v4() {
+    SECTION("script SDK v4: self-describing blob round-trip");
     size_t base_frames = xi::PackRegistry::instance().live_frames();
     int    base_pool   = pool_live();
     {
         xi::ScriptPackBuilder b;
         CHECK(b.valid());
-        uint16_t u16[4] = { 100, 200, 300, 400 };            // 2x2x1 U16
+        // A custom-typed blob via a hand-built descriptor {"t":"acme/roi","n":3}.
+        xi::mp::Writer dw;
+        dw.map(2); dw.key("t"); dw.str("acme/roi"); dw.key("n"); dw.int_(3);
+        const xi::mp::Bytes desc(dw.bytes());
         const uint8_t payload[3] = { 7, 8, 9 };
         CHECK(b.add_i64("seq", 1));
-        CHECK(b.add_tensor("depth", 2, 2, 1, XI_PACK_DTYPE_U16, u16));
-        CHECK(!b.add_tensor("bad", 2, 2, 1, 99, u16));       // bad dtype refused
-        CHECK(!b.add_tensor("bad", 0, 2, 1, XI_PACK_DTYPE_U16, u16));
-        CHECK(b.add_blob("roi", XI_PACK_TYPE_USER_BASE + 1, payload, 3));
-        CHECK(!b.add_blob("bad", 5, payload, 3));            // reserved type_id refused
+        CHECK(b.add_blob("roi", desc.data(), (int32_t)desc.size(), payload, 3));
+        // An invalid (non-map) descriptor is refused, nothing added.
+        xi::mp::Writer bad; bad.int_(7);
+        CHECK(!b.add_blob("bad", bad.bytes().data(), (int32_t)bad.bytes().size(), payload, 3));
+        // The xi/image convenience with an explicit dtype (u16, 2x2x1 = 8 bytes).
+        uint16_t u16[4] = { 100, 200, 300, 400 };
+        CHECK(b.add_image_blob("depth", 2, 2, 1, "u16", u16, 8));
 
         xi::ScriptPack sp = b.seal();
         CHECK(sp.valid());
-        CHECK(sp.count() == 3);                              // refused adds landed nothing
-
-        auto t = sp.get_tensor("depth");
-        CHECK(t.has_value());
-        if (t) {
-            CHECK(t->width == 2 && t->height == 2 && t->channels == 1);
-            CHECK(t->dtype == XI_PACK_DTYPE_U16 && t->elem_size == 2);
-            CHECK(t->bytes.size() == 8 &&
-                  std::memcmp(t->bytes.data(), u16, 8) == 0);
-        }
-        CHECK(!sp.get_tensor("seq"));                        // fail-closed: not a tensor
-        CHECK(!sp.get_bin("depth"));                         // v1 getter stays fail-closed
-        CHECK(sp.tag_of("depth") == XI_PACK_TAG_TENSOR);     // generic walker sees the tag
+        CHECK(sp.count() == 3);                              // seq, roi, depth (bad refused)
 
         auto bl = sp.get_blob("roi");
         CHECK(bl.has_value());
         if (bl) {
-            CHECK(bl->type_id == XI_PACK_TYPE_USER_BASE + 1);
-            CHECK(bl->bytes.size() == 3 && bl->bytes[2] == 9);
+            CHECK(bl->payload.size() == 3 && bl->payload[2] == 9);
+            // The descriptor is a canonical map; decode "t" back.
+            xi::mp::Reader r(bl->desc.data(), bl->desc.size());
+            xi::mp::Element m;
+            CHECK(r.next(m) == xi::mp::Status::Ok && m.kind == xi::mp::Kind::Map && m.len == 2);
         }
-        CHECK(sp.type_id_of("roi") == XI_PACK_TYPE_USER_BASE + 1);
-        CHECK(sp.type_id_of("depth") == XI_PACK_DTYPE_U16);  // tensor: dtype rides type_id
-        CHECK(sp.type_id_of("seq") == 0);
-        CHECK(sp.type_id_of("nope") == -1);
-        CHECK(sp.type_id_at(1) == XI_PACK_DTYPE_U16);        // insertion ordinal
-        CHECK(sp.type_id_at(99) == -1);
+        CHECK(!sp.get_blob("seq"));                          // fail-closed: not a blob
+        CHECK(!sp.get_bin("roi"));                           // a blob is not a plain bin
+        CHECK(sp.tag_of("roi") == XI_PACK_TAG_BLOB);
+        CHECK(sp.tag_of("depth") == XI_PACK_TAG_BLOB);
+
+        // The u16 image blob's payload round-trips through get_blob (the u8
+        // get_image adapter is not meaningful for a non-u8 image).
+        auto d = sp.get_blob("depth");
+        CHECK(d.has_value());
+        if (d) CHECK(d->payload.size() == 8 && std::memcmp(d->payload.data(), u16, 8) == 0);
     }
     CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
-    CHECK(pool_live() == base_pool);                          // tensor+blob buffers freed
+    CHECK(pool_live() == base_pool);                          // blob buffers freed
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +387,7 @@ int main() {
 
     test_build_read_canonical();
     test_canonical_enforcement();
-    test_script_pack_v3();
+    test_script_pack_v4();
     test_lifecycle();
 
     if (g_failures == 0) {

@@ -44,16 +44,35 @@ for (const f of manifest.frames) {
       assert.equal(body.v, 3);
       assert.equal(body.channel, f.channel);
       assert.equal(body.seq, f.seq);
-      // The canonical frame dump: scalar/str/mp entries -> values, image
-      // descriptors -> images[] with raw pixels (v3 is lossless, no JPEG; image entries identified by tag, not shape).
+      // The canonical frame dump: scalar/str/mp entries -> values; self-describing
+      // blobs -> blobs[] (the entire buffer, lossless; spec 30), identified by tag.
       for (const fld of f.fields) {
-        if (fld.kind === "image") {
+        if (fld.kind === "blob") {
+          const b = body.blobs.find((x) => x.key === fld.key);
+          assert.ok(b, `v3 blob entry ${fld.key} missing`);
+          // Head-validated + split: descriptor + payload byte-compare, "t" decodes.
+          assert.deepEqual(new Uint8Array(b.descBytes), b64(fld.desc_b64));
+          assert.deepEqual(new Uint8Array(b.payload), b64(fld.payload_b64));
+          assert.equal(b.t, fld.t);
+          if (fld.t === "xi/image") {
+            const im = body.images.find((x) => x.key === fld.key);
+            assert.ok(im, `v3 xi/image blob ${fld.key} missing from images`);
+            assert.equal(im.w, fld.w);
+            assert.equal(im.h, fld.h);
+            assert.equal(im.c, fld.c);
+            assert.equal(im.dt, fld.dt);
+            assert.deepEqual(new Uint8Array(im.pixels), b64(fld.payload_b64));
+          }
+        } else if (fld.kind === "preview") {
+          // WS-preview arm: images[key].preview = {w,h,c,enc,q,data}.
           const im = body.images.find((x) => x.key === fld.key);
-          assert.ok(im, `v3 image entry ${fld.key} missing`);
-          assert.equal(im.w, fld.w);
-          assert.equal(im.h, fld.h);
-          assert.equal(im.c, fld.c);
-          assert.deepEqual(new Uint8Array(im.pixels), b64(fld.b64));
+          assert.ok(im && im.preview, `v3 preview entry ${fld.key} missing`);
+          assert.equal(im.preview.w, fld.w);
+          assert.equal(im.preview.h, fld.h);
+          assert.equal(im.preview.c, fld.c);
+          assert.equal(im.preview.enc, fld.enc);
+          assert.equal(im.preview.q, fld.q);
+          assert.deepEqual(new Uint8Array(im.preview.data), b64(fld.data_b64));
         } else if (fld.kind === "bin") {
           assert.deepEqual(new Uint8Array(body.values[fld.key]), b64(fld.b64));
         } else {

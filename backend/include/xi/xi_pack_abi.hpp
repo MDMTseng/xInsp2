@@ -263,14 +263,37 @@ inline void f_add_bin(xi_pack_builder b, const char* key, const void* data, int3
     if (auto* fb = PackRegistry::instance().builder(b))
         fb->add_bin(key ? key : "", data, len > 0 ? (size_t)len : 0);
 }
+// The frozen @1 image slots are DOOR ADAPTERS over the blob plane (spec 30,
+// TODO(selfdesc-B) inheritance marker). add_image synthesizes an "xi/image"
+// descriptor + mints a headed blob + copies pixels. A u8 (w,h,c) image → payload
+// w*h*c bytes.
 inline void f_add_image(xi_pack_builder b, const char* key,
                         int32_t w, int32_t h, int32_t c, const void* px) {
-    if (auto* fb = PackRegistry::instance().builder(b)) fb->add_image(key ? key : "", w, h, c, px);
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return;
+    xi::mp::Bytes desc = xi::make_image_desc(w, h, c, "u8");   // {t,w,h,c,dt}
+    if (desc.empty()) return;                                  // bad shape/dtype
+    fb->add_blob(key ? key : "", desc.data(), int32_t(desc.size()),
+                 px, int64_t(w) * int64_t(h) * int64_t(c));
 }
+// adopt_image over a RAW pixel handle: a raw pool buffer has no self-describing
+// head, so zero-copy adoption is impossible in the blob plane. The adapter
+// COPIES the pixels into a freshly-minted headed "xi/image" blob — keeping the
+// frozen slot honest (get_image still returns the pixels) rather than dropping
+// the entry. The caller keeps its own handle ref (we do NOT addref); it releases
+// as before. Zero-copy image hand-off is now: blob_mint(xi/image desc) → DMA into
+// the payload → builder_adopt_blob (package D migrates producers to it).
 inline void f_adopt_image(xi_pack_builder b, const char* key,
                           int32_t w, int32_t h, int32_t c, xi_image_handle handle) {
-    if (auto* fb = PackRegistry::instance().builder(b))
-        fb->adopt_image(key ? key : "", w, h, c, handle);
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return;
+    const size_t need = size_t(w) * size_t(h) * size_t(c);
+    auto px = xi::pack_pool::view(handle);           // {} for a dead handle
+    if (px.size() < need) return;                    // fail-closed on short/dead
+    xi::mp::Bytes desc = xi::make_image_desc(w, h, c, "u8");
+    if (desc.empty()) return;
+    fb->add_blob(key ? key : "", desc.data(), int32_t(desc.size()),
+                 px.data(), int64_t(need));
 }
 // Finding ⑦: canonicalize foreign msgpack AT THE C-ABI SEAM. Before this fix
 // "all foreign msgpack is canonicalized at ingress" was a CONVENTION — only
@@ -375,17 +398,26 @@ inline int32_t f_get_bin(xi_pack_handle f, const char* key, const void** ptr, in
     if (len) *len = (int32_t)v->size();
     return 1;
 }
+// get_image adapter: parse a Blob whose descriptor is "xi/image" back into the
+// frozen xi_pack_image shape (w/h/c from the descriptor, pixels = the payload).
+// Fail-closed (0) if the key is absent, not a blob, or not an xi/image blob.
 inline int32_t f_get_image(xi_pack_handle f, const char* key, xi_pack_image* out) {
     Pack* fr = PackRegistry::instance().pack(f);
     if (!fr || !key) return 0;
-    auto v = fr->get_image(key);
-    if (!v) return 0;
+    auto bv = fr->get_blob(key);
+    if (!bv) return 0;
+    auto t = Pack::desc_find_str(bv->desc, "t");
+    if (!t || *t != std::string_view("xi/image")) return 0;
+    auto w = Pack::desc_find_i64(bv->desc, "w");
+    auto h = Pack::desc_find_i64(bv->desc, "h");
+    auto c = Pack::desc_find_i64(bv->desc, "c");
+    if (!w || !h || !c) return 0;
     if (out) {
-        out->width    = v->width;
-        out->height   = v->height;
-        out->channels = v->channels;
-        out->pixels   = v->pixels.data();
-        out->length   = (int32_t)v->pixels.size();
+        out->width    = int32_t(*w);
+        out->height   = int32_t(*h);
+        out->channels = int32_t(*c);
+        out->pixels   = bv->payload.data();
+        out->length   = int32_t(bv->payload.size());
     }
     return 1;
 }
@@ -399,86 +431,45 @@ inline int32_t f_get_mp(xi_pack_handle f, const char* key, const void** ptr, int
     return 1;
 }
 
-// ---- xi.pack@3 trampolines (the slab-generation supplement) -----------------
-// Same registry, same handle/builder ids as v1 — @3 only adds verbs. Builder
-// verbs return 1 = entry added, 0 = refused (fail-closed, nothing added);
-// getters follow v1's 1/0 discipline. dtype/type_id are range-checked HERE
-// (the container asserts compile out in Release; the door must stay honest
-// against a foreign caller).
-inline bool valid_dtype_(int32_t d) {
-    return d >= int32_t(PackDtype::U8) && d <= int32_t(PackDtype::F64);
+// ---- xi.pack@4 trampolines (the self-describing blob door, spec 30) ----------
+// Same registry, same handle/builder ids as v1 — @4 only adds the blob surface.
+// Builder verbs return 1 = entry added, 0 = refused (fail-closed, nothing added);
+// getters follow v1's 1/0 discipline. Descriptor validity (canonical map, head
+// bounds) is enforced by the core seam (blob_head_validate / mint_blob).
+inline xi_image_handle f4_blob_mint(const void* desc, int32_t desc_len,
+                                    int64_t payload_len, void** payload_out) {
+    xi::BufRef ref = xi::mint_blob(desc, desc_len, payload_len);
+    if (!ref) { if (payload_out) *payload_out = nullptr; return XI_IMAGE_NULL; }
+    if (payload_out) *payload_out = ref.payload();
+    return ref.take();   // hand rc1 to the C caller; adopt addrefs, caller releases its ref
 }
-inline int32_t f3_add_tensor(xi_pack_builder b, const char* key,
-                             int32_t w, int32_t h, int32_t c,
-                             int32_t dtype, const void* elems) {
-    if (!valid_dtype_(dtype)) return 0;
+inline int32_t f4_builder_adopt_blob(xi_pack_builder b, const char* key,
+                                     xi_image_handle h) {
     auto* fb = PackRegistry::instance().builder(b);
     if (!fb) return 0;
-    return fb->add_tensor(key ? key : "", w, h, c, PackDtype(dtype), elems) ? 1 : 0;
+    return fb->adopt_blob(key ? key : "", h) ? 1 : 0;
 }
-inline int32_t f3_adopt_tensor(xi_pack_builder b, const char* key,
-                               int32_t w, int32_t h, int32_t c,
-                               int32_t dtype, xi_image_handle handle) {
-    if (!valid_dtype_(dtype)) return 0;
+inline int32_t f4_builder_add_blob(xi_pack_builder b, const char* key,
+                                   const void* desc, int32_t desc_len,
+                                   const void* payload, int64_t payload_len) {
     auto* fb = PackRegistry::instance().builder(b);
     if (!fb) return 0;
-    return fb->adopt_tensor(key ? key : "", w, h, c, PackDtype(dtype), handle) ? 1 : 0;
+    return fb->add_blob(key ? key : "", desc, desc_len, payload, payload_len) ? 1 : 0;
 }
-inline int32_t f3_add_blob(xi_pack_builder b, const char* key,
-                           int32_t type_id, const void* data, int32_t len) {
-    if (type_id < XI_PACK_TYPE_USER_BASE || type_id > 0xFFFF || len <= 0) return 0;
-    auto* fb = PackRegistry::instance().builder(b);
-    if (!fb) return 0;
-    return fb->add_blob(key ? key : "", uint16_t(type_id), data, size_t(len)) ? 1 : 0;
-}
-inline int32_t f3_adopt_bin(xi_pack_builder b, const char* key,
-                            int32_t type_id, xi_image_handle handle) {
-    if (type_id != 0 && (type_id < XI_PACK_TYPE_USER_BASE || type_id > 0xFFFF))
-        return 0;
-    auto* fb = PackRegistry::instance().builder(b);
-    if (!fb) return 0;
-    return fb->adopt_bin(key ? key : "", uint16_t(type_id), handle) ? 1 : 0;
-}
-inline int32_t f3_get_tensor(xi_pack_handle f, const char* key, xi_pack_tensor* out) {
-    Pack* fr = PackRegistry::instance().pack(f);
-    if (!fr || !key) return 0;
-    auto v = fr->get_tensor(key);
-    if (!v) return 0;
-    if (out) {
-        out->width     = v->width;
-        out->height    = v->height;
-        out->channels  = v->channels;
-        out->dtype     = int32_t(v->dtype);
-        out->elem_size = int32_t(v->elem_size);
-        out->length    = int32_t(v->bytes.size());
-        out->data      = v->bytes.data();
-        out->handle    = v->handle;
-    }
-    return 1;
-}
-inline int32_t f3_get_blob(xi_pack_handle f, const char* key,
-                           int32_t* type_id, const void** ptr, int32_t* len) {
+inline int32_t f4_get_blob(xi_pack_handle f, const char* key,
+                           const void** desc, int32_t* desc_len,
+                           const void** payload, int64_t* payload_len) {
     Pack* fr = PackRegistry::instance().pack(f);
     if (!fr || !key) return 0;
     auto v = fr->get_blob(key);
     if (!v) return 0;
-    if (type_id) *type_id = int32_t(v->type_id);
-    if (ptr)     *ptr     = v->bytes.data();
-    if (len)     *len     = int32_t(v->bytes.size());
+    if (desc)        *desc        = v->desc.data();
+    if (desc_len)    *desc_len    = int32_t(v->desc.size());
+    if (payload)     *payload     = v->payload.data();
+    if (payload_len) *payload_len = v->payload_len;
     return 1;
 }
-inline int32_t f3_type_id_of(xi_pack_handle f, const char* key) {
-    Pack* fr = PackRegistry::instance().pack(f);
-    if (!fr || !key) return -1;
-    auto t = fr->type_id_of(key);
-    return t ? int32_t(*t) : -1;
-}
-inline int32_t f3_type_id_at(xi_pack_handle f, int32_t i) {
-    Pack* fr = PackRegistry::instance().pack(f);
-    if (!fr || i < 0 || (size_t)i >= fr->size()) return -1;
-    return int32_t(fr->type_id_at((size_t)i));
-}
-inline int32_t f3_entry_at(xi_pack_handle f, int32_t i, xi_pack_entry* out) {
+inline int32_t f4_entry_at(xi_pack_handle f, int32_t i, xi_pack_entry* out) {
     Pack* fr = PackRegistry::instance().pack(f);
     if (!fr || i < 0 || (size_t)i >= fr->size()) return 0;
     Pack::EntryView e = fr->entry_at((size_t)i);
@@ -486,7 +477,6 @@ inline int32_t f3_entry_at(xi_pack_handle f, int32_t i, xi_pack_entry* out) {
         out->key      = e.key.data();
         out->key_len  = int32_t(e.key.size());
         out->tag      = int32_t(e.tag);
-        out->type_id  = int32_t(e.type_id);
         out->external = e.external ? 1 : 0;
     }
     return 1;
@@ -579,33 +569,29 @@ inline const xi_pack_v1* pack_v1_iface() {
     return &iface;
 }
 
-// The process-stable xi.pack@3 supplement (tensor / user blob / adopt_bin /
-// ordinal type_id+entry iteration). Same Meyers-singleton discipline as v1:
-// the address and every fn-pointer are stable for the host's life. A consumer
-// resolves it ALONGSIDE v1 — lifetime/scalars/emit stay v1 verbs.
-inline const xi_pack_v3* pack_v3_iface() {
-    static const xi_pack_v3 iface = {
-        &pack_abi_detail::f3_add_tensor,
-        &pack_abi_detail::f3_adopt_tensor,
-        &pack_abi_detail::f3_add_blob,
-        &pack_abi_detail::f3_adopt_bin,
-        &pack_abi_detail::f3_get_tensor,
-        &pack_abi_detail::f3_get_blob,
-        &pack_abi_detail::f3_type_id_of,
-        &pack_abi_detail::f3_type_id_at,
-        &pack_abi_detail::f3_entry_at,
+// The process-stable xi.pack@4 supplement (self-describing blob door, spec 30).
+// Same Meyers-singleton discipline as v1: the address and every fn-pointer are
+// stable for the host's life. A consumer resolves it ALONGSIDE v1 — lifetime/
+// scalars/str/bin/mp/emit + the @1 image-adapter slots stay v1 verbs.
+inline const xi_pack_v4* pack_v4_iface() {
+    static const xi_pack_v4 iface = {
+        &pack_abi_detail::f4_blob_mint,
+        &pack_abi_detail::f4_builder_adopt_blob,
+        &pack_abi_detail::f4_builder_add_blob,
+        &pack_abi_detail::f4_get_blob,
+        &pack_abi_detail::f4_entry_at,
     };
     return &iface;
 }
 
 // Publish the Pack data plane so host->get_interface("xi.pack", 1) resolves it
-// (and ("xi.pack", 3) the slab supplement), and wire the dispatch releaser so a
-// pack event's ref is dropped correctly.
+// (and ("xi.pack", 4) the blob supplement, spec 30), and wire the dispatch
+// releaser so a pack event's ref is dropped correctly.
 // Idempotent; call once next to install_trigger_hook (default_host_api / certify)
 // and in any test that builds a host_api it drives packs through.
 inline void install_pack_abi() {
     ImagePool::publish_pack_iface(pack_v1_iface());
-    ImagePool::publish_pack3_iface(pack_v3_iface());
+    ImagePool::publish_pack4_iface(pack_v4_iface());
     ImagePool::publish_pack_sweeper(&pack_abi_detail::f_sweep_packs_for);
     ImagePool::publish_pack_untagger(&pack_abi_detail::f_untag_pack_ref);
     TriggerBus::instance().set_pack_releaser(&pack_abi_detail::f_release_for_bus);

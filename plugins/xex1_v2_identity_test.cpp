@@ -42,9 +42,10 @@
 //   3. wire == disk: the emitted frame written to a file and read back is
 //      byte-identical (a record_save-style dump is a byte copy).
 //
-// Images ride the large plane exactly as before: pixels are pooled and inlined
-// as `bin` on export (doc 07 D1/D2), and we assert the inlined pixels equal
-// the pool buffer exactly.
+// Blobs (spec 30 — xi/image included) ride the large plane: the pooled buffer's
+// ENTIRE self-describing head+payload is inlined as one `bin` on export
+// (memory == wire), and we assert the inlined pixels (the blob's payload) appear
+// in the wire bytes exactly.
 //
 #include <xi/xi_pack.hpp>       // xi::Pack / xi::PackBuilder (the slab container)
 #include <xi/xi_image_pool.hpp>  // ImagePool (pooled image pixels) + leak oracle
@@ -90,7 +91,7 @@ static std::vector<uint8_t> reencode(const xi::Pack& f, std::string_view key, xi
         case xi::PackTag::Str:  w.str(*f.get_str(key)); break;
         case xi::PackTag::Mp:  { auto s = *f.get_mp(key); w.raw_canonical(s.data(), s.size()); break; }
         case xi::PackTag::Bin: { auto s = *f.get_bin(key); w.bin(s.data(), s.size()); break; }
-        default: break;   // Image/Tensor have no single canonical scalar form
+        default: break;   // Blob has no single canonical scalar form (rides verbatim)
     }
     return w.take();
 }
@@ -126,7 +127,11 @@ int main() {
         b.add_bool("pass", true);
         b.add_str("label", "ok");
         b.add_mp("blobs", blobs_mp.data(), blobs_mp.size());
-        b.add_image("frame", 2, 2, 1, pixels.data());
+        // A pooled xi/image self-describing blob (spec 30): descriptor
+        // {"t":"xi/image","w":2,"h":2,"c":1,"dt":"u8"} + the 4 raw pixels.
+        xi::mp::Bytes img_desc = xi::make_image_desc(2, 2, 1, "u8");
+        b.add_blob("frame", img_desc.data(), (int32_t)img_desc.size(),
+                   pixels.data(), (int64_t)pixels.size());
         pack = b.seal();
     }
     CHECK(pack.size() == 8);
@@ -177,10 +182,14 @@ int main() {
         xi::xex1::V3Entry v;
         v.key = std::string(e.key);
         v.tag = (uint8_t)e.tag;
-        if (e.tag == xi::PackTag::Image) {
-            auto im = *pack.get_image(e.key);
-            v.w = im.width; v.h = im.height; v.c = im.channels;
-            v.px = im.pixels.data(); v.px_len = im.pixels.size();
+        if (e.tag == xi::PackTag::Blob) {
+            // The blob rides the wire as its ENTIRE self-describing buffer
+            // verbatim (spec 30): desc sits at buffer+8, payload at
+            // buffer+payload_off, so the whole buffer is [desc-8 .. payload+len).
+            auto bv = *pack.get_blob(e.key);
+            const uint8_t* buf = bv.desc.data() - 8;
+            v.blob = buf;
+            v.blob_len = (size_t)((bv.payload.data() + bv.payload_len) - buf);
             entries_indep.push_back(v);
         } else {
             xi::mp::Writer w;

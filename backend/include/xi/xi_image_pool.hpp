@@ -353,7 +353,21 @@ public:
 
     // ---- create / release -------------------------------------------
 
+    // create() returns ZEROED pixels (the documented external contract).
+    // create_uninit() is the identical mint but SKIPS the zero-fill — for a
+    // caller that immediately full-overwrites the buffer (pack_pool::alloc_bytes
+    // memcpy's a non-null src over every byte), where the memset is pure waste
+    // (doc 28 zeroinit verdict). NEVER use create_uninit for a writable canvas a
+    // consumer may read before writing — that path keeps create()'s zero-fill.
     xi_image_handle create(int32_t w, int32_t h, int32_t ch) {
+        return create_(w, h, ch, /*zero_fill=*/true);
+    }
+    xi_image_handle create_uninit(int32_t w, int32_t h, int32_t ch) {
+        return create_(w, h, ch, /*zero_fill=*/false);
+    }
+
+private:
+    xi_image_handle create_(int32_t w, int32_t h, int32_t ch, bool zero_fill) {
         // D-P1-7: validate dimensions BEFORE entering counter / slot
         // bookkeeping. The original `(size_t)w * h * ch` cast applies
         // only to the first multiplicand; `h * ch` is int32 mul first,
@@ -385,7 +399,9 @@ public:
         // path for the hot same-size case: the memset writes warm, already-
         // faulted-in pages instead of malloc + zero + first-touch faults.
         // Flip kZeroFillCreate ONLY with proof no caller reads-before-write.
-        if (kZeroFillCreate)
+        // zero_fill=false (create_uninit) skips it for a caller that immediately
+        // full-overwrites the buffer.
+        if (kZeroFillCreate && zero_fill)
             std::memset(entry->buf.mem, 0, (size_t)pixels);
         entry->width    = w;
         entry->height   = h;
@@ -420,6 +436,7 @@ public:
         return ((uint64_t)gen << SLOT_BITS) | (uint64_t)idx;
     }
 
+public:
     void addref(xi_image_handle h) {
         if (auto* e = lookup(h)) {
             e->refcount.fetch_add(1, std::memory_order_relaxed);
@@ -858,16 +875,17 @@ public:
     static void publish_pack_iface(const void* iface) {
         pack_iface_slot().store(iface, std::memory_order_release);
     }
-    // pack-v3: the xi.pack@3 slab-generation supplement (const xi_pack_v3* —
-    // tensor entries, user-typed blobs, adopt_bin, ordinal type_id/entry
-    // iteration), published by the same install_pack_abi through the same
-    // layering bridge. Null until installed / on a host predating @3.
-    static std::atomic<const void*>& pack3_iface_slot() {
+    // blob plane (spec 30): the xi.pack@4 self-describing-blob door (const
+    // xi_pack_v4* — blob_mint/adopt_blob/add_blob/get_blob + ordinal entry_at),
+    // published by the same install_pack_abi through the same layering bridge.
+    // Replaces the retired @3 slot. Null until installed / on a host with no
+    // blob plane.
+    static std::atomic<const void*>& pack4_iface_slot() {
         static std::atomic<const void*> slot{nullptr};
         return slot;
     }
-    static void publish_pack3_iface(const void* iface) {
-        pack3_iface_slot().store(iface, std::memory_order_release);
+    static void publish_pack4_iface(const void* iface) {
+        pack4_iface_slot().store(iface, std::memory_order_release);
     }
 
     // Pack-plane hardening: the PackRegistry OWNER-SWEEP bridge — the pack
@@ -1020,11 +1038,12 @@ public:
         // (slot-bridged from xi_pack_abi.hpp; null on a host with no pack plane).
         if (std::strcmp(id, "xi.pack") == 0 && version == 1)
             return pack_iface_slot().load(std::memory_order_acquire);
-        // pack-v3: the slab-generation supplement to xi.pack@1 (tensor/blob/
-        // adopt_bin/ordinal iteration). The version matches the container
-        // generation — there was never an xi.pack@2, and 2 answers NULL.
-        if (std::strcmp(id, "xi.pack") == 0 && version == 3)
-            return pack3_iface_slot().load(std::memory_order_acquire);
+        // blob plane (spec 30): the xi.pack@4 self-describing-blob supplement to
+        // xi.pack@1. The retired @3 (and the never-existed @2) answer NULL by
+        // falling through — no version branch produces them. TODO(selfdesc-B):
+        // wire is package C.
+        if (std::strcmp(id, "xi.pack") == 0 && version == 4)
+            return pack4_iface_slot().load(std::memory_order_acquire);
         // Capability plane (docs/new_gen/14 pilot), published via
         // install_cap_plane (slot-bridged from xi_cap_abi.hpp; null on a host
         // with no capability plane). ZERO xi_host_api slots — both directions

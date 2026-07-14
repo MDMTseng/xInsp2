@@ -127,10 +127,18 @@ public:
                 case XI_PACK_TAG_MP:
                     f.mp(e.key.c_str(), vp, vn);   // canonical nested bytes, verbatim
                     break;
-                case XI_PACK_TAG_IMAGE:
-                    // Dims/px length already proven consistent by the parser.
-                    f.image(e.key.c_str(), e.w, e.h, e.c, pf.at(e.px_off));
+                case XI_PACK_TAG_BLOB: {
+                    // Self-describing blob (spec 30): the parser blob_head_validate'd
+                    // the whole buffer; extract the descriptor + payload and rebuild
+                    // via the @4 blob door (PackOut::blob mints + copies). The
+                    // rebuilt buffer is byte-identical (deterministic head).
+                    const uint8_t* buf = pf.at(e.blob_off);
+                    const uint32_t desc_len = xi::pack_mp_detail::get_u32_le(buf + 4);
+                    const uint64_t payload_off = xi::blob_payload_off(desc_len);
+                    f.blob(e.key.c_str(), buf + 8, (int32_t)desc_len,
+                           buf + payload_off, (int64_t)((uint64_t)e.blob_len - payload_off));
                     break;
+                }
                 default: break;   // unreachable: the parser refused unknown tags
             }
         }

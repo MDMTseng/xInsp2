@@ -1,13 +1,17 @@
-# Pack plane — the v3 uniform keyed-buffer data currency
+# Pack plane — the uniform keyed-buffer data currency
 
-**Shipped design-of-record (polaris2 waves 1–2 + U1–U3).** The Pack is the v3
-data currency: one uniform container — `key(string) → (type tag, const bytes)` —
-with no image/metadata split (an image is just an entry whose tag says "image"
-and whose pixels live in a pool buffer). It runs **alongside** the Record plane
-(`data-layer.md`) as a transitional dual carry until THE CUT; a plugin or script
-can speak either or both. Decision record:
-[`../new_gen/07-uniform-keyed-buffer-plane.md`](../new_gen/07-uniform-keyed-buffer-plane.md);
-canonical headers: `xi_pack.hpp` (container), `xi_pack_abi.hpp` (host door),
+**Shipped design-of-record (polaris2 waves 1–2 + U1–U3; self-describing blob
+plane, spec 30).** The Pack is the data currency: one uniform container —
+`key(string) → (type tag, const bytes)` — with **no image/tensor special case**.
+Every non-scalar payload is a **self-describing blob**: a pool buffer whose head
+describes its own payload, with `xi/image` reduced to a *convention type* carried
+in the blob's descriptor. The core owns buffers and dispatch, not images. It runs
+**alongside** the Record plane (`data-layer.md`) as a transitional dual carry
+until THE CUT; a plugin or script can speak either or both. Decision records:
+[`../new_gen/07-uniform-keyed-buffer-plane.md`](../new_gen/07-uniform-keyed-buffer-plane.md)
+(the plane) + [`../new_gen/30-self-describing-blob-plane.md`](../new_gen/30-self-describing-blob-plane.md)
+(the blob cut, supersedes the @3 image/tensor/type_id surface); canonical
+headers: `xi_pack.hpp` (container), `xi_pack_abi.hpp` (host door),
 `xi_pack_contract.hpp` (reserved keys + fault contract), `xi_mp.hpp` (codec),
 `xi_ingress.hpp` (untrusted edge).
 
@@ -34,13 +38,16 @@ contiguous slab** + N pool-backed EXTERN buffers, resolved behind one API (D1
   bytes, and a typed read skips the fixed-width header at a known offset (one
   branch, zero-copy for str/bin). NaN doubles are flattened to the one quiet
   pattern at `add_f64` time (ruling 1, applied by the canonical encoder).
-- **EXTERN entries** — images, tensors, and binaries ≥ the 4096-byte
+- **EXTERN entries** — every **blob** and every binary ≥ the 4096-byte
   `kPackLargeThreshold` do *not* live in the slab. They are raw ImagePool
   buffers referenced by handle, minted **only** through the typeless
   `pack_pool` facade (a typeless N-byte buffer is an (N,1,1) image) — the
   privileged mint path of doc 07's ingress rule. The slab payload holds a
-  24-byte `ExtRecord {handle, logical w/h/c, byte length}` per EXTERN entry;
-  the DirEntry points at it, so the pack carries the *logical* dims itself.
+  **16-byte `ExtRecord {handle, total_len}`** per EXTERN entry; the DirEntry
+  points at it. The logical *shape* retired with images/tensors — a blob's
+  shape lives in its **descriptor**, not any core struct. `DirEntry::type_id`
+  reverted to a reserved-zero field (the dtype-in-type_id / user-blob-type
+  encoding is deleted).
 - **Recycling** — the slab buffer is borrowed from / returned to the
   per-thread **`SlabPool` freelist** (the previous `ArenaPool`, renamed), and
   the builder's staging vectors recycle through a per-thread scratch pool, so
@@ -53,15 +60,64 @@ contiguous slab** + N pool-backed EXTERN buffers, resolved behind one API (D1
   during static teardown — finds the pointer null and frees its slab outright
   instead of touching a freelist vector that was already destroyed. The one
   recycle pool a dropped pack reaches never becomes a teardown UAF.
-- **NEW first-class entries (additive):** `PackTag::Tensor` — logical shape
-  `{w,h,c}` + a `PackDtype` (`U8…F64`, carried in `DirEntry::type_id`) over a
-  pool buffer, via `add_tensor` / `get_tensor` / `get_tensor_of<T>` (dtype
-  mismatch fails closed); and `add_blob(type_id)` user blobs (`type_id ≥
-  kPackTypeUserBase`), read back like any bin plus `type_id_at`. There is
-  deliberately **no `xi_pack_v1` door accessor for Tensor** — that surface
-  ships on the clean **`xi.pack@3` door** (additive vtable alongside the
-  frozen v1: dtype tensors, typed blobs, `adopt_bin`, ordinal iteration —
-  see `c-abi.md` §6.1b).
+- **Self-describing blobs (`PackTag::Blob`, always EXTERN).** The one
+  non-scalar entry kind (spec 30). A blob's pool buffer's *head describes its
+  own payload*:
+
+  ```
+  +0   u32  magic 'XBD1' (0x31444258 LE)      — fail-loud discriminator
+  +4   u32  desc_len                           — bytes of descriptor msgpack
+  +8   canonical msgpack map (the descriptor, string keys)
+  +8+desc_len … zero pad …
+  +payload_off = align_up(8 + desc_len, 64)    — payload, 64B-aligned
+  +payload_off + payload_len = total buffer length
+  ```
+
+  Base is 64B-aligned (pool guarantee) and `payload_off` is a multiple of 64,
+  so the **payload is always 64B-aligned** (SIMD / `cv::Mat` wrap / GPU upload).
+  The descriptor is a **canonical msgpack map**; the core validates *form* only
+  and interprets no key. `"t"` (a namespaced type string, e.g. `"xi/image"`,
+  `"acme-scan/profile3d"`) is required **by convention** and read only as sugar
+  (`type_of`) — the core owns no type space. Verbs:
+  - `mint_blob(desc, desc_len, payload_len) → BufRef` — writes the head, returns
+    the buffer with a pointer to the 64B-aligned payload region for **in-place
+    fill** (camera DMA lands at `base+payload_off`); RAII (`BufRef` releases its
+    mint ref on drop).
+  - `adopt_blob(key, BufRef/handle)` — validates the head, addrefs, pack co-owns
+    (zero copies).
+  - `add_blob(key, desc, desc_len, payload, payload_len)` — mint + copy
+    convenience.
+  - `get_blob(key) → {desc mp view, payload span, payload_len, handle}`;
+    `type_of(key)` reads `"t"`.
+  - `blob_head_validate(base, len)` — the ONE fail-loud validation seam (magic,
+    `desc_len` bounds, canonical-map descriptor, `payload_off ≤ len`), reused by
+    `adopt_blob` and exported for the door/wire packages.
+  - Convention helpers on top (core, but interpret nothing): `BlobDesc` (a
+    canonical-map writer), `make_image_desc(w,h,c,dt)`, `mint_image(w,h,c,dt)`,
+    and `Pack::desc_find_str/desc_find_i64` (the SDK image accessors read
+    `w/h/c/dt` through these).
+
+  - **Padded sub-layout inside a payload (`xi_blob_head.hpp`).** A custom type
+    often lays its payload out as `[own info][pad][bulk data]` so the bulk region
+    is aligned for SIMD / `cv::Mat` wrap / GPU upload. Because the payload *base*
+    is already 64B-aligned, `align_up` **within** the payload gives the bulk
+    absolute alignment. `padded_layout(head_len, data_len, align=64) → {data_off,
+    total}` (overflow-checked, fail-loud) does the offset math, and
+    `place_padded_head(payload, head_bytes, layout)` memcpys the head, **zeroes
+    the pad gap** (deterministic — the whole payload rides the wire verbatim), and
+    returns the aligned bulk pointer. This is **mechanics, not per-type sugar**
+    (the spec-30 sugar-boundary ruling): it is convention-neutral — writes no key
+    and names nothing — so the caller records `data_off` in its *own* descriptor
+    (e.g. `{"t":"acme/scan","data_off":…}`) for a reader to resolve the bulk.
+
+  > **Retired with the blob cut (spec 30):** `PackTag::Image` / `PackTag::Tensor`,
+  > `PackDtype` + the dtype-in-`type_id` encoding, `kPackTypeUserBase` + the
+  > user-blob type space, `ExtRecord`'s `w/h/c`, and the `add_image` /
+  > `adopt_image` / `add_tensor` / `adopt_tensor` / `get_image` / `get_tensor` /
+  > `get_tensor_of` / `type_id_of` core verbs. The **`xi.pack@3` door is slated
+  > for deletion** and **`xi.pack@4`** (the blob door) replaces it; the frozen
+  > `xi.pack@1` image slots become ~30-line door adapters over the blob rep
+  > (package B). Wire gains one blob arm and drops the image arm (package C).
 
 ### ImagePool pixel storage — the size-class recycler (`pixpool`)
 
@@ -79,11 +135,17 @@ buffer from a size-class recycler** (`pixpool` in `xi_image_pool.hpp`):
   buffers/class/thread and ≤ 64 MiB/class/thread (so the 64 MiB class keeps 1);
   shelf ≤ 32 buffers/class and ≤ 128 MiB/class (so the 64 MiB class hoards at
   most 2). Over-budget frees go straight to the heap.
-- **Zero-fill contract unchanged:** `create()` still returns zeroed pixels —
-  recycled buffers are `memset` (callers exist that paint onto a "blank"
-  canvas). Still ~10x cheaper than the old alloc + zero + first-touch-fault
-  path for the hot same-size case (1920×1200: ~533 µs → ~53 µs per
-  create/release cycle; magazine hit itself is nanoseconds).
+- **Zero-fill contract (default unchanged; a copy-path sibling added):**
+  `create()` still returns zeroed pixels — recycled buffers are `memset`
+  (callers exist that paint onto a "blank" canvas), and every **writable-canvas**
+  mint keeps it (`pack_pool::alloc_canvas`, e.g. `mint_blob`'s payload region and
+  the blob head's pad). A new `create_uninit()` sibling **skips** the memset for
+  a caller that immediately full-overwrites the buffer — `pack_pool::alloc_bytes`
+  memcpy's a non-null src over every byte, so the zero-fill was pure waste (doc 28
+  zeroinit verdict); a **null src is now a hard reject** there (a copy path with
+  nothing to copy is a caller bug, never a silently-zeroed buffer). Still ~10x
+  cheaper than the old alloc + zero + first-touch-fault path for the hot same-size
+  case (1920×1200: ~533 µs → ~53 µs per create/release cycle).
 - **Teardown:** the shelf is intentionally leaked (same doctrine as the
   `ImagePool` singleton), so per-thread magazine destructors can always drain
   survivors to it no matter how late they run.
@@ -103,21 +165,22 @@ become copies, not transformations"), restored after an interim slab state that
 stored scalars raw. The walk API:
 
 - `for_each_entry(fn)` / `entry_at(i)` — visit every entry in insertion order
-  with a typed `EntryView` (key, tag, `type_id`, inline raw span *or* EXTERN
-  shape + borrowed handle).
+  with a typed `EntryView` (key, tag, inline raw span *or* EXTERN `ext_len` +
+  borrowed handle).
 - `canonical_value(i, xi::mp::Writer&)` — append the i-th entry's ONE
   canonical msgpack value. For an INLINE entry this is a **verbatim splice of
-  `raw_at(i)`** (a copy); only EXTERN entries build their wire shape at the
-  edge (a pooled bin re-wrapped as bin32). Image/Tensor entries have no single
-  scalar form and return `false` — their wire shape is the dumper's contract.
+  `raw_at(i)`** (a copy); a pooled bin is re-wrapped as bin32 at the edge. A
+  **Blob** has no single scalar form and returns `false` — its wire arm is the
+  self-describing buffer *verbatim* (memory == wire by construction; the wire
+  package's contract).
 
 The identity "memory == wire" is pinned by
 `plugins/xex1_v2_identity_test.cpp`: **`raw_at(i)` == `canonical_value` == an
 independent `xi::mp::Writer` re-encode == the XEX1-v3 encoder's wire bytes ==
 disk** — a *structural* identity, not a walker convention. `raw_at(i)` returns
 the entry's stored canonical bytes for every inline entry (empty for EXTERN
-entries — resolve those with `get_image`/`get_tensor`/`get_bin`), and
-`arena_bytes()` became `slab_bytes()`.
+entries — resolve those with `get_bin`/`get_blob`), and `arena_bytes()` became
+`slab_bytes()`.
 
 ### One container, one read path
 
@@ -167,12 +230,14 @@ A plugin in another DLL can never see the container's layout. The pack crosses
 as an **opaque `xi_pack_handle`** plus the accessor C functions of `xi_pack_v1`
 (spans in / spans out) — resolved once via `host->get_interface("xi.pack", 1)`.
 The exact vtable (including the additive bool tail and its growth doctrine) is
-documented in [`../reference/c-abi.md`](../reference/c-abi.md). Since the
-pack-v3 slab migration the **`xi.pack@3` supplement** (`xi_pack_v3`, resolved
-alongside @1 via `get_interface("xi.pack", 3)`) surfaces what v1's shape could
-not: dtype-aware tensor entries, user-typed blobs (`type_id`), zero-copy
-`adopt_bin`/`adopt_tensor`, and ordinal-explicit iteration
-(`type_id_at`/`entry_at`) — see c-abi.md §6.1b.
+documented in [`../reference/c-abi.md`](../reference/c-abi.md). The interim
+**`xi.pack@3` supplement** (dtype tensors, user-typed blobs, `adopt_bin`,
+ordinal iteration) is **retired by the blob cut** (spec 30): `xi.pack@4` — the
+blob door (`blob_mint` / `builder_adopt_blob` / `builder_add_blob` / `get_blob`
++ ordinal `entry_at`) — replaces it, and the frozen `xi.pack@1` image slots
+become thin door adapters that synthesize an `xi/image` descriptor over the blob
+representation. Door re-cut is **package B** (c-abi.md updates land with it);
+until then the door/@3 build is expected to break against the new core.
 
 Host-side, **`PackRegistry`** is the handle table: a sealed pack is single-owner
 in C++ but **refcounted across the ABI** (the dispatch event and the emitter can
@@ -214,14 +279,15 @@ inline code is correct on every side). Implementation of
 | `$src` | immediate producer (instance name) |
 | `$prov` | hop chain, `/`-joined, oldest→newest |
 | `$seq` | ordering identity (copied forward on propagation so a fault stays correlatable with its frame) |
-| `$channel` | routing channel — the established expose/XEX1 sink-lane convention (`pack_contract::kChannel`; the v12 replacement for the deleted `xi::Record::kChannelKey`) |
+| `$channel` | routing channel — the established expose/XEX1 sink-lane convention (`pack_contract::kChannel`; the v12 replacement for the deleted `xi::Record::kChannelKey`). **Copied forward on propagation** (like `$seq`/`$stream`) so a short-circuited fault keeps routing to its display/record lane (round-1 doc 28) |
 
 A **fault is a normal sealed pack** carrying `$fault` — never `XI_PACK_NULL`,
 which stays reserved for hard internal failure — so the caller always gets a
 pack to route to a verdict. The host funnel **short-circuits** a fault input:
 `propagate_fault(fi, in, hop)` mints a new sealed pack (original reason +
-`$seq`, `$src` = this hop, hop appended to `$prov`) *without running the
-plugin* — the pack mirror of the Record path's
+`$seq`/`$channel`/`$stream`/`$part`/`$eof` when present, `$src` = this hop, hop
+appended to `$prov`) *without running the plugin* — the pack mirror of the
+Record path's
 `if (in.is_na()) return Record::na(reason).set_src(name)`. By design it carries
 no image/bin payload: a poisoned frame's payload is exactly what downstream must
 not consume.
@@ -310,11 +376,20 @@ draft) files are refused with a sealed `$fault` pack
 
 ## Tests
 
-`test_xi_pack` (container/arena/typed paths), `test_pack_door` (door + registry
-leak oracle), `test_mp` / `test_mp_fixtures` (codec + `protocol/fixtures`
-goldens incl. hostile vectors), `test_ingress`, `test_canonical_xcheck`,
-`test_cap_plane` (the capability plane rides the same pack shapes),
-`record_replay_pack_test` (byte-lossless loop), `bench_pack`.
+`test_xi_pack` (container + the blob surface: mint/adopt/get round-trip with
+64B payload alignment, the `blob_head_validate` rejection matrix, `type_of`,
+image-as-convention, duplicate-key, `sort_idx` recycle, `alloc_bytes` null-src
+reject), `test_pack_door` (door + registry leak oracle), `test_mp` /
+`test_mp_fixtures` (codec + goldens incl. hostile vectors), `test_ingress`,
+`test_canonical_xcheck`, `test_cap_plane` (the capability plane rides the same
+pack shapes), `record_replay_pack_test` (byte-lossless loop), `bench_pack`.
+
+> The blob cut (spec 30) lands in packages: **A (core)** — `xi_pack.hpp` re-cut +
+> blob head/validate seam + SDK/cv descriptor helpers + `test_xi_pack` + the
+> `sort_idx`/uint32-seal-guard/`$channel`/zeroinit ride-alongs (done). **B
+> (doors)**, **C (wire/XEX1)**, **D (fleet migration)** follow; until B/C/D land,
+> the door / script SDK / plugin / `xinsp_backend` build is expected to break
+> against the new core (core + `test_xi_pack` + `test_mp` build standalone).
 
 ## See also
 
