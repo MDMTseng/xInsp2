@@ -184,6 +184,11 @@ struct V3Field {
     std::string          t;
     std::string          dt;
     int32_t              w = 0, h = 0, c = 0;   // xi/image dims (from the descriptor)
+    // WS-preview arm (kind == "preview"): the encoder's WS-SEND substitution for
+    // an xi/image blob. `w/h/c` are the source dims, `bytes` is the JPEG, `pv_q`
+    // the quality — emitted as { preview:{w,h,c,enc:"jpeg",q,data} }. WS-only
+    // (never persisted), but the codec is exercised here so all 3 legs guard it.
+    int32_t              pv_q = 0;
 };
 
 struct FrameV3 {
@@ -223,6 +228,12 @@ std::vector<uint8_t> encode_v3(const FrameV3& f) {
             blob_store.push_back(make_blob_buffer(fld.desc, fld.bytes));
             const std::vector<uint8_t>& buf = blob_store.back();
             e.blob = buf.data(); e.blob_len = buf.size();
+        } else if (fld.kind == "preview") {
+            // WS-preview arm: { preview:{w,h,c,enc:"jpeg",q,data} } (bytes = jpeg).
+            e.tag = XI_PACK_TAG_BLOB;
+            e.preview = true;
+            e.pv_w = fld.w; e.pv_h = fld.h; e.pv_c = fld.c; e.pv_q = fld.pv_q;
+            e.pv_jpeg = fld.bytes.data(); e.pv_len = fld.bytes.size();
         }
         entries.push_back(std::move(e));
     }
@@ -304,6 +315,21 @@ std::vector<FrameV3> build_frames_v3() {
         fs.push_back(std::move(f));
     }
 
+    {
+        // The WS-preview arm (E2, spec 30): an xi/image blob whose raw payload is
+        // substituted on the live wire by { preview:{w,h,c,enc:"jpeg",q,data} }.
+        // WS-SEND-only (record_save never emits it), but pinned here so all three
+        // decoder legs guard the preview shape — the regression that shipped
+        // preview WITHOUT w/h/c would have failed this golden.
+        FrameV3 f; f.name = "v3_preview"; f.channel = "c"; f.seq = 5;
+        V3Field pv; pv.key = "frame"; pv.kind = "preview";
+        pv.w = 4; pv.h = 2; pv.c = 1; pv.pv_q = 80;
+        pv.bytes = synth(24, 'j');   // stand-in JPEG bytes (opaque to the codec)
+        f.fields.push_back(std::move(pv));
+        f.note = "WS-preview arm: { preview:{w,h,c,enc:jpeg,q,data} } — behavior-equivalent to the old IMAGE preview";
+        fs.push_back(std::move(f));
+    }
+
     return fs;
 }
 
@@ -350,6 +376,13 @@ xi::Json manifest_v3(const FrameV3& f) {
             if (fld.t == "xi/image") {
                 j.set("w", fld.w); j.set("h", fld.h); j.set("c", fld.c); j.set("dt", fld.dt);
             }
+        }
+        else if (fld.kind == "preview") {
+            // A decoder surfaces images[key]["preview"] = {w,h,c,enc,q,data}.
+            j.set("w", fld.w); j.set("h", fld.h); j.set("c", fld.c);
+            j.set("q", fld.pv_q); j.set("enc", std::string("jpeg"));
+            j.set("data_b64", b64(fld.bytes));
+            j.set("data_size", (int64_t)fld.bytes.size());
         }
         fields.push(j);
     }

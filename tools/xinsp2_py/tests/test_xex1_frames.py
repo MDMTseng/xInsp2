@@ -89,6 +89,12 @@ def _check_v3(frame: dict, data: bytes) -> None:
                 assert (im["w"], im["h"], im["c"], im["dt"]) == \
                        (fld["w"], fld["h"], fld["c"], fld["dt"])
                 assert im["pixels"] == base64.b64decode(fld["payload_b64"])
+        elif kind == "preview":
+            # WS-preview arm: images[key]["preview"] = {w,h,c,enc,q,data}.
+            pv = dec["images"][key]["preview"]
+            assert (pv["w"], pv["h"], pv["c"]) == (fld["w"], fld["h"], fld["c"])
+            assert pv["enc"] == fld["enc"] and pv["q"] == fld["q"]
+            assert pv["data"] == base64.b64decode(fld["data_b64"])
         elif kind == "bin":
             assert bytes(dec["values"][key]) == base64.b64decode(fld["b64"])
         else:

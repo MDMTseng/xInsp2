@@ -186,9 +186,9 @@
   //
   // A BLOB value is EITHER the entire self-describing buffer verbatim (a
   // Uint8Array — record_save/disk + the non-preview WS path) OR, on expose's
-  // WS-SEND path for an xi/image blob, a map { desc:<bin>, preview:{enc:"jpeg",
-  // q, data:<jpeg bin>} } — a full-resolution compressed substitution (never
-  // persisted). The FE reads dims/type from the descriptor either way.
+  // WS-SEND path for an xi/image blob, a map { preview:{w,h,c,enc:"jpeg",q,
+  // data:<jpeg bin>} } — a full-resolution compressed substitution (never
+  // persisted), the same nested preview map the old IMAGE path emitted.
   const XEX1_TAG_BLOB = 8;
 
   // Validate + split a self-describing blob buffer (spec 30) into { t, desc,
@@ -225,17 +225,14 @@
           images.push({ key: k, t: "xi/image", w: b.desc.w, h: b.desc.h, c: b.desc.c,
                         dt: b.desc.dt, pixels: b.payload });
       } else if (v && typeof v === "object" && v.preview && typeof v.preview === "object") {
-        // WS-SEND preview arm: { desc:<bin>, preview:{enc,q,data} }.
-        let desc = {};
-        if (v.desc instanceof Uint8Array && v.desc.length) {
-          try { const dv = new MsgpackReader(v.desc, 0).read(); if (dv && typeof dv === "object") desc = dv; }
-          catch (err) { /* leave desc empty */ }
-        }
-        const im = { key: k, t: desc.t, w: desc.w, h: desc.h, c: desc.c, dt: desc.dt };
-        if (v.preview.data instanceof Uint8Array)
-          im.preview = { enc: v.preview.enc, q: v.preview.q, data: v.preview.data };
+        // WS-SEND preview arm: { preview:{w,h,c,enc,q,data} } — the same nested
+        // preview map the old IMAGE path emitted (behavior-equivalent).
+        const pv = v.preview;
+        const im = { key: k, w: pv.w, h: pv.h, c: pv.c };
+        if (pv.data instanceof Uint8Array)
+          im.preview = { w: pv.w, h: pv.h, c: pv.c, enc: pv.enc, q: pv.q, data: pv.data };
         images.push(im);
-        blobs.push({ key: k, t: desc.t, desc });
+        blobs.push({ key: k });
       } else {
         values[k] = v;
       }

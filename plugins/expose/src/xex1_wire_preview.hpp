@@ -165,12 +165,13 @@ inline std::vector<uint8_t> encode_pack_v3_wire(const xi::PackIn& in,
                     if (oc == PreviewOutcome::Compressed && !jpeg.empty()) {
                         jpeg_store.push_back(std::move(jpeg));
                         const std::vector<uint8_t>& owned = jpeg_store.back();
-                        e.preview     = true;
-                        e.pv_q        = q;
-                        e.pv_desc     = bl->desc;
-                        e.pv_desc_len = (size_t)bl->desc_len;
-                        e.pv_jpeg     = owned.data();
-                        e.pv_len      = owned.size();
+                        e.preview = true;
+                        e.pv_w    = (int32_t)bw;
+                        e.pv_h    = (int32_t)bh;
+                        e.pv_c    = (int32_t)bc;
+                        e.pv_q    = q;
+                        e.pv_jpeg = owned.data();
+                        e.pv_len  = owned.size();
                     } else {
                         // RawFallback / CodecDown / empty jpeg -> the verbatim
                         // buffer (already set) rides. Never drop the image.

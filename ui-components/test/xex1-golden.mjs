@@ -63,6 +63,16 @@ for (const f of manifest.frames) {
             assert.equal(im.dt, fld.dt);
             assert.deepEqual(new Uint8Array(im.pixels), b64(fld.payload_b64));
           }
+        } else if (fld.kind === "preview") {
+          // WS-preview arm: images[key].preview = {w,h,c,enc,q,data}.
+          const im = body.images.find((x) => x.key === fld.key);
+          assert.ok(im && im.preview, `v3 preview entry ${fld.key} missing`);
+          assert.equal(im.preview.w, fld.w);
+          assert.equal(im.preview.h, fld.h);
+          assert.equal(im.preview.c, fld.c);
+          assert.equal(im.preview.enc, fld.enc);
+          assert.equal(im.preview.q, fld.q);
+          assert.deepEqual(new Uint8Array(im.preview.data), b64(fld.data_b64));
         } else if (fld.kind === "bin") {
           assert.deepEqual(new Uint8Array(body.values[fld.key]), b64(fld.b64));
         } else {

@@ -170,9 +170,10 @@ def _decode_xex1_v3(body: dict) -> dict:
     A BLOB value is EITHER:
       * bytes  — the entire self-describing buffer verbatim (record_save/disk +
         the non-preview WS path). Head-validated + split here.
-      * a map { desc:<bytes>, preview:{enc:"jpeg", q, data:<jpeg bytes>} } —
-        expose's WS-SEND-only full-resolution compressed substitution for an
-        xi/image blob (never persisted). Surfaces the preview under images[key]."""
+      * a map { preview:{w,h,c,enc:"jpeg", q, data:<jpeg bytes>} } — expose's
+        WS-SEND-only full-resolution compressed substitution for an xi/image blob
+        (never persisted; the same nested preview map the old IMAGE path emitted).
+        Surfaces the preview under images[key]."""
     frame = body.get("frame") or {}
     values: dict = {}
     images: dict = {}
@@ -193,18 +194,12 @@ def _decode_xex1_v3(body: dict) -> dict:
                              "c": d.get("c"), "dt": d.get("dt"),
                              "pixels": b["payload"], "desc": d}
         elif isinstance(v, dict) and "preview" in v:
-            # WS-SEND preview arm (never persisted). desc carries the type/dims.
-            desc_bytes = bytes(v.get("desc") or b"")
-            desc: dict = {}
-            if desc_bytes:
-                dv, _ = _mp(desc_bytes, 0)
-                if isinstance(dv, dict):
-                    desc = dv
+            # WS-SEND preview arm (never persisted): { preview:{w,h,c,enc,q,data} }
+            # — the same nested preview map the old IMAGE path emitted.
             pv = v["preview"]
-            entry = {"t": desc.get("t"), "desc": desc,
-                     "w": desc.get("w"), "h": desc.get("h"), "c": desc.get("c"),
-                     "dt": desc.get("dt"),
-                     "preview": {"enc": pv.get("enc"), "q": pv.get("q"),
+            entry = {"w": pv.get("w"), "h": pv.get("h"), "c": pv.get("c"),
+                     "preview": {"w": pv.get("w"), "h": pv.get("h"), "c": pv.get("c"),
+                                 "enc": pv.get("enc"), "q": pv.get("q"),
                                  "data": bytes(pv.get("data") or b"")}}
             images[k] = entry
             blobs[k] = entry

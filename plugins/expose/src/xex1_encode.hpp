@@ -157,19 +157,18 @@ struct V3Entry {
     // --- WS-wire preview substitution (E2) — expose's SEND path ONLY ----------
     // When `preview` is set on an xi/image BLOB entry, the verbatim buffer leaves
     // the wire and the entry becomes a preview map instead:
-    //   { "desc":<bin: the blob's descriptor bytes>,
-    //     "preview":{ "enc":"jpeg", "q":<int>, "data":<jpeg bin> } }
-    // so the FE reads w/h/c/dt from the descriptor and renders the compressed
-    // image. record_save NEVER sets this (its walk is
+    //   { "preview":{ "w","h","c", "enc":"jpeg", "q":<int>, "data":<jpeg bin> } }
+    // — the SAME nested preview map the old IMAGE-tag path emitted (behavior-
+    // equivalent), just under the BLOB tag. The FE reads dims + renders the JPEG
+    // from it. record_save NEVER sets this (its walk is
     // xex1_pack_dump.hpp::encode_pack_v3, which leaves `preview` default-false),
     // so its disk bytes stay the verbatim buffer and memory ≈ disk is preserved.
     // TODO(preview-egress): the jpeg-compress/dedup/renderer-registry egress
     // design (CT) is not yet spec'd — this is the behavior-equivalent minimal
     // migration of the old IMAGE-tag preview.
     bool                 preview = false;
+    int32_t              pv_w = 0, pv_h = 0, pv_c = 0;   // source dims (from the descriptor)
     int32_t              pv_q = 0;              // JPEG quality used
-    const uint8_t*       pv_desc = nullptr;     // the blob's descriptor bytes (must outlive encode)
-    size_t               pv_desc_len = 0;
     const uint8_t*       pv_jpeg = nullptr;     // compressed bytes (must outlive encode)
     size_t               pv_len = 0;
 };
@@ -208,14 +207,17 @@ inline std::vector<uint8_t> encode_frame_v3(
         if (e.tag == XI_PACK_TAG_BLOB) {
             if (e.preview) {
                 // E2 WS-wire preview (xi/image blobs): the verbatim buffer leaves
-                // the wire; the entry becomes { desc, preview{enc,q,data} } so the
-                // FE reads dims from the descriptor and renders the JPEG.
-                // record_save never reaches this branch.
+                // the wire; the entry becomes { preview{w,h,c,enc,q,data} } — the
+                // SAME nested preview map the old IMAGE path emitted, so the FE
+                // and consumers read identical output. record_save never reaches
+                // this branch.
                 // TODO(preview-egress): deferred egress design hooks in here.
-                w.map(2);
-                w.key("desc");    w.bin(e.pv_desc, e.pv_desc_len);
+                w.map(1);
                 w.key("preview");
-                w.map(3);
+                w.map(6);
+                w.key("w");    w.int_(e.pv_w);
+                w.key("h");    w.int_(e.pv_h);
+                w.key("c");    w.int_(e.pv_c);
                 w.key("enc");  w.str("jpeg");
                 w.key("q");    w.int_(e.pv_q);
                 w.key("data"); w.bin(e.pv_jpeg, e.pv_len);
