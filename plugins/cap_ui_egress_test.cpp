@@ -248,6 +248,27 @@ int main() {
         CHECK(jint(s, "dedup_hits") >= ded0 + 1);     // the survivor (A, the LAST) hit
     }
 
+    SECTION("CROSS-CHANNEL DEDUP: identical content on TWO channels encodes ONCE");
+    {
+        // A fresh content Z pushed to two SUBSCRIBED channels in the same flush
+        // window: whichever the flusher reaches first encodes Z; the twin channel
+        // resolves as an LRU hit — content identity is channel-independent, so
+        // "identical content encodes once" holds ACROSS channels (spec 31).
+        expose->exchange("{\"command\":\"subscribe\",\"channels\":[\"ui/y\"]}");
+        const std::vector<uint8_t> Z = gen(7);        // never seen before
+        const int enc0 = jint(stats(egress.get()), "encodes");
+        const int ded0 = jint(stats(egress.get()), "dedup_hits");
+        xi_pack_handle zx = build_push(pk, "ui/x", Z);
+        xi_pack_handle zy = build_push(pk, "ui/y", Z);
+        push(cap, pk, zx);
+        push(cap, pk, zy);
+        pk->release(zx); pk->release(zy);
+        // Wait for the twin to be served from the memo (robust whether the two
+        // channels flush in one cycle or two).
+        CHECK(wait_stat(egress.get(), "dedup_hits", ded0 + 1, 3000) >= ded0 + 1);
+        CHECK(jint(stats(egress.get()), "encodes") == enc0 + 1);   // encoded EXACTLY once
+    }
+
     SECTION("LRU EVICTION: 40 distinct contents, lru_max 32 -> lru_entries caps at 32");
     {
         CHECK(egress->set_def("{\"fps\":120}"));      // fast flushes: one per distinct frame
