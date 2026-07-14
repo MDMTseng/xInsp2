@@ -188,6 +188,19 @@ if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
     target_link_libraries(imgcodec PRIVATE ${TURBOJPEG_LIB})
 endif()
 
+# ui_egress — the LIVE-UI egress service-middleware LIB PLUGIN (docs/new_gen/31).
+# NO data plane: registers xi.ui.egress (push a preview -> latest-wins slot;
+# own timer thread @ UI rate -> content-keyed dedup -> dispatch by descriptor 't'
+# -> xi.jpeg.encode cap -> hand to expose). expose/src is on the include path for
+# xex1_encode.hpp — the SHARED wire encoder egress builds the UI frame through.
+add_library(ui_egress SHARED ui_egress/ui_egress.cpp)
+target_include_directories(ui_egress PRIVATE ${XI_INCLUDE} ${XI_VENDOR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
+set_target_properties(ui_egress PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/ui_egress
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/ui_egress
+)
+
 # lut_owner — the RESOURCE-HANDLE PATTERN demo lib plugin (doc 14 appendix
 # "Resource-handle convention"): a TYPE-OWNER for demo.lut (immutable sorted
 # i64->i64 lookup table). Heavy objects never ride packs — this DLL owns them

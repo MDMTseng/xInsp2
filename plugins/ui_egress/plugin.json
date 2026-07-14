@@ -1,0 +1,41 @@
+{
+  "name": "ui_egress",
+  "description": "xi.ui.egress — the LIVE-UI egress service-middleware lib plugin (docs/new_gen/31). NO data plane: it never emits and nothing routes to it. On create it registers the capability xi.ui.egress (push a preview image to a UI channel — writes a latest-wins retained slot and returns immediately, never blocking the lane). An own timer thread at the UI rate (default 30fps) flushes each channel's slot: content-keyed LRU dedup -> dispatch by descriptor 't' (xi/image u8 -> xi.jpeg.encode at q80, >2MP box-downscaled to <=1MP; xi/jpeg pass-through; unknown -> metadata card) -> hand to expose (pure transport). Fail-open at every seam: no jpeg cap -> raw fallback; no subscriber -> drop at zero cost.",
+  "dll": "xi-ui_egress.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "lib": true,
+  "_lib_doc": "lib plugin marker (doc 14/31): a capability provider + service middleware, not a pipeline stage — do not wire it as an input/output of anything; create one instance and let producers reach xi.ui.egress by capability name through the host funnel.",
+  "autoload": true,
+  "_autoload_doc": "V3 machine-level autoload ELIGIBILITY: marks this lib provider safe to instantiate once at service boot under a machine owner, so xi.ui.egress is available WITHOUT any project declaring a per-instance. ELIGIBILITY ONLY — the host autoloads eligible providers only when the deployment opts in (backend flag --autoload-lib / env XINSP2_AUTOLOAD_LIB); the default deployment is byte-unchanged. A project that DOES declare a ui_egress instance takes precedence for its life.",
+  "reentrant": true,
+  "_reentrant_doc": "the push handler is invoked by the host funnel WITHOUT per-instance serialization (the provider thread-safety contract) — arbitrary producer threads push concurrently; the control surface (exchange/set_def) may also run concurrently. All state is mutex/atomic-guarded and a single own timer thread is the sole flusher.",
+  "on_fault": "refuse",
+  "_on_fault_doc": "a push handler that faulted should stop serving (quarantine) rather than keep writing from possibly-corrupt state; consumers see -3 and the operator re-enables by re-committing config.",
+  "requires": [
+    { "iface": "xi.pack", "min": 1 },
+    { "iface": "xi.pack", "min": 4 },
+    { "iface": "xi.cap.provider", "min": 1 }
+  ],
+  "manifest": {
+    "params": [
+      { "name": "fps",          "type": "int", "default": 30, "doc": "UI flush rate (frames/second) of the own timer thread" },
+      { "name": "quality",      "type": "int", "default": 80, "doc": "JPEG quality 1..100 for xi/image previews" },
+      { "name": "downscale_mp", "type": "int", "default": 2,  "doc": "images larger than downscale_mp megapixels are box-downscaled before encode (default 2 -> target ~1MP)" },
+      { "name": "lru_max",      "type": "int", "default": 32, "doc": "content-keyed encode dedup LRU capacity (entries)" }
+    ],
+    "inputs": [],
+    "outputs": [],
+    "capabilities": [
+      {
+        "name": "xi.ui.egress",
+        "versions": "1",
+        "doc": "Pack in: str '$channel' (UI channel; default ui/<instance>), blob 'image' (an xi/image or xi/jpeg self-describing blob), or bool '$probe'. Writes a latest-wins retained slot for the channel and returns {i64 'ok':1} immediately (never blocks). The own timer thread encodes + fans out to expose at the UI rate."
+      }
+    ],
+    "exchange": [
+      { "command": "stats", "doc": "-> {pushes, flushes, encodes, dedup_hits, dropped_no_sub, raw_fallbacks, lru_entries, registered} — encodes vs dedup_hits is the dedup proof" },
+      { "command": "clear", "doc": "drain the retained slots + encode LRU -> {ok:true}" }
+    ]
+  }
+}
