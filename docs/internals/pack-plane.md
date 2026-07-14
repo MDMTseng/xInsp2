@@ -135,17 +135,20 @@ buffer from a size-class recycler** (`pixpool` in `xi_image_pool.hpp`):
   buffers/class/thread and ≤ 64 MiB/class/thread (so the 64 MiB class keeps 1);
   shelf ≤ 32 buffers/class and ≤ 128 MiB/class (so the 64 MiB class hoards at
   most 2). Over-budget frees go straight to the heap.
-- **Zero-fill contract (default unchanged; a copy-path sibling added):**
-  `create()` still returns zeroed pixels — recycled buffers are `memset`
-  (callers exist that paint onto a "blank" canvas), and every **writable-canvas**
-  mint keeps it (`pack_pool::alloc_canvas`, e.g. `mint_blob`'s payload region and
-  the blob head's pad). A new `create_uninit()` sibling **skips** the memset for
-  a caller that immediately full-overwrites the buffer — `pack_pool::alloc_bytes`
-  memcpy's a non-null src over every byte, so the zero-fill was pure waste (doc 28
-  zeroinit verdict); a **null src is now a hard reject** there (a copy path with
-  nothing to copy is a caller bug, never a silently-zeroed buffer). Still ~10x
-  cheaper than the old alloc + zero + first-touch-fault path for the hot same-size
-  case (1920×1200: ~533 µs → ~53 µs per create/release cycle).
+- **No zero-fill (CT ruling 2026-07):** `create()` returns **uninitialised**
+  pixels — a recycled buffer carries the previous image's bytes. The canvas
+  zero-fill was removed (the info-leak from stale bytes is accepted as
+  unimportant), and the `create()`/`create_uninit()` split collapsed to one
+  uninitialised mint. **The producer overwrites what it exposes**; a
+  partial-paint producer must clear the regions it does not write, or stale
+  pixels ride onto the wire / into a record. Two things stay: `pack_pool::alloc_bytes`
+  is a copy path where a **null src is a hard reject** (a copy with nothing to
+  copy is a caller bug), and the blob **head pad** (between descriptor end and
+  payload_off) plus `place_padded_head`'s pad gap are **still zeroed explicitly**
+  — that is **wire determinism** (those bytes ride the wire verbatim), not a
+  security zero. Recycling stays ~10x cheaper than a fresh alloc + first-touch
+  faults for the hot same-size case (1920×1200: ~533 µs → ~53 µs per
+  create/release cycle), now with no memset at all.
 - **Teardown:** the shelf is intentionally leaked (same doctrine as the
   `ImagePool` singleton), so per-thread magazine destructors can always drain
   survivors to it no matter how late they run.

@@ -155,12 +155,16 @@ inline std::optional<PaddedLayout> padded_layout(size_t head_len, size_t data_le
 }
 
 // Place the head into a minted `payload` and return a pointer to the bulk region.
-// memcpy the `head` bytes at offset 0, ZERO the pad gap [head.size(), data_off)
-// — DETERMINISTIC bytes, because the whole payload rides on the wire verbatim
-// (memory == wire) — and return payload + data_off (64B-aligned iff `payload`
-// is, which a minted blob payload is). `payload` must hold >= layout.total bytes,
-// and head.size() must be <= layout.data_off (true when `layout` came from
-// padded_layout(head.size(), ...)).
+// memcpy the `head` bytes at offset 0, ZERO the pad gap [head.size(), data_off),
+// and return payload + data_off (64B-aligned iff `payload` is, which a minted
+// blob payload is). `payload` must hold >= layout.total bytes, and head.size()
+// must be <= layout.data_off (true when `layout` came from padded_layout(head.
+// size(), ...)).
+//
+// KEEP ZEROED (wire determinism, NOT security): the pad gap rides the wire
+// verbatim (memory == wire), so it must be deterministic. This zero stays even
+// though the pool no longer zero-fills a minted buffer (CT ruling 2026-07) — the
+// bulk region a producer fills may be uninitialised, but the pad never is.
 inline uint8_t* place_padded_head(uint8_t* payload, std::span<const uint8_t> head,
                                   const PaddedLayout& layout) {
     if (!head.empty()) std::memcpy(payload, head.data(), head.size());

@@ -307,45 +307,35 @@ inline uint64_t hash_key(std::string_view s) {
 // releases each exactly once on destruction; a leaked pack is reclaimed by the
 // PACK registry's own owner sweep).
 //
-// ZERO-FILL DISCIPLINE (doc 28 zeroinit verdict):
-//   * alloc_bytes(src,n) is a COPY path — it full-memcpy's a non-null src over
-//     the whole buffer, so the pool's zero-fill is pure waste; it mints an
-//     UNINITIALISED buffer (create_uninit) and copies. A NULL src is a HARD
-//     REJECT (fail-loud, returns XI_IMAGE_NULL) — a copy path with nothing to
-//     copy is a caller bug, never a silently-zeroed buffer.
-//   * alloc_canvas(n) is the WRITABLE-CANVAS path (mint_blob's payload region,
-//     a producer fills it in place) — it KEEPS zero-fill (external contract:
-//     an unwritten canvas byte reads as zero, and the head's pad bytes must be
-//     zero). Uses the default create().
+// BUFFER MINT PATHS (CT ruling 2026-07: pool buffers are UNINITIALISED — canvas
+// zero-fill removed; a producer overwrites what it exposes, unwritten bytes are
+// whatever the recycled buffer held):
+//   * alloc_bytes(src,n) — COPY path: mint + full-memcpy a non-null src over
+//     every byte. A NULL src is a HARD REJECT (fail-loud) — a copy path with
+//     nothing to copy is a caller bug, never a silently-uninitialised buffer.
+//   * alloc_uninit(n) — no-copy mint for a caller that fills the buffer itself
+//     (mint_blob's payload region).
+//   The blob HEAD pad (between descriptor end and payload_off) is still zeroed
+//   explicitly by mint_blob — that is WIRE DETERMINISM, not a security zero.
 // ===================================================================
 namespace pack_pool {
 
-// Mint an UNINITIALISED typeless buffer of n bytes and copy src into it. src
-// MUST be non-null (a copy path with a null src is a caller bug — fail-loud).
-// 0 on failure (n==0, null src, over the pool's per-buffer cap, or exhausted).
+// COPY path: mint an uninitialised typeless buffer of n bytes and copy src over
+// all of it. src MUST be non-null (a copy path with a null src is a caller bug —
+// fail-loud). 0 on failure (n==0, null src, over the per-buffer cap, exhausted).
 inline xi_image_handle alloc_bytes(const void* src, size_t n) {
     if (n == 0 || n > size_t(INT32_MAX) || !src) return XI_IMAGE_NULL;  // null src: HARD REJECT
     ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
-    xi_image_handle h = ImagePool::instance().create_uninit(int32_t(n), 1, 1);
+    xi_image_handle h = ImagePool::instance().create(int32_t(n), 1, 1);
     if (h) std::memcpy(ImagePool::instance().data(h), src, n);
     return h;
 }
-// Mint a ZERO-FILLED writable canvas of n bytes (the producer fills it in
-// place). 0 on failure. Keeps the create() zero-fill: unwritten canvas bytes
-// (and, for a blob head, the pad between descriptor and payload) read as zero.
-inline xi_image_handle alloc_canvas(size_t n) {
-    if (n == 0 || n > size_t(INT32_MAX)) return XI_IMAGE_NULL;
-    ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
-    return ImagePool::instance().create(int32_t(n), 1, 1);
-}
-// Mint an UNINITIALISED buffer of n bytes (no zero-fill). The caller MUST write
-// every byte it will expose — used by the mint-then-fully-overwrite path
-// (mint_blob for a caller that copies the whole payload) to avoid the zero-then-
-// copy double write (doc 28 finding A③). NOT for partial-write canvases.
+// No-copy mint of n UNINITIALISED bytes — the caller writes every byte it will
+// expose (mint_blob's payload region). 0 on failure.
 inline xi_image_handle alloc_uninit(size_t n) {
     if (n == 0 || n > size_t(INT32_MAX)) return XI_IMAGE_NULL;
     ImagePool::OwnerGuard neutral(0);   // owner-neutral: pack-governed lifetime
-    return ImagePool::instance().create_uninit(int32_t(n), 1, 1);
+    return ImagePool::instance().create(int32_t(n), 1, 1);
 }
 inline void addref(xi_image_handle h) {
     if (h) ImagePool::instance().addref(h);
@@ -456,25 +446,24 @@ private:
 // canonical descriptor + zero pad) and expose the 64B-aligned payload region for
 // in-place fill. The descriptor is validated fail-loud (canonical map); a bad
 // descriptor, a negative length, or an over-cap total returns an empty BufRef.
-// The payload region is zero-filled canvas (alloc_canvas) — a producer that
-// writes only part of it leaves the rest honestly zero.
-// Shared mint impl. `zero_payload` = true mints a zero-filled canvas (unwritten
-// payload bytes read as zero — the mint_blob contract); false mints an
-// uninitialised payload for a caller that will overwrite ALL of it (the add_blob
-// copy path — avoids the zero-then-copy double write, doc 28 finding A③). Either
-// way the head (magic + desc_len + descriptor) is written and the pad
-// [8+desc_len, payload_off) is zeroed — the pad rides the wire verbatim, so it
-// must be deterministic regardless of the payload policy.
+// The payload region is UNINITIALISED (CT ruling 2026-07: no canvas zero-fill) —
+// a producer that writes only part of it leaves stale bytes in the rest, which
+// ride onto the wire / into a record, so it must clear what it does not write.
+//
+// Shared mint impl: mint an uninitialised buffer, write the head (magic +
+// desc_len + descriptor), and ZERO the pad [8+desc_len, payload_off). The pad is
+// zeroed on PURPOSE and always — it rides the wire verbatim, so it must be
+// deterministic. This is WIRE DETERMINISM, not a security zero (the payload
+// bytes are deliberately left uninitialised).
 inline BufRef mint_blob_impl(const void* desc, int32_t desc_len,
-                             int64_t payload_len, bool zero_payload) {
+                             int64_t payload_len) {
     if (!desc || desc_len <= 0 || payload_len < 0) return {};
     const uint8_t* d = static_cast<const uint8_t*>(desc);
     if (!blob_desc_is_canonical_map(d, uint32_t(desc_len))) return {};
     const uint64_t payload_off = blob_payload_off(uint32_t(desc_len));
     const uint64_t total = payload_off + uint64_t(payload_len);
     if (total > uint64_t(INT32_MAX)) return {};                    // pool per-buffer cap
-    xi_image_handle h = zero_payload ? pack_pool::alloc_canvas(size_t(total))
-                                     : pack_pool::alloc_uninit(size_t(total));
+    xi_image_handle h = pack_pool::alloc_uninit(size_t(total));
     if (!h) return {};
     uint8_t* base = pack_pool::writable(h);
     // payload_off is a multiple of kBlobPayloadAlign, so a 64B-aligned base (the
@@ -485,18 +474,19 @@ inline BufRef mint_blob_impl(const void* desc, int32_t desc_len,
     pack_mp_detail::put_u32_le(base + 0, kBlobMagic);
     pack_mp_detail::put_u32_le(base + 4, uint32_t(desc_len));
     std::memcpy(base + 8, d, size_t(desc_len));
-    if (!zero_payload) {
-        // The uninit path must zero the head pad itself (alloc_canvas would have).
-        const size_t pad_beg = size_t(8) + size_t(desc_len);
-        if (payload_off > pad_beg)
-            std::memset(base + pad_beg, 0, size_t(payload_off) - pad_beg);
-    }
+    // KEEP ZEROED (wire determinism, NOT security): the pad between the
+    // descriptor end and the 64B-aligned payload rides the wire verbatim, so it
+    // must be deterministic regardless of the (now uninitialised) payload.
+    const size_t pad_beg = size_t(8) + size_t(desc_len);
+    if (payload_off > pad_beg)
+        std::memset(base + pad_beg, 0, size_t(payload_off) - pad_beg);
     return BufRef{h, base + payload_off, payload_len};
 }
-// Mint a self-describing pool buffer with a ZERO-FILLED canvas payload (a
-// producer may write only part of it — the rest reads honestly zero).
+// Mint a self-describing pool buffer. The payload region is UNINITIALISED (CT
+// ruling 2026-07): a producer that writes only part of it must clear the rest,
+// or stale bytes ride onto the wire. The head pad stays deterministically zero.
 inline BufRef mint_blob(const void* desc, int32_t desc_len, int64_t payload_len) {
-    return mint_blob_impl(desc, desc_len, payload_len, /*zero_payload=*/true);
+    return mint_blob_impl(desc, desc_len, payload_len);
 }
 
 // A borrowed const view of a Blob entry: the descriptor (canonical msgpack map)
@@ -1121,13 +1111,12 @@ public:
                   const void* payload, int64_t payload_len) {
         assert(!sealed_ && "add after seal");
         if (spent_()) return false;
-        // When we have the whole payload in hand, mint UNINIT and copy over it —
-        // the memcpy writes every payload byte, so pre-zeroing would be a wasted
-        // full-buffer pass (doc 28 finding A③). With no payload, keep the zeroed
-        // canvas (the entry is an honestly-zero blob of payload_len bytes).
+        // Mint an uninitialised payload and copy the caller's bytes over it. With
+        // no payload (null src / zero len) the payload is left UNINITIALISED (CT
+        // ruling 2026-07: no canvas zero-fill) — a caller that wants a zero blob
+        // must pass zeroed bytes. The head pad stays deterministically zero.
         const bool have_payload = payload && payload_len > 0;
-        BufRef ref = mint_blob_impl(desc, desc_len, payload_len,
-                                    /*zero_payload=*/!have_payload);
+        BufRef ref = mint_blob_impl(desc, desc_len, payload_len);
         if (!ref) return false;
         if (have_payload)
             std::memcpy(ref.payload(), payload, size_t(payload_len));
