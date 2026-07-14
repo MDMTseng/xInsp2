@@ -1,8 +1,9 @@
 #pragma once
 //
 // xi_pack.hpp — the v3 uniform keyed-buffer pack container, SLAB representation
-// (pack-v3 migration; design C, validated by backend/include/xi/proto/
-// xi_pack_c.hpp + bench_pack_c.cpp — the proto stays as the experiment record).
+// (pack-v3 migration; design C, validated by backend/tests/proto/xi_pack_c.hpp
+// + bench_pack_c.cpp — the proto stays as the experiment record, out of include/;
+// see docs/new_gen/29-pack-c-prototype-record.md).
 //
 // A pack is ONE thing:  key(string) -> entry, where an entry is
 // (type tag, const-span bytes). There is no image/metadata split — an image

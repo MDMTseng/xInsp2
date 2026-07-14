@@ -154,7 +154,7 @@ Philosophy #1. Charter values at stake: 5 (慣例→結構), 1 (速度優先), 6
   got wrong.
 - **Alternatives:** (A, smallest diff) inline payloads = canonical msgpack
   again, splice at the boundary; (B) full slab-verbatim wire per the prototype
-  `serialize()` (`proto/xi_pack_c.hpp:1201-1235`) — a *different* memory==wire,
+  `serialize()` (`tests/proto/xi_pack_c.hpp`) — a *different* memory==wire,
   explicitly deferred by `xi_pack.hpp` ("NOT this migration"). Landed state has
   *neither* identity.
 
@@ -177,14 +177,18 @@ Philosophy #2 × integration × security. Charter values: 2 (精緻極小核心)
   DECIDE-CT because it removes verbs from the (not-yet-consumed) frozen @3
   surface.
 
-### ⑥ Contract now: get `proto/xi_pack_c.hpp` out of `include/`.
+### ⑥ Contract now: get `proto/xi_pack_c.hpp` out of `include/`. — **RESOLVED (⑥a)**
 Philosophy #3 × security #4. Charter value: 6 (膨脹再收縮).
+> **Done.** The header moved to `backend/tests/proto/xi_pack_c.hpp` (test/bench
+> tree, out of `include/`) with a loud EXPERIMENT-RECORD banner; the design-C
+> rationale + bench numbers are lifted into **doc 29**
+> (`29-pack-c-prototype-record.md`).
 
 - 1288 lines of non-production code carrying a **divergent** design (hash-order
   iteration that loses insertion order, 5 dtype ids, slab-verbatim serialize),
   living in `include/` where a reader can mistake it for a second real pack. Its
   value was already harvested (the pixpool size-class recycler was backported).
-- Its `deserialize()` (`proto/xi_pack_c.hpp:1239`) is a genuine per-entry
+- Its `deserialize()` (`tests/proto/xi_pack_c.hpp`) is a genuine per-entry
   **unbounded OOB deserializer** (validates header only; `DirEntry`
   `off/len/key_off` unchecked) — harmless today (test/bench only) but dangerous
   if ever promoted.

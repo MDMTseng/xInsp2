@@ -1,4 +1,25 @@
 #pragma once
+// ============================================================================
+//  EXPERIMENT RECORD — NOT A SHIPPING API.
+//
+//  This header lives under backend/tests/ (test/bench-only), never in include/.
+//  It is the frozen design-C experiment; its value was already harvested into
+//  production (pixpool size-class recycler -> xi_image_pool.hpp; the slab
+//  migration itself -> xi_pack.hpp). Do NOT include it from shipping code.
+//
+//  Divergent semantics vs the real xi_pack.hpp — a reader must not mistake it
+//  for a second pack API:
+//    * hash-order (key_hash-sorted) directory iteration — LOSES insertion order
+//    * its own dtype ids (u8/u16/i32/f32/f64), not the production type space
+//    * slab-verbatim serialize() — a different wire than xi_pack.hpp's
+//
+//  deserialize() is INTENTIONALLY UNHARDENED: it validates the header only and
+//  does NO per-entry bounds checks (DirEntry off/len/key_off are trusted), so
+//  it is an unbounded-OOB deserializer on hostile bytes. Harmless here (fixed
+//  test/bench inputs) — NEVER promote without a full hardening pass.
+//
+//  Rationale + bench numbers: docs/new_gen/29-pack-c-prototype-record.md
+// ============================================================================
 //
 // xi_pack_c.hpp — "Pack design C" PROTOTYPE (proto/pack-c). NOT production.
 //

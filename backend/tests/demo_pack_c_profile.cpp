@@ -11,7 +11,7 @@
 //   pak["serial"] / pak["station"]  raw scalars
 // Build -> uniform pak["key"] reads -> serialize -> deserialize -> re-verify.
 // All lifetime is RAII (PackRef): zero manual retain/release in this file.
-#include <xi/proto/xi_pack_c.hpp>
+#include "proto/xi_pack_c.hpp"
 #include <xi/xi_mp.hpp>
 
 #include <cmath>

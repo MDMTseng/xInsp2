@@ -59,7 +59,7 @@ namespace xi {
 // =====================================================================
 // pixpool — size-class pixel-buffer recycling (perf/imagepool-sizeclass).
 //
-// Backported from the design-C prototype (proto/xi_pack_c.hpp raw_class_alloc):
+// Backported from the design-C prototype (tests/proto/xi_pack_c.hpp raw_class_alloc):
 // the production create()/release() cycle used to pay `new PoolEntry` +
 // `vector::resize` (heap alloc + zero-fill + first-touch page faults) per
 // create and a full heap free per release — ~508 us for a 1920x1200 frame.
