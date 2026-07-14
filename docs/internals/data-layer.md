@@ -4,8 +4,8 @@
 branch).** How plugin/script data crosses every (in-process) plugin boundary
 as a **Pack** — one sealed, keyed, typed container whose **canonical-msgpack
 wire form (XEX1-v3) and disk form (`.xex1`) are the same bytes**,
-produced on demand at the serialization edge from a raw-scalar slab — and how
-the host refcounts it across the ABI.
+stored inline as those canonical bytes (memory == wire) and spliced verbatim at
+the serialization edge — and how the host refcounts it across the ABI.
 
 > **THE CUT (v12).** The data layer this page describes REPLACED the Record/doc
 > plane. THE CUT deleted `xi::Record`, its yyjson mutable-doc backing, the
@@ -24,18 +24,18 @@ msgpack blob for arrays/maps), and — since the pack-v3 slab — a **tensor**
 (logical shape + `PackDtype` over a pool buffer) and typed **user blobs**.
 Once sealed a pack is **immutable** — new information is always a new pack.
 
-**Storage model (pack-v3 slab): memory ≠ wire.** In memory a sealed pack is
-one contiguous slab (header + hash-sorted directory + insertion-order table +
-payload) in which **scalars are stored raw** — a typed read is a directory
-binary search plus one raw 8-byte load, zero msgpack decode
-([`pack-plane.md`](./pack-plane.md) § container memory model). The canonical
-msgpack bytes exist **only at the serialization edge**: the walk API
-(`for_each_entry` + `canonical_value(i, mp::Writer&)`) re-emits each entry's
-canonical value on demand, byte-identical to what the pre-slab arena stored.
-Immutability plus that single canonical emit path is what keeps the *two
-external* representations one format: the XEX1-v3 frame on the wire and the
-`.xex1` file on disk are the same canonical bytes, so record → replay is
-byte-lossless with nothing to re-serialize.
+**Storage model (pack-v3 slab): memory == wire (④A).** In memory a sealed pack
+is one contiguous slab (header + hash-sorted directory + insertion-order table +
+payload) in which an **inline entry stores its canonical msgpack value** — a
+typed read is a directory binary search plus a fixed-width header skip at a known
+offset ([`pack-plane.md`](./pack-plane.md) § container memory model). Because the
+inline payload IS the wire value, the walk API (`for_each_entry` +
+`canonical_value(i, mp::Writer&)`) **splices each inline entry's stored bytes
+verbatim** — a copy, not a re-encode (only EXTERN Image/Tensor/large-bin entries
+build their wire shape at the edge). Immutability plus that structural identity
+is what keeps the *two external* representations one format: the XEX1-v3 frame on
+the wire and the `.xex1` file on disk are the same canonical bytes, so record →
+replay is byte-lossless with nothing to re-serialize.
 
 ## The model: mirror the image pool, for packs
 

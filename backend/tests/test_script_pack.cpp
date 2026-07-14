@@ -11,11 +11,12 @@
 //      SAME ScriptPack surface t.pack() yields, including the generic
 //      for_each walk in insertion order.
 //   3. CANONICAL BYTES — the load-bearing gate-P2 check. For each inline
-//      entry, the pack's stored arena bytes (Pack::raw_at, reachable here
-//      because the test is host-role and can dereference the registry) are
-//      compared BYTE-FOR-BYTE against xi::mp::Writer encoding the same
-//      logical value — ints 0xd3, floats 0xcb, str32/bin32 headers, canonical
-//      bool, nested map/array in max-width profile.
+//      entry, the pack's canonical wire bytes (Pack::canonical_value — since
+//      ④A a verbatim splice of raw_at, reachable here because the test is
+//      host-role and can dereference the registry) are compared BYTE-FOR-BYTE
+//      against xi::mp::Writer encoding the same logical value — ints 0xd3,
+//      floats 0xcb, str32/bin32 headers, canonical bool, nested map/array in
+//      max-width profile.
 //   4. Canonical-profile enforcement on nested values — non-canonical (but
 //      valid) msgpack given to add_mp is RE-ENCODED to the canonical profile;
 //      malformed bytes and ext-bearing values are REFUSED (add_mp false, no
@@ -67,8 +68,8 @@ static int pool_live() { return xi::ImagePool::instance().cumulative().live_now;
 
 // Byte-compare a pack entry's CANONICAL wire bytes against an expected
 // canonical encoding. Host-role: dereference the registry and emit through the
-// slab pack's canonical walk (Pack::canonical_value) — the slab stores scalars
-// raw, so canonical parity is now proven at the walk seam, not raw_at.
+// slab pack's canonical walk (Pack::canonical_value) — since ④A the inline
+// payload IS the canonical value, so this splices raw_at verbatim.
 static bool raw_equals(const xi::ScriptPack& sp, size_t idx,
                        const uint8_t* want, size_t want_n) {
     xi::Pack* p = xi::PackRegistry::instance().pack(sp.handle());

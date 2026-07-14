@@ -397,9 +397,9 @@ Contract points:
 - **Getters are fail-closed.** Every getter returns 1 on success and 0 when the
   key is absent **or** its stored tag differs from the requested type — no
   silent coercion (an i64 `0`/`1` entry is *not* a bool). `str`/`bin`/`mp`/
-  `image` payloads are **borrowed** spans into the pack's arena / pool buffer,
+  `image` payloads are **borrowed** spans into the pack's slab / pool buffer,
   valid until the caller's last `release` of the handle. `key_at` returns a
-  borrowed, **not NUL-terminated** span (keys live raw in the arena); `count` +
+  borrowed, **not NUL-terminated** span (keys live raw in the slab); `count` +
   `key_at` + `tag_at` are the generic-enumeration primitives a
   producer-agnostic consumer (`expose`, `record_save`) walks.
 - **`builder_add_mp` trusts.** It is for canonical bytes built by

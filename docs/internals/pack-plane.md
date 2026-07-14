@@ -27,11 +27,13 @@ contiguous slab** + N pool-backed EXTERN buffers, resolved behind one API (D1
   present exactly the order entries were added (the walkers' contract). Small
   and large packs share the same O(log n) path — no side index, no hash map,
   no per-entry heap nodes.
-- **Scalars are stored RAW** — an i64/f64 is 8 aligned bytes (a typed read is
-  one pointer add + one 8-byte load, zero msgpack decode), a bool one 0/1
-  byte, strings/small binaries raw bytes (length in the DirEntry), and only
-  nested msgpack (`Mp`) keeps its canonical bytes verbatim. NaN doubles are
-  flattened to the one quiet pattern at `add_f64` time (ruling 1).
+- **Inline payloads are canonical msgpack (memory == wire, ④A)** — an inline
+  entry stores its *canonical value* verbatim: i64 = int64 `0xd3`+8, f64 =
+  float64 `0xcb`+8, bool = `0xc2`/`0xc3`, str = str32, small bin = bin32,
+  nested msgpack (`Mp`) its canonical bytes. So `raw_at(i)` **is** the wire
+  bytes, and a typed read skips the fixed-width header at a known offset (one
+  branch, zero-copy for str/bin). NaN doubles are flattened to the one quiet
+  pattern at `add_f64` time (ruling 1, applied by the canonical encoder).
 - **EXTERN entries** — images, tensors, and binaries ≥ the 4096-byte
   `kPackLargeThreshold` do *not* live in the slab. They are raw ImagePool
   buffers referenced by handle, minted **only** through the typeless
@@ -90,30 +92,32 @@ buffer from a size-class recycler** (`pixpool` in `xi_image_pool.hpp`):
   they go on free changed. Diagnostics: `ImagePool::pixel_alloc_stats()`
   (magazine/shelf hits, evictions); asserted by `test_image_pool_recycle`.
 
-### Memory ≠ wire: canonical msgpack at the edge (the walk API)
+### Memory == wire: canonical msgpack inline (④A, doc 28 finding ④)
 
 The **wire/at-rest format is unchanged** — the canonical max-width msgpack
 profile (int64 `0xd3`, float64 `0xcb`, bool `0xc2/0xc3`, str32/bin32, via
-`xi_mp.hpp`) remains the serialization truth. What changed is *where* those
-bytes exist: scalars are raw **only in memory**, and the canonical bytes are
-produced **on demand at the serialization boundary** by the pack's walk API:
+`xi_mp.hpp`) remains the serialization truth. For **inline entries the stored
+payload IS that canonical value**, so a serialization boundary is a *copy*, not
+a transformation — the design's own deciding property (doc 07 "boundaries
+become copies, not transformations"), restored after an interim slab state that
+stored scalars raw. The walk API:
 
 - `for_each_entry(fn)` / `entry_at(i)` — visit every entry in insertion order
   with a typed `EntryView` (key, tag, `type_id`, inline raw span *or* EXTERN
   shape + borrowed handle).
 - `canonical_value(i, xi::mp::Writer&)` — append the i-th entry's ONE
-  canonical msgpack value, byte-identical to what the old arena stored (the
-  emit goes through `xi::mp::Writer`, the one canonical-encode truth,
-  including the ruling-1 NaN flatten). Image/Tensor entries have no single
+  canonical msgpack value. For an INLINE entry this is a **verbatim splice of
+  `raw_at(i)`** (a copy); only EXTERN entries build their wire shape at the
+  edge (a pooled bin re-wrapped as bin32). Image/Tensor entries have no single
   scalar form and return `false` — their wire shape is the dumper's contract.
 
-The retired identity "memory ≈ wire" (arena bytes were already canonical and
-were spliced verbatim onto the wire) is pinned in its new form by
-`plugins/xex1_v2_identity_test.cpp`: **`canonical_value` == an independent
-`xi::mp::Writer` re-encode == the XEX1-v3 encoder's wire bytes == disk**.
-Consequently `raw_at(i)` now returns the entry's RAW stored payload (empty for
-EXTERN entries — a fast in-process read, not wire bytes), and `arena_bytes()`
-became `slab_bytes()`.
+The identity "memory == wire" is pinned by
+`plugins/xex1_v2_identity_test.cpp`: **`raw_at(i)` == `canonical_value` == an
+independent `xi::mp::Writer` re-encode == the XEX1-v3 encoder's wire bytes ==
+disk** — a *structural* identity, not a walker convention. `raw_at(i)` returns
+the entry's stored canonical bytes for every inline entry (empty for EXTERN
+entries — resolve those with `get_image`/`get_tensor`/`get_bin`), and
+`arena_bytes()` became `slab_bytes()`.
 
 ### One container, one read path
 

@@ -28,10 +28,11 @@
 //     key_at/tag_at/for_each present exactly the order entries were added —
 //     the contract the expose/record walkers depend on. Hash order is an
 //     internal detail nothing outside find() sees.
-//   * INLINE entries store scalars RAW (i64/f64 = 8 aligned bytes: a read is
-//     one pointer add + one 8-byte load, zero msgpack decode; bool = 1 byte
-//     0/1), strings/small bins as raw bytes (length lives in the DirEntry),
-//     and nested msgpack (Mp) as its canonical bytes verbatim.
+//   * INLINE entries store the entry's CANONICAL MSGPACK VALUE verbatim
+//     (④A memory==wire, doc 28 finding ④): i64=int64 0xd3+8, f64=float64
+//     0xcb+8 (NaN flattened at add), bool=0xc2/0xc3, str=str32, small bin=
+//     bin32, nested msgpack (Mp)=its canonical bytes. raw_at(i) IS the wire
+//     bytes; a typed read skips the fixed-width header (one branch, zero copy).
 //   * EXTERN entries (Image, Tensor, Bin >= kPackLargeThreshold) live in the
 //     production ImagePool exactly as before — owner-neutral mint through
 //     pack_pool below, pack co-owns via the pool refcount, frozen image ABI
@@ -44,13 +45,14 @@
 //     thread is heap-free after warmup — the ImagePool discipline preserved.
 //
 // WIRE / AT-REST FORMAT: UNCHANGED. The canonical msgpack container (doc 07
-// max-width profile via xi_mp.hpp) remains the serialization truth for this
-// migration; scalars are raw ONLY in memory. The walk API below
-// (for_each_entry / canonical_value) re-emits each entry's canonical bytes —
-// through xi::mp::Writer, the ONE canonical-encode truth, so ruling 1's NaN
-// flatten and the max-width markers are byte-identical to what the old arena
-// stored. (Slab-verbatim wire, as the prototype's serialize() showed, is a
-// follow-up candidate, NOT this migration.)
+// max-width profile via xi_mp.hpp) remains the serialization truth. memory ==
+// wire is RESTORED for inline entries (④A, doc 28 finding ④): the inline
+// payload IS the canonical value, so the walk API below (for_each_entry /
+// canonical_value) SPLICES each inline entry's stored bytes verbatim rather
+// than re-encoding — the identity is structural, not a walker convention.
+// EXTERN entries (Image/Tensor/large-bin) still build their wire shape from
+// the pool buffer at the edge. (Slab-verbatim wire, as the prototype's
+// serialize() showed, is a follow-up candidate, NOT this migration.)
 //
 // SEMANTICS KEPT: Pack is move-only, sealed-immutable, single-owner; borrowed
 // views (get_str/get_bin/get_mp/raw_at spans, key_at string_views) are valid
@@ -60,11 +62,11 @@
 // the slab returns to the recycle pool; a moved-from Pack owns nothing.
 //
 // API DELTAS from the arena representation (recorded for downstream agents):
-//   * raw_at(i) now returns the entry's RAW stored payload (raw 8-byte scalar,
-//     raw string bytes, canonical msgpack only for Mp) instead of "canonical
-//     msgpack bytes for every inline entry". Memory != wire for scalars now;
-//     use canonical_value(i, writer) to get the wire bytes (byte-identical to
-//     what raw_at used to return).
+//   * raw_at(i) returns the entry's canonical msgpack value for every inline
+//     entry (memory == wire, ④A) — the wire bytes verbatim, exactly what the
+//     pre-slab arena container returned. Empty for an EXTERN entry (resolve
+//     with get_image/get_tensor/get_bin). canonical_value(i, writer) splices
+//     these same bytes.
 //   * arena_bytes() is gone; slab_bytes() reports the slab footprint.
 //   * NEW: first-class typed tensors — PackTag::Tensor entries carry a dtype
 //     (PackDtype in DirEntry::type_id) + logical shape {w,h,c}; see
@@ -95,12 +97,13 @@ namespace xi {
 // ===================================================================
 // pack_mp_detail — adapters over the canonical codec (xi_mp.hpp).
 //
-//   xi::mp::Writer is the ONE canonical-encode truth. Scalars now live RAW in
-//   the slab, so these fixed-offset forms are no longer the pack's storage
-//   encoding — they are the WIRE forms: the canonical walk (canonical_value)
-//   emits through xi::mp::Writer itself, and these readers/writers remain for
-//   the fixed-offset consumers (bench_pack's offset-table reads, the XEX1
-//   parse/dump helpers) that decode canonical bytes at known offsets.
+//   xi::mp::Writer is the ONE canonical-encode truth; these fixed-width forms
+//   emit/decode exactly the bytes it produces. Since ④A restored memory==wire
+//   they are AGAIN the pack's inline STORAGE encoding: add_* encode the
+//   canonical value into the slab at add-time (write_*), and the typed getters
+//   decode the fixed-width header at a known offset (read_*). canonical_value
+//   then splices the stored bytes verbatim — no re-encode. The same readers
+//   serve any other fixed-offset consumer (the XEX1 parse/dump helpers).
 //
 //   Fixed-width forms only (int64 0xd3, float64 0xcb, str32 0xdb, bin32 0xc6)
 //   — the canonical max-width profile of doc 07. Everything is 100% standard
@@ -594,14 +597,14 @@ public:
     // blob type (>= kPackTypeUserBase). UB if i >= size().
     uint16_t         type_id_at(size_t i) const { return dir_at(i).type_id; }
 
-    // RAW stored payload bytes of the i-th entry (insertion order). SEMANTICS
-    // CHANGED from the arena representation: scalars are the raw 8-byte value
-    // (Bool: one 0/1 byte), Str/small-Bin the raw bytes, Mp the canonical
-    // msgpack bytes verbatim. Empty for an EXTERN entry (Image/Tensor, or a
-    // Bin above kPackLargeThreshold) — resolve those with get_image /
-    // get_tensor / get_bin. For the entry's CANONICAL WIRE bytes (what raw_at
-    // used to return for every inline entry) use canonical_value(i, writer).
-    // UB if i >= size().
+    // RAW stored payload bytes of the i-th entry (insertion order). memory ==
+    // wire (④A): the inline payload IS the entry's canonical msgpack value, so
+    // raw_at(i) returns the exact wire bytes — int64 (0xd3+8), float64
+    // (0xcb+8, NaN flattened), bool (0xc2/0xc3), str32, bin32, or a nested Mp
+    // value verbatim. canonical_value(i, writer) splices exactly these bytes;
+    // the identity is structural, not a re-encode. Empty for an EXTERN entry
+    // (Image/Tensor, or a Bin above kPackLargeThreshold) — resolve those with
+    // get_image / get_tensor / get_bin. UB if i >= size().
     std::span<const uint8_t> raw_at(size_t i) const {
         const pack_detail::DirEntry& e = dir_at(i);
         if (e.storage != pack_detail::kStorageInline) return {};
@@ -611,9 +614,10 @@ public:
     // ================= serialization walk API =========================
     // The port surface for the record/expose/ingress call sites: walk every
     // entry in INSERTION order with full typed detail, and re-emit any
-    // non-pixel entry's canonical msgpack value byte-identically to the old
-    // arena bytes (max-width profile, ruling-1 NaN flatten — the emit goes
-    // through xi::mp::Writer / pack_mp_detail, the one canonical truth).
+    // non-pixel entry's canonical msgpack value byte-identically to the wire
+    // bytes (max-width profile, ruling-1 NaN flatten). Since ④A the inline
+    // payload IS that canonical value, so for an inline entry canonical_value
+    // is a verbatim splice of the raw span, not a re-encode.
     // No slab internals leak through this surface.
     struct EntryView {
         size_t           ordinal = 0;      // insertion index
@@ -661,69 +665,56 @@ public:
     //   I64 -> int64 0xd3        F64 -> float64 0xcb (NaN already flattened)
     //   Bool -> 0xc2/0xc3        Str -> str32 0xdb
     //   Bin (inline OR pooled) -> bin32 0xc6 over the payload bytes
-    //   Mp  -> the stored canonical bytes VERBATIM (raw_canonical splice)
-    // Image/Tensor entries have NO single canonical scalar form (the wire
-    // shape — descriptor map + pixel bin — is the dumper's contract, built
-    // from get_image/get_tensor): returns false, writer untouched. Also false
-    // for a pooled Bin whose pool buffer died (never emits a poisoned value).
+    //   Mp  -> the stored canonical bytes VERBATIM
+    // memory == wire (④A): for an INLINE entry the stored payload IS that
+    // canonical value, so this is a verbatim splice of raw_at(i) — the identity
+    // is structural (a copy), not a re-encode that a walker must keep honest.
+    // A pooled Bin re-wraps its pool bytes as bin32. Image/Tensor entries have
+    // NO single canonical scalar form (the wire shape — descriptor map + pixel
+    // bin — is the dumper's contract, built from get_image/get_tensor): returns
+    // false, writer untouched. Also false for a pooled Bin whose buffer died
+    // (never emits a poisoned value).
     bool canonical_value(size_t i, xi::mp::Writer& w) const {
         const pack_detail::DirEntry& e = dir_at(i);
-        const uint8_t* p = slab() + e.off;
-        switch (PackTag(e.tag)) {
-            case PackTag::I64: {
-                int64_t v; std::memcpy(&v, p, 8); w.int_(v); return true;
-            }
-            case PackTag::F64: {
-                double v; std::memcpy(&v, p, 8); w.float_(v); return true;
-            }
-            case PackTag::Bool: w.boolean(p[0] != 0); return true;
-            case PackTag::Str:
-                w.str(std::string_view(reinterpret_cast<const char*>(p), e.len));
-                return true;
-            case PackTag::Mp:  w.raw_canonical(p, e.len); return true;
-            case PackTag::Bin: {
-                if (e.storage == pack_detail::kStorageInline) {
-                    w.bin(p, e.len);
-                    return true;
-                }
-                const pack_detail::ExtRecord& r = ext_of(e);
-                auto v = pack_pool::view(r.handle);
-                if (!r.handle || v.size() < r.len) return false;   // F1 guard
-                w.bin(v.data(), r.len);
-                return true;
-            }
-            case PackTag::Image:
-            case PackTag::Tensor:
-            default:
-                return false;
+        if (PackTag(e.tag) == PackTag::Image || PackTag(e.tag) == PackTag::Tensor)
+            return false;
+        if (e.storage == pack_detail::kStorageInline) {
+            // The inline payload is already the canonical wire value — splice it.
+            w.raw_canonical(slab() + e.off, e.len);
+            return true;
         }
+        // EXTERN Bin: the pool bytes become a canonical bin32 on the wire.
+        const pack_detail::ExtRecord& r = ext_of(e);
+        auto v = pack_pool::view(r.handle);
+        if (!r.handle || v.size() < r.len) return false;   // F1 guard
+        w.bin(v.data(), r.len);
+        return true;
     }
 
-    // ---- typed borrowed reads (raw slab loads — zero decode) ----------
+    // ---- typed borrowed reads (skip the canonical msgpack header) ------
+    // The inline payload is canonical msgpack (④A), so a typed read decodes the
+    // fixed-width header at a known offset — one branch-free skip, zero heap,
+    // zero-copy for str/bin. pack_mp_detail's readers are the fixed-offset
+    // decoders over these trusted canonical bytes.
     std::optional<int64_t> get_i64(std::string_view key) const {
         const auto* e = find(key);
         if (!e || PackTag(e->tag) != PackTag::I64) return std::nullopt;
-        int64_t v;
-        std::memcpy(&v, slab() + e->off, 8);
-        return v;
+        return pack_mp_detail::read_i64(slab() + e->off);
     }
     std::optional<double> get_f64(std::string_view key) const {
         const auto* e = find(key);
         if (!e || PackTag(e->tag) != PackTag::F64) return std::nullopt;
-        double v;
-        std::memcpy(&v, slab() + e->off, 8);
-        return v;
+        return pack_mp_detail::read_f64(slab() + e->off);
     }
     std::optional<bool> get_bool(std::string_view key) const {
         const auto* e = find(key);
         if (!e || PackTag(e->tag) != PackTag::Bool) return std::nullopt;
-        return slab()[e->off] != 0;
+        return pack_mp_detail::read_bool(slab() + e->off);
     }
     std::optional<std::string_view> get_str(std::string_view key) const {
         const auto* e = find(key);
         if (!e || PackTag(e->tag) != PackTag::Str) return std::nullopt;
-        return std::string_view(reinterpret_cast<const char*>(slab() + e->off),
-                                e->len);
+        return pack_mp_detail::read_str(slab() + e->off);
     }
     // Binary: resolves storage duality — inline slab bytes OR a pool buffer,
     // both surfaced as one const span (D1 "storage duality, API unity").
@@ -739,7 +730,8 @@ public:
             if (!r.handle || v.size() < r.len) return std::nullopt;
             return v.first(r.len);
         }
-        return std::span<const uint8_t>(slab() + e->off, e->len);
+        // INLINE: the payload is a canonical bin32 — skip its header (④A).
+        return pack_mp_detail::read_bin(slab() + e->off);
     }
     // Image descriptor + zero-copy pixel span over the pool buffer.
     std::optional<PackImageView> get_image(std::string_view key) const {
@@ -777,7 +769,8 @@ public:
             if (!r.handle || v.size() < r.len) return std::nullopt;   // F1 guard
             bv.bytes = v.first(r.len);
         } else {
-            bv.bytes = std::span<const uint8_t>(slab() + e->off, e->len);
+            // INLINE: the payload is a canonical bin32 — skip its header (④A).
+            bv.bytes = pack_mp_detail::read_bin(slab() + e->off);
         }
         return bv;
     }
@@ -925,47 +918,45 @@ public:
 
     bool sealed() const { return sealed_; }
 
+    // memory == wire (④A): the inline payload IS the entry's canonical msgpack
+    // value, encoded here at add-time through the ONE canonical truth
+    // (pack_mp_detail's fixed-width forms == xi::mp::Writer). raw_at(i) is then
+    // the wire bytes verbatim and canonical_value is a copy, not a re-encode.
     void add_i64(std::string_view key, int64_t v) {
         if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::I64);
-        e.off = bump_(8, 8);
-        e.len = 8;
-        std::memcpy(s_->payload.data() + e.off, &v, 8);
+        e.off = bump_(uint32_t(pack_mp_detail::kI64Size), 1);   // 0xd3 + 8
+        e.len = uint32_t(pack_mp_detail::kI64Size);
+        pack_mp_detail::write_i64(s_->payload.data() + e.off, v);
         s_->entries.push_back(e);
     }
-    // NaN is flattened to the canonical quiet pattern AT ADD (ruling 1 —
-    // the same bit test xi::mp::Writer::float_ applies), so the raw stored
-    // double, get_f64, AND the canonical walk all agree byte-for-byte with
-    // what the old arena encoding stored.
+    // NaN is flattened to the canonical quiet pattern AT ADD (ruling 1 — the
+    // same bit test xi::mp::Writer::float_ applies, here inside write_f64), so
+    // the stored canonical bytes, get_f64, AND the canonical walk all agree
+    // byte-for-byte with what the old arena encoding stored.
     void add_f64(std::string_view key, double v) {
         if (spent_()) return;
-        uint64_t bits;
-        std::memcpy(&bits, &v, sizeof bits);
-        if ((bits & 0x7ff0000000000000ull) == 0x7ff0000000000000ull &&
-            (bits & 0x000fffffffffffffull) != 0) {
-            bits = 0x7ff8000000000000ull;
-            std::memcpy(&v, &bits, sizeof v);
-        }
         pack_detail::TmpEntry e = begin_(key, PackTag::F64);
-        e.off = bump_(8, 8);
-        e.len = 8;
-        std::memcpy(s_->payload.data() + e.off, &v, 8);
+        e.off = bump_(uint32_t(pack_mp_detail::kF64Size), 1);   // 0xcb + 8
+        e.len = uint32_t(pack_mp_detail::kF64Size);
+        pack_mp_detail::write_f64(s_->payload.data() + e.off, v);
         s_->entries.push_back(e);
     }
     void add_bool(std::string_view key, bool v) {
         if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::Bool);
-        e.off = bump_(1, 1);
-        e.len = 1;
-        s_->payload[e.off] = v ? 1 : 0;
+        e.off = bump_(uint32_t(pack_mp_detail::kBoolSize), 1);  // 0xc2 / 0xc3
+        e.len = uint32_t(pack_mp_detail::kBoolSize);
+        pack_mp_detail::write_bool(s_->payload.data() + e.off, v);
         s_->entries.push_back(e);
     }
     void add_str(std::string_view key, std::string_view v) {
         if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::Str);
-        e.off = bump_(uint32_t(v.size()), 1);
-        e.len = uint32_t(v.size());
-        if (!v.empty()) std::memcpy(s_->payload.data() + e.off, v.data(), v.size());
+        const size_t enc = pack_mp_detail::str_size(v.size());  // 0xdb + 4 + n
+        e.off = bump_(uint32_t(enc), 1);
+        e.len = uint32_t(enc);
+        pack_mp_detail::write_str(s_->payload.data() + e.off, v);
         s_->entries.push_back(e);
     }
     // Binary: small stays inline (raw bytes in the slab); large is minted into
@@ -989,10 +980,12 @@ public:
                 "storing inline\n",
                 int(key.size()), key.data(), n);
         }
+        // INLINE bin: store the canonical bin32 value (memory == wire, ④A).
         pack_detail::TmpEntry e = begin_(key, PackTag::Bin);
-        e.off = bump_(uint32_t(n), 1);
-        e.len = uint32_t(n);
-        if (n) std::memcpy(s_->payload.data() + e.off, data, n);
+        const size_t enc = pack_mp_detail::bin_size(n);         // 0xc6 + 4 + n
+        e.off = bump_(uint32_t(enc), 1);
+        e.len = uint32_t(enc);
+        pack_mp_detail::write_bin(s_->payload.data() + e.off, data, n);
         s_->entries.push_back(e);
     }
     // Image: pixels always pooled (aligned raw buffer); descriptor dims ride
