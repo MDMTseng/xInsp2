@@ -28,6 +28,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
+#include <span>
 
 namespace xi {
 
@@ -94,6 +96,65 @@ inline bool blob_head_validate(const uint8_t* base, size_t len) {
     if (uint64_t(8) + desc_len > len) return false;                 // desc overrun
     if (!blob_desc_is_canonical_map(base + 8, desc_len)) return false;
     return blob_payload_off(desc_len) <= len;                       // payload_off in bounds
+}
+
+// ---------------------------------------------------------------------------
+// Padded sub-layout INSIDE a blob payload (a toolbox convenience, spec 30).
+//
+// A custom type often lays its payload out as
+//     [ own info (msgpack / header bytes) ] [ pad ] [ bulk data ]
+// with the BULK region aligned (SIMD / cv::Mat wrap / GPU upload). Because a
+// blob payload base is 64B-aligned (kBlobPayloadAlign), aligning the bulk offset
+// WITHIN the payload gives it absolute alignment for free. This helper does the
+// offset math + the deterministic fill; it is convention-NEUTRAL — it writes no
+// key and names nothing. The caller records `data_off` in its OWN descriptor if
+// a reader needs to find the bulk region, e.g.:
+//
+//     auto L = xi::padded_layout(head.size(), bulk_bytes);   // 64B bulk align
+//     if (!L) { /* fail loud: head too large / total overflow */ }
+//     // mint a blob whose payload_len == L->total, with data_off in the desc:
+//     //   {"t":"acme/scan","data_off":L->data_off, ...}
+//     uint8_t* bulk = xi::place_padded_head(payload, head, *L);
+//     // ... DMA / write bulk_bytes into `bulk` (64B-aligned) ...
+//
+// A reader parses the descriptor (data_off) and resolves the bulk as
+// payload.data() + data_off.
+struct PaddedLayout {
+    uint32_t data_off = 0;   // offset of the bulk region within the payload
+    size_t   total    = 0;   // total payload length (data_off + data_len)
+};
+
+// Compute the padded sub-layout for a [head][pad][bulk] payload. `align` must be
+// a power of two (default: the blob payload alignment, so the bulk lands
+// 64B-aligned in absolute terms). Fail-loud (nullopt) on: a zero / non-power-of-
+// two align; a head whose aligned offset overflows uint32_t (the data_off field);
+// or a total that overflows size_t. Pure arithmetic, no allocation.
+inline std::optional<PaddedLayout> padded_layout(size_t head_len, size_t data_len,
+                                                 size_t align = kBlobPayloadAlign) {
+    if (align == 0 || (align & (align - 1)) != 0) return std::nullopt;   // power of two
+    if (head_len > SIZE_MAX - (align - 1)) return std::nullopt;          // align_up would wrap
+    const uint64_t data_off = pack_detail::align_up(uint64_t(head_len), uint64_t(align));
+    if (data_off > 0xFFFFFFFFull) return std::nullopt;                   // fits data_off (u32)
+    if (uint64_t(data_len) > uint64_t(SIZE_MAX) - data_off) return std::nullopt;  // total wraps
+    PaddedLayout L;
+    L.data_off = uint32_t(data_off);
+    L.total    = size_t(data_off) + data_len;
+    return L;
+}
+
+// Place the head into a minted `payload` and return a pointer to the bulk region.
+// memcpy the `head` bytes at offset 0, ZERO the pad gap [head.size(), data_off)
+// — DETERMINISTIC bytes, because the whole payload rides on the wire verbatim
+// (memory == wire) — and return payload + data_off (64B-aligned iff `payload`
+// is, which a minted blob payload is). `payload` must hold >= layout.total bytes,
+// and head.size() must be <= layout.data_off (true when `layout` came from
+// padded_layout(head.size(), ...)).
+inline uint8_t* place_padded_head(uint8_t* payload, std::span<const uint8_t> head,
+                                  const PaddedLayout& layout) {
+    if (!head.empty()) std::memcpy(payload, head.data(), head.size());
+    if (layout.data_off > head.size())
+        std::memset(payload + head.size(), 0, layout.data_off - head.size());
+    return payload + layout.data_off;
 }
 
 }  // namespace xi
