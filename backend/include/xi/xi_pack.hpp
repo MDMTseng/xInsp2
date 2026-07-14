@@ -248,9 +248,37 @@ private:
     std::vector<SlabBuf> free_;
 };
 
-inline SlabPool& slab_pool() {
-    thread_local SlabPool p;
-    return p;
+// The SlabPool hides behind a trivially-destructible thread_local POINTER (the
+// pixpool-magazine doctrine, xi_image_pool.hpp): the pointer slot itself has no
+// destructor, so it stays readable (as null) even after the owning Owner
+// thread_local has been destroyed. A Pack legitimately outlives its producer
+// thread and may be destroyed inside a LATER thread_local destructor on the
+// same thread (or during static teardown) — that late release() must NOT touch
+// a SlabPool whose free_ vector was already destroyed. With the pointer null it
+// falls through to a plain heap free instead (SlabBuf's unique_ptr). This is the
+// same hardening ImagePool::instance() and the pixpool shelf/magazine carry;
+// SlabPool is the one recycle pool a dropped Pack reaches, so it needs it too.
+inline SlabPool* tls_slab_pool() {
+    thread_local SlabPool* slot = nullptr;
+    struct Owner {
+        SlabPool** s;
+        explicit Owner(SlabPool** slot_) : s(slot_) { *s = new SlabPool(); }
+        ~Owner() { delete *s; *s = nullptr; }
+    };
+    thread_local Owner owner{&slot};
+    return slot;
+}
+// Borrow a slab (>= need). During normal operation the pool is live; the null
+// path only happens if a build were somehow attempted during teardown.
+inline SlabBuf slab_acquire(size_t need, size_t default_cap) {
+    if (SlabPool* p = tls_slab_pool()) return p->acquire(need, default_cap);
+    size_t cap = need > default_cap ? need : default_cap;
+    return SlabBuf{std::unique_ptr<uint8_t[]>(new uint8_t[cap]), cap};
+}
+// Return a slab for reuse. If the pool is gone (late teardown), b frees its
+// slab outright as it goes out of scope — never a UAF on a dead free_ vector.
+inline void slab_release(SlabBuf&& b) {
+    if (SlabPool* p = tls_slab_pool()) p->release(std::move(b));
 }
 
 // FNV-1a 64 over the key bytes — the directory sort/search key. Collisions
@@ -473,25 +501,36 @@ struct BuilderScratch {
     void clear() { payload.clear(); entries.clear(); }   // capacity kept
 };
 
-// ONE pool function, shared by get and put — two separate thread_locals here
-// would silently defeat the recycle.
-inline std::vector<std::unique_ptr<BuilderScratch>>& scratch_pool_() {
-    thread_local std::vector<std::unique_ptr<BuilderScratch>> pool;
-    return pool;
+// ONE pool, shared by get and put — two separate thread_locals here would
+// silently defeat the recycle. Hidden behind a trivially-destructible
+// thread_local POINTER for the same teardown reason as SlabPool above: a
+// builder abandoned during static/thread teardown (scratch_put from a late
+// destructor) must not touch a freelist vector that was already destroyed —
+// with the pointer null it just deletes the scratch outright.
+using ScratchFreelist = std::vector<std::unique_ptr<BuilderScratch>>;
+inline ScratchFreelist* tls_scratch_pool() {
+    thread_local ScratchFreelist* slot = nullptr;
+    struct Owner {
+        ScratchFreelist** s;
+        explicit Owner(ScratchFreelist** slot_) : s(slot_) { *s = new ScratchFreelist(); }
+        ~Owner() { delete *s; *s = nullptr; }
+    };
+    thread_local Owner owner{&slot};
+    return slot;
 }
 inline BuilderScratch* scratch_get() {
-    auto& pool = scratch_pool_();
-    if (!pool.empty()) {
-        BuilderScratch* s = pool.back().release();
-        pool.pop_back();
+    ScratchFreelist* pool = tls_scratch_pool();
+    if (pool && !pool->empty()) {
+        BuilderScratch* s = pool->back().release();
+        pool->pop_back();
         return s;
     }
     return new BuilderScratch();
 }
 inline void scratch_put(BuilderScratch* s) {
     s->clear();
-    auto& pool = scratch_pool_();
-    if (pool.size() < 8) pool.emplace_back(s);
+    ScratchFreelist* pool = tls_scratch_pool();
+    if (pool && pool->size() < 8) pool->emplace_back(s);
     else delete s;
 }
 
@@ -840,7 +879,7 @@ private:
         for (uint32_t i = 0; i < n; ++i)
             if (d[i].storage == pack_detail::kStorageExtern)
                 pack_pool::release(ext_of(d[i]).handle);   // release(0) is a no-op
-        pack_detail::slab_pool().release(std::move(slab_));
+        pack_detail::slab_release(std::move(slab_));
         slab_ = {};
     }
     void move_from(Pack&& o) noexcept {
@@ -887,6 +926,7 @@ public:
     bool sealed() const { return sealed_; }
 
     void add_i64(std::string_view key, int64_t v) {
+        if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::I64);
         e.off = bump_(8, 8);
         e.len = 8;
@@ -898,6 +938,7 @@ public:
     // double, get_f64, AND the canonical walk all agree byte-for-byte with
     // what the old arena encoding stored.
     void add_f64(std::string_view key, double v) {
+        if (spent_()) return;
         uint64_t bits;
         std::memcpy(&bits, &v, sizeof bits);
         if ((bits & 0x7ff0000000000000ull) == 0x7ff0000000000000ull &&
@@ -912,6 +953,7 @@ public:
         s_->entries.push_back(e);
     }
     void add_bool(std::string_view key, bool v) {
+        if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::Bool);
         e.off = bump_(1, 1);
         e.len = 1;
@@ -919,6 +961,7 @@ public:
         s_->entries.push_back(e);
     }
     void add_str(std::string_view key, std::string_view v) {
+        if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::Str);
         e.off = bump_(uint32_t(v.size()), 1);
         e.len = uint32_t(v.size());
@@ -929,6 +972,7 @@ public:
     // a pool buffer (D1). Either way get_bin returns one span.
     void add_bin(std::string_view key, const void* data, size_t n) {
         assert(!sealed_ && "add after seal");
+        if (spent_()) return;
         if (n >= kPackLargeThreshold) {
             xi_image_handle h = pack_pool::alloc_bytes(data, n);
             if (h) {
@@ -958,6 +1002,7 @@ public:
     void add_image(std::string_view key, int32_t w, int32_t h, int32_t c,
                    const void* pixels) {
         assert(!sealed_ && "add after seal");
+        if (spent_()) return;
         xi_image_handle handle = pack_pool::alloc_image(w, h, c, pixels);
         push_extern_(key, PackTag::Image, 0, handle, w, h, c,
                      uint32_t(int64_t(w) * h * c));
@@ -967,6 +1012,7 @@ public:
     void adopt_image(std::string_view key, int32_t w, int32_t h, int32_t c,
                      xi_image_handle handle) {
         assert(!sealed_ && "add after seal");
+        if (spent_()) return;
         pack_pool::addref(handle);
         push_extern_(key, PackTag::Image, 0, handle, w, h, c,
                      uint32_t(int64_t(w) * h * c));
@@ -979,6 +1025,7 @@ public:
     bool add_tensor(std::string_view key, int32_t w, int32_t h, int32_t c,
                     PackDtype dtype, const void* elems) {
         assert(!sealed_ && "add after seal");
+        if (spent_()) return false;
         if (w <= 0 || h <= 0 || c <= 0) return false;
         const uint64_t bytes =
             uint64_t(w) * uint64_t(h) * uint64_t(c) * pack_dtype_elem_size(dtype);
@@ -998,6 +1045,7 @@ public:
     bool adopt_tensor(std::string_view key, int32_t w, int32_t h, int32_t c,
                       PackDtype dtype, xi_image_handle handle) {
         assert(!sealed_ && "add after seal");
+        if (spent_()) return false;
         if (w <= 0 || h <= 0 || c <= 0 || !handle) return false;
         const uint64_t bytes =
             uint64_t(w) * uint64_t(h) * uint64_t(c) * pack_dtype_elem_size(dtype);
@@ -1019,6 +1067,7 @@ public:
     bool adopt_bin(std::string_view key, uint16_t type_id,
                    xi_image_handle handle) {
         assert(!sealed_ && "add after seal");
+        if (spent_()) return false;
         if (!handle) return false;
         if (type_id != 0 && type_id < kPackTypeUserBase) return false;
         auto v = pack_pool::view(handle);          // {} for a dead handle
@@ -1034,6 +1083,7 @@ public:
     bool add_blob(std::string_view key, uint16_t type_id,
                   const void* data, size_t n) {
         assert(!sealed_ && "add after seal");
+        if (spent_()) return false;
         assert(type_id >= kPackTypeUserBase && "user blob type_id below the user base");
         xi_image_handle h = pack_pool::alloc_bytes(data, n);
         if (!h) return false;
@@ -1051,6 +1101,7 @@ public:
     // and refuses forged pool-handle ext BEFORE producing the canonical bytes
     // this method then stores. "The safe path is the only path" (doc 07 Ingress).
     void add_mp(std::string_view key, const void* mp, size_t n) {
+        if (spent_()) return;
         pack_detail::TmpEntry e = begin_(key, PackTag::Mp);
         e.off = bump_(uint32_t(n), 8);
         e.len = uint32_t(n);
@@ -1062,6 +1113,11 @@ public:
     // to a Pack. The builder is spent afterwards (scratch recycled).
     Pack seal(int64_t ts_us = 0) {
         assert(!sealed_ && "double seal");
+        // A spent/moved-from builder owns no scratch: return an empty Pack
+        // deterministically instead of dereferencing a null s_ in a release
+        // build (where the assert is compiled out). The invariant is now
+        // structural, not assert-only.
+        if (spent_()) return Pack{};
         sealed_ = true;
         auto& sc = *s_;
         const uint32_t n = uint32_t(sc.entries.size());
@@ -1071,7 +1127,7 @@ public:
         const uint64_t slab_bytes  = payload_off + sc.payload.size();
 
         pack_detail::SlabBuf slab =
-            pack_detail::slab_pool().acquire(size_t(slab_bytes), kDefaultSlab);
+            pack_detail::slab_acquire(size_t(slab_bytes), kDefaultSlab);
         uint8_t* base = slab.data.get();
 
         // Directory order: (key_hash, key bytes, ordinal) — deterministic,
@@ -1143,6 +1199,11 @@ private:
         static std::atomic<uint64_t> id{1};
         return id;
     }
+
+    // True once the builder is spent (sealed) or moved-from — in both states
+    // s_ is null, so every mutator refuses deterministically (see spent-guard
+    // at each add_*) instead of dereferencing null in a release build.
+    bool spent_() const { return sealed_ || !s_; }
 
     pack_detail::TmpEntry begin_(std::string_view key, PackTag tag) {
         assert(!sealed_ && "add after seal");

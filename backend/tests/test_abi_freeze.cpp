@@ -147,6 +147,50 @@ static_assert(sizeof(xi_log_v1) == 2 * sizeof(void*), "xi_log_v1 size changed (f
 XI_FREEZE_IFACE(xi_log_v1, log,        0, void (*)(int32_t, const char*));
 XI_FREEZE_IFACE(xi_log_v1, set_status, 8, void (*)(const char*, const char*));
 
+// xi.pack@1 (HOST door) — the v3-slab data plane's frozen keyed-buffer vtable =
+// 25 entries. FROZEN FOREVER: the builder_add_bool/get_bool tail was the last
+// pre-cutover append; all later growth ships as xi.pack@3 below. The header
+// carries a size + last-field static_assert too (belt); this pins every field.
+static_assert(sizeof(xi_pack_v1) == 25 * sizeof(void*), "xi_pack_v1 size changed (frozen @1)");
+XI_FREEZE_IFACE(xi_pack_v1, builder_new,         0,   xi_pack_builder (*)(void));
+XI_FREEZE_IFACE(xi_pack_v1, builder_add_i64,     8,   void (*)(xi_pack_builder, const char*, int64_t));
+XI_FREEZE_IFACE(xi_pack_v1, builder_add_f64,     16,  void (*)(xi_pack_builder, const char*, double));
+XI_FREEZE_IFACE(xi_pack_v1, builder_add_str,     24,  void (*)(xi_pack_builder, const char*, const char*, int32_t));
+XI_FREEZE_IFACE(xi_pack_v1, builder_add_bin,     32,  void (*)(xi_pack_builder, const char*, const void*, int32_t));
+XI_FREEZE_IFACE(xi_pack_v1, builder_add_image,   40,  void (*)(xi_pack_builder, const char*, int32_t, int32_t, int32_t, const void*));
+XI_FREEZE_IFACE(xi_pack_v1, builder_adopt_image, 48,  void (*)(xi_pack_builder, const char*, int32_t, int32_t, int32_t, xi_image_handle));
+XI_FREEZE_IFACE(xi_pack_v1, builder_add_mp,      56,  void (*)(xi_pack_builder, const char*, const void*, int32_t));
+XI_FREEZE_IFACE(xi_pack_v1, builder_seal,        64,  xi_pack_handle (*)(xi_pack_builder));
+XI_FREEZE_IFACE(xi_pack_v1, builder_abandon,     72,  void (*)(xi_pack_builder));
+XI_FREEZE_IFACE(xi_pack_v1, count,               80,  int32_t (*)(xi_pack_handle));
+XI_FREEZE_IFACE(xi_pack_v1, key_at,              88,  const char* (*)(xi_pack_handle, int32_t, int32_t*));
+XI_FREEZE_IFACE(xi_pack_v1, tag_at,              96,  int32_t (*)(xi_pack_handle, int32_t));
+XI_FREEZE_IFACE(xi_pack_v1, tag_of,              104, int32_t (*)(xi_pack_handle, const char*));
+XI_FREEZE_IFACE(xi_pack_v1, get_i64,             112, int32_t (*)(xi_pack_handle, const char*, int64_t*));
+XI_FREEZE_IFACE(xi_pack_v1, get_f64,             120, int32_t (*)(xi_pack_handle, const char*, double*));
+XI_FREEZE_IFACE(xi_pack_v1, get_str,             128, int32_t (*)(xi_pack_handle, const char*, const char**, int32_t*));
+XI_FREEZE_IFACE(xi_pack_v1, get_bin,             136, int32_t (*)(xi_pack_handle, const char*, const void**, int32_t*));
+XI_FREEZE_IFACE(xi_pack_v1, get_image,           144, int32_t (*)(xi_pack_handle, const char*, xi_pack_image*));
+XI_FREEZE_IFACE(xi_pack_v1, get_mp,              152, int32_t (*)(xi_pack_handle, const char*, const void**, int32_t*));
+XI_FREEZE_IFACE(xi_pack_v1, retain,              160, void (*)(xi_pack_handle));
+XI_FREEZE_IFACE(xi_pack_v1, release,             168, void (*)(xi_pack_handle));
+XI_FREEZE_IFACE(xi_pack_v1, emit_pack,           176, void (*)(const char*, xi_trigger_id, xi_pack_handle, int64_t));
+XI_FREEZE_IFACE(xi_pack_v1, builder_add_bool,    184, void (*)(xi_pack_builder, const char*, int32_t));
+XI_FREEZE_IFACE(xi_pack_v1, get_bool,            192, int32_t (*)(xi_pack_handle, const char*, int32_t*));
+
+// xi.pack@3 (HOST door) — the slab-generation supplement (tensors, typed blobs,
+// ordinal walk) = 9 entries. FROZEN: a change ships as xi.pack@N+1, never in place.
+static_assert(sizeof(xi_pack_v3) == 9 * sizeof(void*), "xi_pack_v3 size changed (frozen @3)");
+XI_FREEZE_IFACE(xi_pack_v3, builder_add_tensor,   0,  int32_t (*)(xi_pack_builder, const char*, int32_t, int32_t, int32_t, int32_t, const void*));
+XI_FREEZE_IFACE(xi_pack_v3, builder_adopt_tensor, 8,  int32_t (*)(xi_pack_builder, const char*, int32_t, int32_t, int32_t, int32_t, xi_image_handle));
+XI_FREEZE_IFACE(xi_pack_v3, builder_add_blob,     16, int32_t (*)(xi_pack_builder, const char*, int32_t, const void*, int32_t));
+XI_FREEZE_IFACE(xi_pack_v3, builder_adopt_bin,    24, int32_t (*)(xi_pack_builder, const char*, int32_t, xi_image_handle));
+XI_FREEZE_IFACE(xi_pack_v3, get_tensor,           32, int32_t (*)(xi_pack_handle, const char*, xi_pack_tensor*));
+XI_FREEZE_IFACE(xi_pack_v3, get_blob,             40, int32_t (*)(xi_pack_handle, const char*, int32_t*, const void**, int32_t*));
+XI_FREEZE_IFACE(xi_pack_v3, type_id_of,           48, int32_t (*)(xi_pack_handle, const char*));
+XI_FREEZE_IFACE(xi_pack_v3, type_id_at,           56, int32_t (*)(xi_pack_handle, int32_t));
+XI_FREEZE_IFACE(xi_pack_v3, entry_at,             64, int32_t (*)(xi_pack_handle, int32_t, xi_pack_entry*));
+
 #undef XI_FREEZE_IFACE
 
 int main() {
