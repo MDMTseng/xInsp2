@@ -64,9 +64,13 @@ handles); `add_blob(desc, bytes, len)` copies into a freshly minted buffer.
   - image/tensor-named core verbs are deleted; `xi_cv.hpp` & SDK grow the
     convention helpers instead (`mint_image(w,h,c,dt)` builds the descriptor
     and calls mint_blob; `as_cv`/`as_cv_write` parse it).
-- Validation is **one seam**: `blob_head_validate(base,len)` used by
-  adopt_blob, the C door, and wire ingress — same fail-loud discipline as the
-  add_mp canonicalize seam.
+- Validation is **one seam**: `blob_head_validate(base,len)` — it lives in the
+  lightweight, plugin-safe `backend/include/xi/xi_blob_head.hpp` (depends only on
+  `xi_mp.hpp`; `xi_pack.hpp` includes it) so the host container, the C door, AND
+  the wire-ingress parser (compiled into the `record_replay` source plugin, which
+  must not pull the host pool) all refuse through the SAME code. Used by
+  adopt_blob/get_blob, the door, and wire ingress — same fail-loud discipline as
+  the add_mp canonicalize seam.
 
 ## ABI doors
 
