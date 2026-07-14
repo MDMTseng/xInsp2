@@ -82,7 +82,13 @@ namespace keys = xi::mock_camera::keys;
 class MockCamera : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
-    MockCamera(const xi_host_api* host, const char* name) : xi::Plugin(host, name) {}
+    MockCamera(const xi_host_api* host, const char* name) : xi::Plugin(host, name) {
+        // Live-UI egress (spec 31): resolve the xi.ui.egress cap ONCE. Cap absent
+        // (no ui_egress lib plugin loaded) => the one-line push below is a no-op.
+        if (host && host->get_interface)
+            ui_cap_ = static_cast<const xi_cap_v1*>(host->get_interface("xi.cap", 1));
+        ui_channel_ = "ui/" + std::string(name ? name : "cam");
+    }
 
     ~MockCamera() override { stop_(); }
 
@@ -93,6 +99,7 @@ public:
             .set(keys::kFps, fps_.load())
             .set(keys::kStreaming, running_.load())
             .set(keys::kGain, gain_.load())
+            .set("ui_preview", ui_preview_.load())
             .dump();
     }
 
@@ -117,6 +124,9 @@ public:
         // polaris2 ex-feedback: brightness multiplier (default 1.0) applied to
         // the emitted pixels.
         if (p[keys::kGain].is_number()) gain_ = clamp_gain_(p[keys::kGain].as_double());
+        // Live-UI preview push (spec 31), param-gated, DEFAULT OFF: when on, each
+        // emitted frame is also pushed to xi.ui.egress on ui/<instance>.
+        if (p["ui_preview"].is_bool()) ui_preview_ = p["ui_preview"].as_bool();
         return true;
     }
 
@@ -212,6 +222,9 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<double> gain_{1.0};        // polaris2 ex-feedback brightness gain
     std::atomic<int> seq_{0};              // frame counter (door acks read it)
+    std::atomic<bool> ui_preview_{false};  // spec 31 live-UI preview push (default off)
+    const xi_cap_v1*  ui_cap_ = nullptr;   // xi.ui.egress funnel (resolved in ctor)
+    std::string       ui_channel_;         // ui/<instance>
     std::thread thread_;
 
     void start_() {
@@ -251,9 +264,30 @@ private:
         if (!bh || !pp) return false;
         xi::Image v = xi::Image::view(w, h, c, static_cast<const uint8_t*>(pp));
         paint(v);
+        // Live-UI preview push (spec 31): the painted pixels are right here in the
+        // minted payload — push them to xi.ui.egress (one line, param-gated). The
+        // cap writes a latest-wins slot and returns; it never blocks this loop.
+        if (ui_preview_.load()) ui_preview_push_(w, h, c, static_cast<const uint8_t*>(pp));
         bool ok = f.adopt_blob(key, bh);
         host_->image_release(bh);             // pack holds its own addref now
         return ok;
+    }
+
+    // Resolve-once + one-line push (spec 31). Builds {$channel, image} and calls
+    // xi.ui.egress. Cap absent => no-op. builder_add_image synthesizes the
+    // xi/image blob egress dispatches on.
+    void ui_preview_push_(int w, int h, int c, const uint8_t* px) {
+        const xi_pack_v1* pk = pack_iface();
+        if (!pk || !ui_cap_ || !px) return;
+        xi_pack_builder b = pk->builder_new();
+        pk->builder_add_str(b, xi::pack_contract::kChannel,
+                            ui_channel_.c_str(), (int32_t)ui_channel_.size());
+        pk->builder_add_image(b, "image", w, h, c, px);
+        xi_pack_handle req = pk->builder_seal(b);
+        xi_pack_handle rsp = XI_PACK_NULL;
+        ui_cap_->call("xi.ui.egress", req, &rsp);
+        pk->release(req);
+        if (rsp != XI_PACK_NULL) pk->release(rsp);
     }
 
     void run_loop() {
