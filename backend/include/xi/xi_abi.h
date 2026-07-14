@@ -547,6 +547,35 @@ typedef struct xi_pack_v3 {
     int32_t (*entry_at)(xi_pack_handle f, int32_t i, xi_pack_entry* out);
 } xi_pack_v3;
 
+/* PACK-DOOR LAYOUT GUARD — the same discipline the xi_host_api guard below
+ * carries, applied to the two slot-published pack vtables. These are resolved
+ * by version via get_interface (not by struct offset in xi_host_api), so the
+ * host_api size guard does NOT cover them; without these a positional
+ * initializer edit (xi_pack_abi.hpp builds both vtables field-for-field) that
+ * inserts a verb mid-struct instead of at the tail would silently rewire every
+ * function pointer for every ALREADY-COMPILED pack plugin — the exact silent
+ * cross-DLL corruption the freeze doctrine exists to prevent, with no tripwire.
+ * Every field is a function pointer, so the layout is N*sizeof(void*); pinning
+ * the count + the last field's offset fires on any append (size changes) or any
+ * edit that shifts the frozen tail. To refresh after an INTENTIONAL, additive
+ * tail growth, bump the count here and ship the change as the next @version. */
+#if defined(__cplusplus)
+#include <cstddef>
+static_assert(sizeof(xi_pack_v1) == 25 * sizeof(void*),
+              "xi_pack_v1 layout changed: @1 is frozen forever. A verb must be "
+              "APPENDED (and only pre-cutover) or shipped as a new xi.pack@N; "
+              "update this count only for an intentional additive tail.");
+static_assert(offsetof(xi_pack_v1, get_bool) == 24 * sizeof(void*),
+              "xi_pack_v1.get_bool is no longer the last field — a verb was "
+              "inserted mid-struct, rewiring every compiled pack plugin's vtable.");
+static_assert(sizeof(xi_pack_v3) == 9 * sizeof(void*),
+              "xi_pack_v3 layout changed: append-only, and update this count "
+              "only for an intentional additive tail (else ship xi.pack@N+1).");
+static_assert(offsetof(xi_pack_v3, entry_at) == 8 * sizeof(void*),
+              "xi_pack_v3.entry_at is no longer the last field — a verb was "
+              "inserted mid-struct, rewiring every compiled @3 consumer's vtable.");
+#endif
+
 /* xi.pack@1 (PLUGIN door) — pack-in/pack-out process, published by a
  * plugin through xi_plugin_get_interface (below). process receives a
  * sealed input pack (borrowed; the host owns it) and returns a NEW sealed
