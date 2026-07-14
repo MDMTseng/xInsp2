@@ -1,5 +1,5 @@
 // test_pack_c.cpp — correctness net for the "Pack design C" PROTOTYPE
-// (backend/include/xi/proto/xi_pack_c.hpp). Prototype-scoped: this guards the
+// (backend/tests/proto/xi_pack_c.hpp). Prototype-scoped: this guards the
 // experiment's claims so its bench numbers mean something, not a production
 // contract.
 //
@@ -19,7 +19,7 @@
 //     returns to 1 — a pure rc check, not a latch);
 //   * table-level leak oracles (BufTable/PackTableC live counts) at the end.
 
-#include "xi/proto/xi_pack_c.hpp"
+#include "proto/xi_pack_c.hpp"
 #include "xi/xi_mp.hpp"
 
 #include <cstdint>

@@ -1,6 +1,6 @@
 //
 // bench_pack_c.cpp — HEAD-TO-HEAD: current Pack (xi_pack.hpp) vs the
-// "design C" prototype (xi/proto/xi_pack_c.hpp), same-shape workload on both.
+// "design C" prototype (tests/proto/xi_pack_c.hpp), same-shape workload on both.
 // PROTOTYPE MEASUREMENT ONLY — not a perf gate, no baseline; the numbers feed
 // the migrate/don't-migrate judgment.
 //
@@ -45,7 +45,7 @@
 #include "xi/xi_pack_abi.hpp"
 #include "xi/xi_image_pool.hpp"
 #include "xi/xi_mp.hpp"
-#include "xi/proto/xi_pack_c.hpp"
+#include "proto/xi_pack_c.hpp"
 
 #include <algorithm>
 #include <chrono>

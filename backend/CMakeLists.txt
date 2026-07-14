@@ -1046,7 +1046,8 @@ if(NOT MSVC)
 endif()
 _xinsp_perf_gate(perf_pack bench_pack pack.txt)
 
-# --- proto/pack-c PROTOTYPE (design C, backend/include/xi/proto/xi_pack_c.hpp)
+# --- proto/pack-c PROTOTYPE (design C, backend/tests/proto/xi_pack_c.hpp — an
+# experiment record kept OUT of include/; see docs/new_gen/29-pack-c-prototype-record.md)
 # Experiment-only additions: a correctness net in the regular suite, and a
 # head-to-head bench (current Pack vs design C) that is runnable but NOT
 # perf-gated — no baseline, no _xinsp_perf_gate; its numbers feed the
