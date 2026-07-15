@@ -52,6 +52,11 @@ expose = pure transport: channel subscriptions + WS fan-out, drop-not-queue
   **`f32`/`u16` → normalize→u8 (or PNG16) is DEFERRED** — E1 shows those as a
   metadata card (the code comment says "we don't normalize yet"); implement when
   a real non-u8 preview consumer exists.
+  **`encode:false` (config) = RAW PASSTHROUGH** — the "this channel walks raw"
+  ruling: the flusher ships the pushed blob verbatim (no jpeg/downscale/LRU), so
+  push AND pull both see raw at raw's honest cost. Global today; the per-channel
+  table inherits it. Per-REQUEST raw is deliberately NOT egress's job — that is
+  State (an `exchange` ask to the plugin), see the three-way rule.
 - Dedup key = **content hash** (FNV-1a over descriptor + payload) folded with the
   policy fingerprint (quality + downscale target), NOT the pool handle: the @4
   `get_blob` door surfaces descriptor + payload spans but not the handle (the same

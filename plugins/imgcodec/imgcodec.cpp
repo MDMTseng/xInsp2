@@ -107,6 +107,16 @@ public:
             status("imgcodec: host lacks xi.pack@1/xi.cap.provider@1 — no capabilities registered");
             return;
         }
+        if (!pk4_) {
+            // HARD-REFUSE, not degrade: decode's output contract is a @4 blob
+            // (self-describing plane, spec 30) — on a @1-only host it could only
+            // answer $fault forever, and one hard fault would quarantine BOTH
+            // capabilities (on_fault:"refuse"), turning a host-table gap into a
+            // runtime mystery. Legacy (@1-only) compat is waived; be inert and
+            // name the gap at load time instead.
+            status("imgcodec: host lacks xi.pack@4 (blob door) — refusing to register (no capabilities)");
+            return;
+        }
         int32_t r1 = provider_->register_capability("xi.jpeg.encode",  &h_encode, this);
         int32_t r2 = provider_->register_capability("xi.image.decode", &h_decode, this);
         registered_ = (r1 == XI_CAP_REG_OK && r2 == XI_CAP_REG_OK);

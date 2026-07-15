@@ -226,6 +226,9 @@ int main() {
         std::string s = stats(egress.get());
         CHECK(jint(s, "encodes") == enc0);            // NO new encode
         CHECK(jint(s, "dedup_hits") >= ded0 + 1);     // served from the memo
+        // The hit passed the IDENTITY WITNESS (second independent hash) — same
+        // content is a hit, never misclassified as a collision.
+        CHECK(jint(s, "dedup_collisions") == 0);
     }
 
     SECTION("LATEST-WINS: a burst between flushes collapses to the LAST frame only");
@@ -282,6 +285,28 @@ int main() {
         }
         std::string s = stats(egress.get());
         CHECK(jint(s, "lru_entries") == 32);          // bounded exactly at lru_max
+    }
+
+    SECTION("RAW PASSTHROUGH: encode=false ships the blob verbatim — zero encode, no LRU");
+    {
+        // The "this channel walks raw" knob (doc 31 route 1): with encode=false
+        // the flusher bypasses dispatch AND the memo — the pushed self-describing
+        // blob rides the wire as-is, so pull and push both see raw.
+        CHECK(egress->set_def("{\"encode\":false}"));
+        CHECK(egress->get_def().find("\"encode\":false") != std::string::npos);
+        const int enc0 = jint(stats(egress.get()), "encodes");
+        const int lru0 = jint(stats(egress.get()), "lru_entries");
+        const std::vector<uint8_t> R = gen(55);        // never seen before
+        xi_pack_handle req = build_push(pk, "ui/x", R);
+        push(cap, pk, req);
+        pk->release(req);
+        CHECK(wait_stat(egress.get(), "raw_passthrough", 1, 3000) >= 1);
+        std::string s = stats(egress.get());
+        CHECK(jint(s, "encodes") == enc0);             // the codec was never touched
+        CHECK(jint(s, "lru_entries") == lru0);         // and the memo not grown
+        std::string g = expose->exchange("{\"command\":\"get\",\"channel\":\"ui/x\"}");
+        CHECK(jfound_true(g));                          // the raw frame reached expose
+        CHECK(egress->set_def("{\"encode\":true}"));    // restore for teardown parity
     }
 
     SECTION("teardown: both providers unregister; pack balance");

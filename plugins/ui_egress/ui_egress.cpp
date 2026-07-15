@@ -131,15 +131,17 @@ public:
         auto p = xi::Json::parse(cmd);
         const std::string command = p["command"].as_string();
         if (command == "stats") {
-            char buf[256];
+            char buf[384];
             std::snprintf(buf, sizeof(buf),
                 "{\"pushes\":%lld,\"flushes\":%lld,\"encodes\":%lld,\"dedup_hits\":%lld,"
-                "\"dropped_no_sub\":%lld,\"raw_fallbacks\":%lld,\"flush_errors\":%lld,"
+                "\"dedup_collisions\":%lld,\"dropped_no_sub\":%lld,\"raw_fallbacks\":%lld,"
+                "\"raw_passthrough\":%lld,\"flush_errors\":%lld,"
                 "\"lru_entries\":%zu,\"registered\":%s}",
                 (long long)pushes_.load(), (long long)flushes_.load(),
                 (long long)encodes_.load(), (long long)dedup_hits_.load(),
+                (long long)dedup_collisions_.load(),
                 (long long)dropped_no_sub_.load(), (long long)raw_fallbacks_.load(),
-                (long long)flush_errors_.load(),
+                (long long)raw_passthrough_.load(), (long long)flush_errors_.load(),
                 lru_size_(), registered_ ? "true" : "false");
             return buf;
         }
@@ -149,10 +151,11 @@ public:
 
     std::string get_def() const override {
         std::lock_guard<std::mutex> lk(cfg_mu_);
-        char buf[160];
+        char buf[192];
         std::snprintf(buf, sizeof(buf),
-            "{\"fps\":%d,\"quality\":%d,\"downscale_mp\":%d,\"lru_max\":%d}",
-            cfg_.fps, cfg_.quality, cfg_.downscale_mp, cfg_.lru_max);
+            "{\"fps\":%d,\"quality\":%d,\"downscale_mp\":%d,\"lru_max\":%d,\"encode\":%s}",
+            cfg_.fps, cfg_.quality, cfg_.downscale_mp, cfg_.lru_max,
+            cfg_.encode ? "true" : "false");
         return buf;
     }
     bool set_def(const std::string& json) override {
@@ -163,11 +166,19 @@ public:
         cfg_.quality      = clampi_(p["quality"].as_int(cfg_.quality), 1, 100);
         cfg_.downscale_mp = clampi_(p["downscale_mp"].as_int(cfg_.downscale_mp), 1, 64);
         cfg_.lru_max      = clampi_(p["lru_max"].as_int(cfg_.lru_max), 1, 4096);
+        cfg_.encode       = p["encode"].as_bool(cfg_.encode);
         return true;
     }
 
 private:
-    struct Config { int fps = 30; int quality = 80; int downscale_mp = 2; int lru_max = 32; };
+    struct Config {
+        int fps = 30; int quality = 80; int downscale_mp = 2; int lru_max = 32;
+        // encode=false: RAW PASSTHROUGH — the channel ships the pushed blob
+        // verbatim (no jpeg, no downscale, no LRU). The "this channel walks raw"
+        // knob (doc 31): pull and push then both see raw, at raw's honest cost.
+        // Global for now — becomes per-channel when the override table lands.
+        bool encode = true;
+    };
 
     static int clampi_(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -256,8 +267,25 @@ private:
             return;                      // no image blob -> nothing to preview
         ImgDesc d = parse_desc((const uint8_t*)desc, (size_t)desc_len);
 
-        int quality, downscale_mp;
-        { std::lock_guard<std::mutex> lk(cfg_mu_); quality = cfg_.quality; downscale_mp = cfg_.downscale_mp; }
+        int quality, downscale_mp; bool encode;
+        { std::lock_guard<std::mutex> lk(cfg_mu_);
+          quality = cfg_.quality; downscale_mp = cfg_.downscale_mp; encode = cfg_.encode; }
+
+        // (2b) encode=false: RAW PASSTHROUGH — ship the pushed blob verbatim
+        // (descriptor + payload as-is), bypassing dispatch AND the LRU (raw
+        // copies are big and there is no encode to memoize). One straight copy
+        // into the wire frame; the client decodes the self-describing buffer.
+        if (!encode) {
+            raw_passthrough_.fetch_add(1, std::memory_order_relaxed);
+            auto enc = std::make_shared<Encoded>();
+            enc->is_jpeg = false;
+            enc->desc.assign((const uint8_t*)desc, (const uint8_t*)desc + desc_len);
+            enc->raw.assign((const uint8_t*)pay, (const uint8_t*)pay + pay_len);
+            enc->w = (int32_t)d.w; enc->h = (int32_t)d.h; enc->c = (int32_t)d.c;
+            std::vector<uint8_t> frame = build_frame_(channel, enc);
+            hand_to_expose_(channel, frame);
+            return;
+        }
 
         // (3) Dedup by content identity (descriptor + payload) — reuse the memo.
         uint64_t key = fnv1a((const uint8_t*)pay, (size_t)pay_len,
@@ -267,13 +295,27 @@ private:
         // under the old policy for the same content (doc 28/31 finding F6).
         key ^= (uint64_t)quality * 1099511628211ull;
         key ^= (uint64_t)downscale_mp * 14695981039346656037ull;
+        // The identity witness for a hash hit: an INDEPENDENT second hash
+        // (different FNV basis) over the same bytes. A single-hash LRU hit
+        // serving a colliding OTHER image would show the wrong picture across
+        // channels; two independent 64-bit hashes make an accidental joint
+        // collision astronomically unlikely — verified on every hit, at one
+        // extra linear pass per flush (≪ an encode).
+        const uint64_t witness = fnv1a((const uint8_t*)pay, (size_t)pay_len,
+                                       fnv1a((const uint8_t*)desc, (size_t)desc_len,
+                                             0x9E3779B97F4A7C15ull));
         std::shared_ptr<Encoded> enc = lru_get_(key);
-        if (enc) {
+        if (enc && enc->witness == witness && enc->src_pay_len == pay_len) {
             dedup_hits_.fetch_add(1, std::memory_order_relaxed);
         } else {
+            if (enc) dedup_collisions_.fetch_add(1, std::memory_order_relaxed);
             enc = dispatch_encode_(d, (const uint8_t*)pay, (size_t)pay_len,
                                    (const uint8_t*)desc, (size_t)desc_len, quality, downscale_mp);
-            if (enc) lru_put_(key, enc);
+            if (enc) {
+                enc->witness     = witness;
+                enc->src_pay_len = pay_len;
+                lru_put_(key, enc);      // a colliding entry is REPLACED, not served
+            }
         }
         if (!enc) return;
 
@@ -291,6 +333,8 @@ private:
         std::vector<uint8_t> raw;               // raw u8 pixels (raw fallback)
         std::vector<uint8_t> desc;              // descriptor bytes (metadata card / raw)
         std::string          t;                 // descriptor type (dispatch record)
+        uint64_t             witness = 0;       // second content hash (dedup-hit identity)
+        int64_t              src_pay_len = -1;  // source payload length (identity)
     };
 
     // Dispatch by descriptor "t" (spec 31). Fail-open at every seam.
@@ -563,7 +607,8 @@ private:
     uint64_t seq_ = 0;
 
     std::atomic<int64_t> pushes_{0}, flushes_{0}, encodes_{0}, dedup_hits_{0},
-                         dropped_no_sub_{0}, raw_fallbacks_{0}, flush_errors_{0};
+                         dedup_collisions_{0}, dropped_no_sub_{0}, raw_fallbacks_{0},
+                         raw_passthrough_{0}, flush_errors_{0};
 };
 
 XI_PLUGIN_IMPL(UiEgress)
