@@ -62,7 +62,12 @@ class WsError(Exception):
 class RawWS:
     def __init__(self, port: int):
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=10)
-        self.sock.settimeout(10.0)
+        # Socket-level recv timeout so a STARVED handoff / stalled lane surfaces as
+        # a clean, diagnosable WsError (see _recv_into_buf) instead of an opaque
+        # run_qa 360s TIMEOUT. 50s is generous vs the healthy ~2s handoff, so it
+        # never false-trips a slow-but-alive lane under full-gate machine load, yet
+        # bounds any true stall well under run_qa's 360s per-test cap.
+        self.sock.settimeout(50.0)
         self._buf = bytearray()
         self._next_id = 1
         # RFC 6455 handshake (server does not verify the accept key echo).
@@ -87,7 +92,16 @@ class RawWS:
 
     # ---- raw frame I/O ----
     def _recv_into_buf(self) -> bool:
-        chunk = self.sock.recv(65536)
+        try:
+            chunk = self.sock.recv(65536)
+        except socket.timeout as e:
+            # The socket-level deadline (set in __init__) fired: no bytes for 50s.
+            # Convert it to a WsError so the calling phase's handler names the phase
+            # (e.g. "phase2: exception: WsError(...)") — a clean, diagnosable FAIL
+            # inside run_qa's window rather than an opaque 360s suite TIMEOUT. In
+            # this test a live lane delivers frames continuously, so a 50s gap means
+            # the lane/handoff stalled.
+            raise WsError("recv timed out (50s) — lane/handoff stalled (no frames)") from e
         if not chunk:
             return False
         self._buf += chunk
