@@ -863,8 +863,11 @@ function(_xinsp_perf_gate test_name bench_target baseline_name)
     # committed baseline's environment fingerprint does not match this machine
     # (different hardware / JPEG backend / build, or a pre-fingerprint baseline)
     # — surface that as a ctest SKIP, not a silent pass.
+    # RUN_SERIAL: a live baseline compare measures REAL latency — sharing the
+    # machine with parallel tests turns scheduler contention into false
+    # regressions (the 2us p50 metrics have one-quantum headroom).
     set_tests_properties(${test_name} PROPERTIES
-        LABELS "perf" TIMEOUT 300
+        LABELS "perf" TIMEOUT 300 RUN_SERIAL TRUE
         SKIP_REGULAR_EXPRESSION "perf_gate: SKIP")
 endfunction()
 
