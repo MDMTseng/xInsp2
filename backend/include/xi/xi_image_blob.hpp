@@ -91,10 +91,22 @@ inline std::optional<ImageBlobView> read_image_blob(std::span<const uint8_t> des
 
     if (t != "xi/image" || dt.empty() || !have_w || !have_h || !have_c) return std::nullopt;
     if (w <= 0 || h <= 0 || c <= 0) return std::nullopt;
-    const int64_t elem = image_blob_dt_elem_size(dt);
+    // Bound the dims to int32 BEFORE the narrowing cast below, and compute
+    // w*h*c*elem OVERFLOW-SAFE in uint64. This reader is the trust boundary for
+    // descriptor-supplied dims (producers mint_image / f_add_image already guard
+    // their products) — a wrapped signed product landing on a small positive
+    // value would otherwise pass `payload.size() >= need` while the (int32-cast)
+    // dims claim a giant image, and a consumer (as_cv_*) would build a Mat far
+    // larger than the payload → OOB (doc 28/31 finding).
+    if (w > INT32_MAX || h > INT32_MAX || c > INT32_MAX) return std::nullopt;
+    const uint64_t elem = static_cast<uint64_t>(image_blob_dt_elem_size(dt));
     if (elem == 0) return std::nullopt;                    // dtype the caller can't represent
-    const int64_t need = w * h * c * elem;
-    if (need <= 0 || static_cast<int64_t>(payload.size()) < need) return std::nullopt;
+    uint64_t need = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);  // <= INT32_MAX^2, fits
+    if (need > UINT64_MAX / static_cast<uint64_t>(c)) return std::nullopt;
+    need *= static_cast<uint64_t>(c);
+    if (need > UINT64_MAX / elem) return std::nullopt;
+    need *= elem;
+    if (need == 0 || payload.size() < need) return std::nullopt;
 
     ImageBlobView v;
     v.width = static_cast<int32_t>(w);

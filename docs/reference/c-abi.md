@@ -596,6 +596,7 @@ typedef xi_pack_handle (*xi_cap_handler_fn)(void* self, xi_pack_handle input);
   | −3 | `XI_CAP_EQUARANTINED` | providing instance quarantined — handler not entered |
   | −4 | `XI_CAP_ESHAPE` | provider entry unusable (no adapter / null handler) |
   | −5 | `XI_CAP_EREENTRY` | refused: the target instance is already being called **on this thread** (per-thread acyclicity — both directions: a plugin calling a capability its own instance provides, and a handler calling back up its own chain). Refused before any lock or plugin code, so the CallScope deadlock dies at the door. |
+  | −6 | `XI_CAP_EINTERNAL` | the handler returned `XI_PACK_NULL` — its declared **hard internal failure** sentinel (a *contract* failure is instead a normal sealed `$fault` pack). Surfaced as an error so `OK` never means a null `*out`. |
 
   Registration codes: `0` OK, `−1` `XI_CAP_REG_EINVAL` (null/empty name or
   handler), `−2` `XI_CAP_REG_ECONTEXT`, `−3` `XI_CAP_REG_ETAKEN`.

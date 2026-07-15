@@ -144,7 +144,17 @@ inline int cv_depth_for_dt(std::string_view dt) {
 // const& parameter is the "I am reading this" signal.
 inline cv::Mat as_cv_read(const ImageBlobView& b) {
     const int depth = cv_depth_for_dt(b.dt);
-    if (depth < 0 || !b.ok()) return {};
+    // Bound channels to OpenCV's CV_CN_MAX (512): CV_MAKETYPE packs (cn-1) into
+    // high bits, so a larger cn wraps into a garbage/negative type. ImageBlobView
+    // is a public aggregate, so re-verify the payload actually holds
+    // height*width*channels*elem bytes (overflow-safe) rather than trusting the
+    // producer — a hand-built or shortened view must not yield an oversized Mat.
+    if (depth < 0 || !b.ok() || b.channels > CV_CN_MAX) return {};
+    uint64_t total = static_cast<uint64_t>(b.height) * static_cast<uint64_t>(b.width);
+    const uint64_t cn = static_cast<uint64_t>(b.channels) * static_cast<uint64_t>(b.elem_size());
+    if (cn == 0 || total > UINT64_MAX / cn) return {};
+    total *= cn;
+    if (b.payload.size() < total) return {};
     const int type = CV_MAKETYPE(depth, b.channels);
     return cv::Mat(b.height, b.width, type,
                    const_cast<uint8_t*>(b.payload.data()),
@@ -167,7 +177,7 @@ inline cv::Mat as_cv(const ImageBlobView& b) { return as_cv_read(b); }
 inline cv::Mat as_cv_write_blob(void* payload, int32_t w, int32_t h, int32_t c,
                                 std::string_view dt) {
     const int depth = cv_depth_for_dt(dt);
-    if (depth < 0 || !payload || w <= 0 || h <= 0 || c <= 0) return {};
+    if (depth < 0 || !payload || w <= 0 || h <= 0 || c <= 0 || c > CV_CN_MAX) return {};
     const int type = CV_MAKETYPE(depth, c);
     return cv::Mat(h, w, type, payload,
                    static_cast<size_t>(w) * c * image_blob_dt_elem_size(dt));

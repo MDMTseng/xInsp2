@@ -379,8 +379,12 @@ inline int32_t f_cap_call_impl(const char* name, xi_pack_handle in, xi_pack_hand
         // the creator tag while the provider pin is still held — rc unchanged
         // (PackRegistry::untag). Slot bridge (no-op until install_pack_abi —
         // same layering as sweep_packs_for).
-        if (*out != XI_PACK_NULL)
-            ImagePool::untag_pack_ref(*out, e.owner);
+        // A NULL return is the handler's declared HARD-INTERNAL-FAILURE sentinel
+        // (xi_abi.h) — surface it as an error, never XI_CAP_OK, so a consumer
+        // that trusts "OK ⇒ non-null *out" is not silently handed a NULL. (A
+        // CONTRACT failure is a normal sealed $fault pack, not NULL.)
+        if (*out == XI_PACK_NULL) return XI_CAP_EINTERNAL;
+        ImagePool::untag_pack_ref(*out, e.owner);
         return XI_CAP_OK;
     } catch (const seh_exception& ex) {
         std::fprintf(stderr, "[xinsp2] capability '%s' handler crashed: 0x%08X (%s)\n",

@@ -595,6 +595,10 @@ typedef struct xi_pack_proc_v1 {
 #define XI_CAP_ESHAPE       -4   /* provider entry unusable (no adapter / null handler)  */
 #define XI_CAP_EREENTRY     -5   /* refused: the target instance is already being called
                                     on THIS thread (acyclicity ruling, doc 14) */
+#define XI_CAP_EINTERNAL    -6   /* handler returned XI_PACK_NULL — its declared "hard
+                                    internal failure" sentinel (NOT a contract fault,
+                                    which is a normal $fault pack); *out is NULL. Surfaced
+                                    as an error so OK never means a null answer. */
 
 /* xi_cap_provider_v1.register/unregister result codes. */
 #define XI_CAP_REG_OK        0
