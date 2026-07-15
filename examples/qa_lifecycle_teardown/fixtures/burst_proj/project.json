@@ -1,0 +1,17 @@
+{
+  "name": "lifecycle_burst_fixture",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "instances": [
+    { "name": "srcA", "plugin": "burst_source" },
+    { "name": "srcB", "plugin": "burst_source" }
+  ],
+  "plugins": {
+    "burst_source": { "path": "burst_source", "compile": true }
+  }
+}

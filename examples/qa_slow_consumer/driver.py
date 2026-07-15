@@ -155,9 +155,17 @@ class RawWS:
         self._send_text(json.dumps({"type": "cmd", "id": cid, "name": name, "args": args or {}}))
         return cid
 
-    def call(self, name: str, args: dict | None = None, timeout: float = 300.0):
+    def call(self, name: str, args: dict | None = None, timeout: float = 45.0):
         """Send a cmd and drain frames (fast) until its rsp arrives. Skips events,
-        logs and binary preview frames in the meantime. Returns rsp['data']."""
+        logs and binary preview frames in the meantime. Returns rsp['data'].
+
+        The default is a BOUNDED 45s (compile calls pass their own longer timeout).
+        This matters for the phase-2 drop/reconnect handoff: if the backend ever
+        fails to promptly serve the fresh fast client, the old 300s default let a
+        single control call outlast run_qa's 360s per-test cap — surfacing as an
+        indefinite suite HANG (a 4-min stall was observed under contention) rather
+        than a clean failure. 45s converts any such stuck handoff into a fast,
+        diagnosable FAIL inside the window; the healthy path answers in ~2s."""
         cid = self.send_cmd(name, args)
         deadline = time.time() + timeout
         while True:
@@ -269,15 +277,23 @@ def phase1(fails: list[str]) -> None:
               f"client_frames={recv_in_window} client_ticks={client_ticks:.0f} "
               f"ratio={ratio:.1f} order_ok={order_ok}")
 
-        # THE liveness assertion: the lane advanced far more than the slow client
-        # drained. Pre-fix this ratio is ~1 (compute pinned to the drain).
-        if delta < 150:
-            fails.append(f"phase1: backend advanced only {delta} frames in {T}s — "
-                         f"lane did not run free (expected free-run near fps).")
+        # THE liveness assertion is the RATIO: the lane advanced far more than the
+        # slow client drained. Pre-fix this ratio is ~1 (compute pinned to the
+        # drain); fixed it is many-x. The ratio is load-ROBUST — under CPU load
+        # both the backend delta and the client's drain fall together, so their
+        # ratio is preserved. The absolute delta is only a floor guarding the
+        # degenerate "almost nothing happened" case (which would make the ratio
+        # meaningless); it is throughput, hence environment-dependent, so it is a
+        # LOW load-tolerant floor, not a near-fps expectation. Historically the
+        # tight 150 floor (25% of fps*T) was the flake — starved throughput dipped
+        # under it even though the lane was plainly decoupled (ratio still high).
         if ratio < 3.0:
             fails.append(f"phase1: liveness FAIL — backend delta={delta} only "
                          f"{ratio:.1f}x the slow client's {client_ticks:.0f} ticks "
                          f"(lane pinned to the consumer; want >=3x).")
+        if delta < 60:
+            fails.append(f"phase1: backend advanced only {delta} frames in {T}s — "
+                         f"the lane barely ran at all (degenerate window).")
         if not order_ok:
             fails.append("phase1: wire order FAIL (see per-channel messages above)")
         ws.close()

@@ -804,6 +804,17 @@ add_test(NAME hot_reload_swap COMMAND test_hot_reload_swap
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_hot_reload_swap>)
 add_test(NAME hot_reload_swap_heavy COMMAND test_hot_reload_swap
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_hot_reload_swap>)
+# SHARED RESOURCE: both run the SAME binary in the SAME working dir, and the
+# writer cycles FIXED-NAME on-disk copies (reload_probe_copy_<i>.dll) in
+# fs::current_path() there. Run concurrently under ctest -j they collide on those
+# files — on Windows one process's copy_file(overwrite_existing) hits a sharing
+# violation against a copy the other still has mapped (LoadLibrary), which
+# stalls/aborts the swap (observed hang under -j8, 2026-07-13 note). RESOURCE_LOCK
+# serialises the two against EACH OTHER while leaving both free to run in parallel
+# with unrelated tests — preferred over RUN_SERIAL, which would pin them against
+# the whole suite and cost more wall-time.
+set_tests_properties(hot_reload_swap hot_reload_swap_heavy PROPERTIES
+    RESOURCE_LOCK "reload_probe_copy_dir")
 set_tests_properties(hot_reload_swap_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
