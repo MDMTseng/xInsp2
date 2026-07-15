@@ -140,6 +140,16 @@ int main() {
         }
     }
 
+    // ---- (3a) xi.emit@2 resolves; emit_binary_owned present (perf/ws-lean) -----
+    // The zero-copy owned-emit door is an ADDITIVE supplement to @1; it is NOT a
+    // host_api struct field (the v12 layout is frozen), so it has no field twin to
+    // match — just assert it resolves and carries the verb.
+    {
+        const auto* ev2 = static_cast<const xi_emit_v2*>(host.get_interface("xi.emit", 2));
+        CHECK(ev2 != nullptr);
+        if (ev2) CHECK(ev2->emit_binary_owned != nullptr);
+    }
+
     // ---- (3b) freeze-guard: every carved entry tracks its struct-field twin --
     // [ABI v12 — install_trigger_hook + the emit_record forwarder were DELETED
     //  at THE CUT, so there is no longer a "wired" table to build; the carved

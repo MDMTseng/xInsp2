@@ -117,6 +117,14 @@ static bool read_ws_frame(socket_t s, std::vector<uint8_t>& payload) {
     return true;
 }
 
+// Ownership-token release for the zero-copy owned-send test (Phase 4): a plain
+// fn pointer (non-capturing) the Server calls exactly once per frame. Bumps the
+// int the token points at, so the test can assert release happened once — after
+// a send AND on a no-client early return, never twice (no double free).
+static void owned_release_counter(void* p) {
+    reinterpret_cast<std::atomic<int>*>(p)->fetch_add(1, std::memory_order_relaxed);
+}
+
 static void wait_until(std::atomic<bool>& flag, int timeout_ms) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (!flag.load(std::memory_order_acquire) &&
@@ -348,6 +356,83 @@ int main() {
         CHECK(!saw_F.load());   // the popped A-frame did NOT cross onto B
         CHECK(saw_G.load());    // a legitimate B-frame is still delivered
         CLOSESOCK(B);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 4: ZERO-COPY OWNED PATH (perf/ws-lean, xi.emit@2 / send_binary_owned).
+    // Proves: (E1) an owned send assembled from MULTIPLE borrowed segments puts
+    // BYTE-IDENTICAL wire bytes on the socket as the copy path (send_binary) does
+    // for the same concatenated payload, and its ownership token is released
+    // EXACTLY ONCE after the send; (E2) an owned send with NO client returns false
+    // and STILL releases the token exactly once (no leak) — never twice (no double
+    // free). The RAII owner-release in OutFrame is what makes every drop path free
+    // the producer's bytes.
+    // ------------------------------------------------------------------
+    {
+        opened.store(false);
+        socket_t c = connect_and_handshake(port);
+        CHECK(c != INVALID_SOCK);
+        wait_until(opened, 4000);
+        CHECK(opened.load());
+
+        // A payload split across two segments; the wire frame must be their exact
+        // concatenation, and must equal what the copy path sends for the whole.
+        std::vector<uint8_t> seg0 = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03 };
+        std::vector<uint8_t> seg1(5000);
+        for (size_t i = 0; i < seg1.size(); ++i) seg1[i] = (uint8_t)(i * 31u + 7u);
+        std::vector<uint8_t> whole;
+        whole.insert(whole.end(), seg0.begin(), seg0.end());
+        whole.insert(whole.end(), seg1.begin(), seg1.end());
+
+        // Reader pulls exactly two frames: [0] copy path, [1] owned path.
+        std::vector<std::vector<uint8_t>> got(2);
+        std::atomic<bool> read_ok{true};
+        std::thread rdr([&] {
+            for (int i = 0; i < 2; ++i)
+                if (!read_ws_frame(c, got[(size_t)i])) { read_ok.store(false); break; }
+        });
+
+        // Frame 0: copy path (reference bytes).
+        CHECK(srv.send_binary(whole.data(), whole.size()));
+
+        // Frame 1: owned path, two segments, with a release-counting token.
+        std::atomic<int> rel{0};
+        xi::ws::BinSpan segs[2] = {
+            { seg0.data(), seg0.size() },
+            { seg1.data(), seg1.size() },
+        };
+        CHECK(srv.send_binary_owned(segs, 2, &rel, &owned_release_counter));
+
+        rdr.join();
+        CHECK(read_ok.load());
+        // E1: byte-identical payloads, and both equal the intended whole.
+        CHECK(got[0] == whole);
+        CHECK(got[1] == whole);
+        CHECK(got[0] == got[1]);
+        // E1: the owned token was released exactly once (after the send).
+        {
+            auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+            while (rel.load() < 1 && std::chrono::steady_clock::now() < dl)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        CHECK(rel.load() == 1);
+
+        // E2: with no client attached, an owned send returns false but STILL
+        // releases the token exactly once (no leak, no double free).
+        CLOSESOCK(c);
+        {
+            auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+            while (srv.has_client() && std::chrono::steady_clock::now() < dl)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        CHECK(!srv.has_client());
+        std::atomic<int> rel2{0};
+        xi::ws::BinSpan one = { whole.data(), whole.size() };
+        CHECK(!srv.send_binary_owned(&one, 1, &rel2, &owned_release_counter));
+        CHECK(rel2.load() == 1);
+
+        std::fprintf(stderr, "  phase4(owned): rel=%d rel_noclient=%d bytes_identical=%d\n",
+            rel.load(), rel2.load(), (int)(got[0] == got[1]));
     }
 
     stop_poll.store(true);

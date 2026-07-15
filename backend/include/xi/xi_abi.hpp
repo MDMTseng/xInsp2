@@ -41,6 +41,7 @@
 #include <cstring>
 #include <exception>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -517,6 +518,32 @@ public:
         emit_binary(frame.data(), (int)frame.size());
     }
 
+    // ZERO-COPY emit of an owned frame buffer (xi.emit@2 / perf/ws-lean). Hands the
+    // host the shared buffer's bytes WITHOUT copying: the host holds a share (via
+    // the ownership token below) until the send completes — or the frame is dropped
+    // / the connection tears down — then releases it here in THIS (the producer's)
+    // TU. A raw 5–20 MP preview is 15–60 MB, so this eliminates a full per-frame
+    // memcpy the copying emit_binary would pay. Falls back to the copying path on a
+    // host without xi.emit@2. Returns false only for an empty/absent buffer.
+    //
+    // The token is a heap-allocated COPY of the shared_ptr; owned_shared_release_
+    // deletes it (dropping one ref). The host borrows buf->data() until then, so
+    // the bytes stay valid and immutable across the async send.
+    bool emit_binary_owned(std::shared_ptr<const std::vector<uint8_t>> buf) const {
+        if (!buf || buf->empty()) return false;
+        if (const xi_emit_v2* ev2 = emit2_iface()) {
+            if (ev2->emit_binary_owned) {
+                auto* owner =
+                    new std::shared_ptr<const std::vector<uint8_t>>(std::move(buf));
+                xi_bin_span span{ (*owner)->data(), (int64_t)(*owner)->size() };
+                ev2->emit_binary_owned(&span, 1, owner, &owned_shared_release_);
+                return true;
+            }
+        }
+        emit_binary(buf->data(), (int)buf->size());   // fallback: copy
+        return true;
+    }
+
     // On-disk folder for THIS instance: project/instances/<name>/
     // Already created by the host before this plugin was constructed.
     // Use it to persist files beyond the JSON config returned by get_def.
@@ -798,6 +825,21 @@ private:
         }
         return emit_;
     }
+    const xi_emit_v2* emit2_iface() const {
+        if (!emit2_resolved_) {
+            emit2_resolved_ = true;
+            if (host_ && host_->get_interface)
+                emit2_ = static_cast<const xi_emit_v2*>(
+                    host_->get_interface("xi.emit", 2));
+        }
+        return emit2_;
+    }
+    // The xi.emit@2 ownership token: a heap-allocated shared_ptr copy. Deleting it
+    // (here, in the producer's TU) drops one ref of the frame buffer. Non-capturing
+    // → a plain fn pointer the host can call.
+    static void owned_shared_release_(void* p) {
+        delete static_cast<std::shared_ptr<const std::vector<uint8_t>>*>(p);
+    }
     const xi_log_v1* log_iface() const {
         if (!log_resolved_) {
             log_resolved_ = true;
@@ -813,6 +855,8 @@ private:
     mutable const xi_imaging_rw_v1* imaging_rw_          = nullptr;
     mutable bool                 emit_resolved_    = false;
     mutable const xi_emit_v1*    emit_             = nullptr;
+    mutable bool                 emit2_resolved_   = false;
+    mutable const xi_emit_v2*    emit2_            = nullptr;   // xi.emit@2 (zero-copy owned)
     mutable bool                 log_resolved_     = false;
     mutable const xi_log_v1*     log_              = nullptr;
     mutable bool                 pack_resolved_   = false;

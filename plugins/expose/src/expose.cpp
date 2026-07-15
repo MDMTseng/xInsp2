@@ -115,7 +115,11 @@ public:
             seen = ++ch.seen;
             subscribed = subscribed_.count(channel) != 0;
         }
-        if (subscribed) emit_binary(*shared);
+        // Zero-copy broadcast (xi.emit@2 / perf/ws-lean): hand the host a SHARE of
+        // the encoded frame instead of a copy — the host sends straight from these
+        // bytes and drops its share after. The store above holds its own share for
+        // pull, so both survive. (Falls back to a copy on a host without xi.emit@2.)
+        if (subscribed) emit_binary_owned(shared);
 
         out.str("channel", channel).i64("seen", (int64_t)seen);
     }

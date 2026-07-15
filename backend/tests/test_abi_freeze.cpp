@@ -142,6 +142,11 @@ XI_FREEZE_IFACE(xi_imaging_rw_v1, image_write, 8, uint8_t*       (*)(xi_image_ha
 static_assert(sizeof(xi_emit_v1) == 1 * sizeof(void*), "xi_emit_v1 size changed (frozen @1)");
 XI_FREEZE_IFACE(xi_emit_v1, emit_binary, 0, void (*)(const void*, int32_t));
 
+// xi.emit@2 (perf/ws-lean) — the zero-copy owned-emit supplement = 1 entry.
+static_assert(sizeof(xi_emit_v2) == 1 * sizeof(void*), "xi_emit_v2 size changed (frozen @2)");
+XI_FREEZE_IFACE(xi_emit_v2, emit_binary_owned, 0,
+                void (*)(const xi_bin_span*, int32_t, void*, void (*)(void*)));
+
 // xi.log@1 — log + set_status = 2 entries.
 static_assert(sizeof(xi_log_v1) == 2 * sizeof(void*), "xi_log_v1 size changed (frozen @1)");
 XI_FREEZE_IFACE(xi_log_v1, log,        0, void (*)(int32_t, const char*));
