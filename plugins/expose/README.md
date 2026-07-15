@@ -25,6 +25,17 @@ and (goldens) `ui-components/test/xex1-golden.mjs` / `tools/xinsp2_py/tests/`.
   and record_save's on-disk `.xex1` file are BYTE-IDENTICAL for the same pack
   (the memory ≈ wire ≈ disk surface).
 
+## Pull semantics (F-C ruling, 2026-07-15)
+
+**A pull ("get") serves the same wire artifact the channel shipped** — expose
+retains what was pushed at it, byte-blind, so a pull is lossy exactly where the
+wire is lossy (an egress-pushed `ui/*` channel stores the encoded preview; the
+product-plane v3 store is the raw shared dump). This is deliberate, not a gap:
+a puller is a UI consumer like any subscriber. Lossless homes are elsewhere —
+the record plane (`record_save`) for the product, and the egress
+`encode:false` raw-passthrough knob (docs/internals/ui-egress.md) for a live
+channel that must walk raw.
+
 ## E2 — full-resolution compressed preview (`xi.jpeg.encode`)
 
 On the **v3 WS-SEND path only**, expose can substitute a compressed preview for

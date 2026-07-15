@@ -1,3 +1,11 @@
 # perf baseline for bench_jpeg.exe
 # captured by perf_gate.cmake UPDATE_BASELINE=ON — slower-is-worse integer metrics
-jpeg_us_per_encode_1920x1080 2750
+#fp schema xi.perf-baseline/1
+#fp cpu 14 core 2400 MHz GenuineIntel Pentium III (0.18 micron) With 1 Or 2 MB On-Die L2 Cache
+#fp logical_cores 20
+#fp os Windows
+#fp build_type release
+#fp opencv 4.10.0
+#fp jpeg_backend opencv
+#fp xinsp_commit e779bf5
+jpeg_opencv_q85_1920x1080_us 17056
