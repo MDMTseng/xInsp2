@@ -437,7 +437,11 @@ inline int32_t f_cap_register(const char* name, xi_cap_handler_fn handler,
 inline int32_t f_cap_unregister(const char* name, void* /*self*/) {
     if (!name || !*name) return XI_CAP_REG_EINVAL;
     ImagePoolOwnerId owner = ImagePool::current_owner();
-    if (owner == 0) return XI_CAP_REG_ECONTEXT;
+    // Symmetric with f_cap_register: registry mutation is legal only from
+    // lifecycle code, never from a data-plane door or a capability handler (a
+    // provider unregistering mid-handler could trigger a surprise shadow-promotion
+    // of another instance while this handler still runs). Guard depth here too.
+    if (owner == 0 || cap_data_plane_depth() > 0) return XI_CAP_REG_ECONTEXT;
     return CapRegistry::instance().unregister_capability(name, owner);
 }
 
