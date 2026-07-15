@@ -114,10 +114,11 @@ contiguous slab** + N pool-backed EXTERN buffers, resolved behind one API (D1
   > `PackDtype` + the dtype-in-`type_id` encoding, `kPackTypeUserBase` + the
   > user-blob type space, `ExtRecord`'s `w/h/c`, and the `add_image` /
   > `adopt_image` / `add_tensor` / `adopt_tensor` / `get_image` / `get_tensor` /
-  > `get_tensor_of` / `type_id_of` core verbs. The **`xi.pack@3` door is slated
-  > for deletion** and **`xi.pack@4`** (the blob door) replaces it; the frozen
-  > `xi.pack@1` image slots become ~30-line door adapters over the blob rep
-  > (package B). Wire gains one blob arm and drops the image arm (package C).
+  > `get_tensor_of` / `type_id_of` core verbs. The **`xi.pack@3` door was
+  > deleted** (`get_interface("xi.pack",3)` answers NULL forever) and
+  > **`xi.pack@4`** (the blob door) replaced it; the frozen `xi.pack@1` image
+  > slots are now ~30-line door adapters over the blob rep (package B). Wire
+  > gains one blob arm and drops the image arm (package C).
 
 ### ImagePool pixel storage — the size-class recycler (`pixpool`)
 
@@ -237,10 +238,10 @@ documented in [`../reference/c-abi.md`](../reference/c-abi.md). The interim
 **`xi.pack@3` supplement** (dtype tensors, user-typed blobs, `adopt_bin`,
 ordinal iteration) is **retired by the blob cut** (spec 30): `xi.pack@4` — the
 blob door (`blob_mint` / `builder_adopt_blob` / `builder_add_blob` / `get_blob`
-+ ordinal `entry_at`) — replaces it, and the frozen `xi.pack@1` image slots
-become thin door adapters that synthesize an `xi/image` descriptor over the blob
-representation. Door re-cut is **package B** (c-abi.md updates land with it);
-until then the door/@3 build is expected to break against the new core.
++ ordinal `entry_at`) — replaced it, and the frozen `xi.pack@1` image slots are
+now thin door adapters that synthesize an `xi/image` descriptor over the blob
+representation. The door re-cut (**package B**) has landed; the `xi.pack@4`
+vtable is documented in [`../reference/c-abi.md`](../reference/c-abi.md) §6.1b.
 
 Host-side, **`PackRegistry`** is the handle table: a sealed pack is single-owner
 in C++ but **refcounted across the ABI** (the dispatch event and the emitter can

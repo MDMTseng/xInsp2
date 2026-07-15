@@ -232,10 +232,12 @@ were removed at v11 and v12 respectively.
 ### Image pool — the refcount contract
 
 Images are **refcounted handles**, never raw `malloc`/`free`. `image_create`
-returns a handle at refcount 1 whose pixels are **zero-filled and 64-byte
-aligned** (the buffer comes from a size-class recycler since 2026-07 —
-`pixpool` in `xi_image_pool.hpp` — but the zeroed-on-create contract is
-unchanged); `image_addref` increments, `image_release`
+returns a handle at refcount 1 whose pixels are **64-byte aligned but
+UNINITIALISED** (CT ruling 2026-07: the size-class recycler — `pixpool` in
+`xi_image_pool.hpp` — hands a recycled buffer back as-is, no per-create memset,
+so it carries the previous image's bytes; the producer overwrites what it
+exposes, and a partial-paint producer must clear the regions it does not
+write); `image_addref` increments, `image_release`
 decrements (freed at 0; invalid handles are no-ops). `image_stride(h)` is
 `width*channels` (no padding — SIMD-safe). Ownership rules:
 - **Input handles** belong to the host for the `process()` call. To keep one

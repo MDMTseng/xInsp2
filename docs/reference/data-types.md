@@ -14,11 +14,15 @@ memory (pack-v3 slab) an inline entry stores that same canonical value, so
 memory == wire and a serialization boundary is a copy, not a re-encode; a typed
 read skips the fixed-width header at a known offset
 ([`../internals/pack-plane.md`](../internals/pack-plane.md)). Entry types:
-`i64`, `f64`, `bool`, `str`, `bin`, `image`, and `mp` (one nested
-canonical-msgpack subtree for arrays/maps — nesting is msgpack's job, not
-flattened keys); in-core the slab also carries first-class `tensor` (shape +
-dtype) and typed user-blob entries, whose door access arrives with the
-`xi.pack@3` interface (in flight — not part of `xi.pack@1`).
+`i64`, `f64`, `bool`, `str`, `bin`, and `mp` (one nested canonical-msgpack
+subtree for arrays/maps — nesting is msgpack's job, not flattened keys), plus
+the one non-scalar kind — a self-describing **`blob`** (`'XBD1'` head + a
+canonical-msgpack descriptor + a 64B-aligned payload). An **`image`** is just a
+convention `xi/image` blob (descriptor `{"t":"xi/image","w","h","c","dt"}`),
+reached through the `image`-named convention helpers or the blob door. Blob door
+access is the `xi.pack@4` interface; the earlier per-type `tensor`/`type_id`
+surface (`xi.pack@3`) was **retired by the blob cut** (spec 30) and, like the
+never-existed `@2`, answers NULL forever.
 
 Each side of the boundary has its own facade over the same door:
 

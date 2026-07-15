@@ -71,7 +71,9 @@ zero-fill** (value-init, then the real pixels overwrite = a redundant N-byte wri
 
 **Shipped:** `pixpool` size-class recycler in `xi_image_pool.hpp` (2ⁿ classes
 4 KiB–64 MiB, 64B-aligned, per-thread magazines + budgeted global shelf,
-> 64 MiB direct lane). Zero-fill contract kept (recycled buffers memset).
+> 64 MiB direct lane). Zero-fill contract kept at the time (recycled buffers
+memset) — **since removed** by the CT no-zero-fill ruling (2026-07-14):
+`create()` now returns uninitialised pixels (see internals/pack-plane.md § pixpool).
 Measured (same box, Release): 1920×1200×1 create/release **533 µs → 53 µs**
 (no-touch, 10.1×) / **611 µs → 105 µs** (with full caller memset, 5.8×);
 gate 320×240×3 create+memset 6.6 µs → ~3 µs-class. Asserted by

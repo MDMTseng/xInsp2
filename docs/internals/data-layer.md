@@ -18,11 +18,14 @@ the serialization edge — and how the host refcounts it across the ABI.
 > design-of-record for the Pack data layer's refcount + storage mechanics.
 
 A **Pack** is a sealed, insertion-ordered list of `(key, tag, value)` entries.
-Values are the msgpack scalar/binary tags plus the domain tags: an **image**
-(dims + a pool-backed pixel buffer), a **nested-mp** subtree (one canonical
-msgpack blob for arrays/maps), and — since the pack-v3 slab — a **tensor**
-(logical shape + `PackDtype` over a pool buffer) and typed **user blobs**.
-Once sealed a pack is **immutable** — new information is always a new pack.
+Values are the msgpack scalar/binary tags, a **nested-mp** subtree (one canonical
+msgpack subtree for arrays/maps), and — since the blob cut (spec 30) — the one
+non-scalar kind, a self-describing **blob**: a pool buffer whose head describes
+its own payload (`'XBD1'` magic + a canonical-msgpack descriptor + a 64B-aligned
+payload). An **image** is just a convention `xi/image` blob; the earlier
+first-class `tensor` (`PackDtype`) and typed-user-blob entries were **deleted**
+with that cut. Once sealed a pack is **immutable** — new information is always a
+new pack.
 
 **Storage model (pack-v3 slab): memory == wire (④A).** In memory a sealed pack
 is one contiguous slab (header + hash-sorted directory + insertion-order table +
@@ -90,14 +93,17 @@ consumers).
 A binary or image entry lives either **inline in the slab** (small payloads) or
 in a **pool buffer** (large / image pixels, adopted by refcount so a source's
 painted frame crosses into the pack with no heap→pool copy — `adopt_image`).
-The slab side holds a 24-byte `ExtRecord {handle, logical w/h/c, length}` per
-pooled entry. The consumer never sees the difference: `get_bin`/`get_image`
+The slab side holds a 16-byte `ExtRecord {handle, total_len}` per EXTERN entry
+(the image dims moved into the blob descriptor — spec 30). The consumer never
+sees the difference: `get_bin`/`get_image`
 resolve both to one borrowed span. Image pixels ride the same zero-copy
 `ImagePool` slots the image plane uses, so `get_image` yields a pixel span +
-dims a `cv::Mat` can wrap directly. Tensors (`add_tensor`/`get_tensor_of<T>`,
-dtype fail-closed) and typed user blobs (`add_blob`) use the same pooled
-storage in-process; they have **no `xi_pack_v1` door accessor** — that surface
-is reserved for the `xi.pack@3` door (in flight on the packv3 line).
+dims a `cv::Mat` can wrap directly. Self-describing **blobs**
+(`add_blob`/`get_blob`, including the `xi/image` convention type behind the
+`image`-named door adapters) use the same pooled storage in-process; the blob
+door accessor is the **`xi.pack@4`** interface. The earlier first-class `tensor`
+and typed-user-blob entries and the `xi.pack@3` door were **deleted** by the
+blob cut (spec 30).
 
 ## Refcount + owner-tagged sweep — `PackRegistry` (`xi_pack_abi.hpp`)
 
