@@ -512,6 +512,18 @@ What it adds over v1 (and why v1's shape could not express it):
   rather than drop the entry; new code uses `blob_mint` + DMA + `adopt_blob`).
   `tag_of` an image entry now reports `XI_PACK_TAG_BLOB`, not the retired
   `IMAGE` tag.
+
+  > **LEGACY — SOFT-RETIRED (deprecated, still working).** These four `xi/image`
+  > adapter slots (`builder_add_image` / `builder_adopt_image` / `get_image`, and
+  > the script-side `ScriptPackBuilder::add_image` / `ScriptPack::get_image` that
+  > delegate to them) are **deprecated**. Behaviour is unchanged and they remain
+  > in the frozen v1 vtable — but each emits a **warn-once** stderr diagnostic
+  > per process per slot naming the replacement. New code produces with
+  > `blob_mint`/`adopt_blob` (host) or `PackOut::blob`/`blob_mint` /
+  > `ScriptPackBuilder::add_image_blob` (SDK) and consumes with `xi::read_image_blob`
+  > / `PackIn::image_blob` / `ScriptPack::image_blob` over an `xi/image` blob
+  > (docs/new_gen/30, 31). **Hard retirement is deferred to the xInsp3 cutover**;
+  > until then a vendored panel or an older plugin keeps working as-is.
 - **Ordinal-explicit iteration** — `entry_at(i)` (the whole directory row —
   borrowed non-NUL-terminated key span, `tag`, `external` storage flag — in
   **one** call per index; same insertion order as v1 `key_at`/`tag_at`). The

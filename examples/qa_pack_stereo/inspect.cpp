@@ -30,8 +30,8 @@ XI_INSPECT_ENTRY(t, frame) {
     if (!f) return;                                  // no pack on this tick → NA
 
     int64_t seq = f.get_i64("seq").value_or(-1);
-    auto L = f.get_image("left");
-    auto R = f.get_image("right");
+    auto L = f.image_blob("left");
+    auto R = f.image_blob("right");
     if (seq < 0 || !L || !R) {
         xi::ng(1, "pack missing seq/left/right");
         return;
@@ -42,8 +42,8 @@ XI_INSPECT_ENTRY(t, frame) {
 
     // The plugin memcpy's the native int32 seq into each image's first 4 bytes.
     int32_t lseq = -1, rseq = -1;
-    if (L->pixels.size() >= 4) std::memcpy(&lseq, L->pixels.data(), 4);
-    if (R->pixels.size() >= 4) std::memcpy(&rseq, R->pixels.data(), 4);
+    if (L->payload.size() >= 4) std::memcpy(&lseq, L->payload.data(), 4);
+    if (R->payload.size() >= 4) std::memcpy(&rseq, R->payload.data(), 4);
     bool corr_ok = (lseq == (int32_t)seq) && (rseq == (int32_t)seq);
 
     char msg[128];

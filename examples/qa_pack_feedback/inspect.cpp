@@ -49,13 +49,13 @@ XI_INSPECT_ENTRY(t, frame) {
     if (!tp) return;                                  // no pack on this tick → NA
     const long long seq  = (long long)tp.get_i64("seq").value_or(-1);
     const double    gain = tp.get_f64("gain").value_or(-1.0);
-    auto img = tp.get_image("frame");
-    if (!img || img->pixels.empty()) { xi::ng(1, "fb: no frame image on the pack"); return; }
+    auto img = tp.image_blob("frame");
+    if (!img || img->payload.empty()) { xi::ng(1, "fb: no frame image on the pack"); return; }
 
     // ---- 2. ANALYZE: mean intensity across the whole frame ------------------
     unsigned long long sum = 0;
-    for (uint8_t v : img->pixels) sum += v;
-    const double mean = (double)sum / (double)img->pixels.size();
+    for (uint8_t v : img->payload) sum += v;
+    const double mean = (double)sum / (double)img->payload.size();
 
     // ---- 3. DECIDE: proportional multiplicative correction ------------------
     double cmd = gain * (kTarget / (mean > 1.0 ? mean : 1.0));

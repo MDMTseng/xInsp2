@@ -106,7 +106,7 @@ xi::ScriptPack make_chunk(long long sid, int part, const std::vector<uint8_t>& s
     b.add_i64("$seq", seq);                    // per-chunk arrival correlation (doc 17)
     b.add_i64("y0", y0);                       // placement: absolute first row
     b.add_i64("own_h", kStride);               // exclusive ownership band height
-    b.add_image("strip", kW, h, 1, strip.data() + (size_t)y0 * kW);
+    b.add_image_blob("strip", kW, h, 1, "u8", strip.data() + (size_t)y0 * kW, (int64_t)kW * h * 1);
     return b.seal();
 }
 
@@ -154,14 +154,14 @@ struct StreamConsumer {
         if (complete)          { abort("part_after_eof");  return; }
         if (part != next_part) { abort("stream_gap");      return; }  // doc 17: no reorder on one lane
 
-        auto img = p.get_image("strip");
+        auto img = p.image_blob("strip");
         const long long y0  = p.get_i64("y0").value_or(-1);
         const long long own = p.get_i64("own_h").value_or(-1);
         if (!img || img->channels != 1 || y0 < 0 || own <= 0) { abort("bad_chunk"); return; }
 
         ++buffered;                                  // the window: this chunk, and only it
         max_buffered = std::max(max_buffered, buffered);
-        for (const auto& f : detect(img->pixels.data(), img->width, img->height, (int)y0))
+        for (const auto& f : detect(img->payload.data(), img->width, img->height, (int)y0))
             if (f.first >= y0 && f.first < y0 + own) // ownership band: exactly-once dedup
                 features.push_back(f);
         --buffered;                                  // window closes: chunk released
