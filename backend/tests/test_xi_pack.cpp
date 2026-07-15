@@ -333,6 +333,20 @@ static void test_blob_head_validate_matrix() {
     CHECK(!xi::blob_head_validate(good.data(), 4), "sub-head length rejected");
     CHECK(!xi::blob_head_validate(nullptr, 0), "null base rejected");
 
+    // 6) B②: a non-zero byte in the pad [8+desc_len, payload_off) is a forged /
+    //    non-canonical buffer. memory==wire ships the pad VERBATIM, so admitting
+    //    it would break the byte-lossless round-trip claim for hostile input —
+    //    the seam must reject, not silently re-zero on rebuild.
+    {
+        CHECK(size_t(8 + dlen) < poff, "shape leaves a pad byte to poison");
+        std::vector<uint8_t> bad = good;
+        bad[8 + dlen] = 0x01;                       // first pad byte
+        CHECK(!xi::blob_head_validate(bad.data(), bad.size()), "non-zero pad rejected (B2)");
+        bad[8 + dlen] = 0x00;
+        bad[size_t(poff) - 1] = 0xFF;               // last pad byte
+        CHECK(!xi::blob_head_validate(bad.data(), bad.size()), "non-zero pad tail rejected (B2)");
+    }
+
     // adopt_blob refuses a non-blob pooled buffer (fail-loud through the seam).
     {
         std::vector<uint8_t> junk(128, 0xAB);

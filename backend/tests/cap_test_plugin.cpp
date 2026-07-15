@@ -12,6 +12,9 @@
 //                      {$versions: "1"} with no work; an unsupported $v is a
 //                      sealed $fault pack naming the supported range.
 //   * "test.crash"   — genuine ACCESS_VIOLATION inside the handler.
+//   * "test.null"    — returns XI_PACK_NULL (the declared hard-internal-failure
+//                      sentinel) — the funnel must answer XI_CAP_EINTERNAL (-6),
+//                      never OK-with-a-null-out.
 //   * "test.reenter" — calls BACK into the capability plane targeting
 //                      "test.echo" (provided by THIS SAME instance) — the
 //                      funnel must refuse with XI_CAP_EREENTRY (-5) — and also
@@ -96,6 +99,11 @@ xi_pack_handle h_crash(void* /*self*/, xi_pack_handle /*in*/) {
     return XI_PACK_NULL;
 }
 
+// The declared hard-internal-failure sentinel: a handler that answers NULL.
+xi_pack_handle h_null(void* /*self*/, xi_pack_handle /*in*/) {
+    return XI_PACK_NULL;
+}
+
 xi_pack_handle h_reenter(void* self, xi_pack_handle in) {
     auto* i = static_cast<CapTestInstance*>(self);
     if (!i || !i->pack || !i->cap) return XI_PACK_NULL;
@@ -108,9 +116,16 @@ xi_pack_handle h_reenter(void* self, xi_pack_handle in) {
     int32_t reg_rc = -999;
     if (i->provider)
         reg_rc = i->provider->register_capability("test.sneaky", &h_echo, self);
+    // UNREGISTER from inside a handler is the symmetric mutation — must also be
+    // refused (a mid-handler unregister could shadow-promote another provider
+    // while this handler still runs).
+    int32_t unreg_rc = -999;
+    if (i->provider)
+        unreg_rc = i->provider->unregister_capability("test.echo", self);
     xi_pack_builder b = i->pack->builder_new();
     i->pack->builder_add_i64(b, "reenter_rc", rc);
     i->pack->builder_add_i64(b, "reg_in_handler_rc", reg_rc);
+    i->pack->builder_add_i64(b, "unreg_in_handler_rc", unreg_rc);
     return i->pack->builder_seal(b);
 }
 
@@ -158,6 +173,7 @@ XI_EXPORT void* xi_plugin_create(const xi_host_api* host, const char* /*name*/) 
         i->reg_rc_ver     = i->provider->register_capability("test.ver",     &h_ver,     i);
         i->reg_rc_crash   = i->provider->register_capability("test.crash",   &h_crash,   i);
         i->reg_rc_reenter = i->provider->register_capability("test.reenter", &h_reenter, i);
+        i->provider->register_capability("test.null", &h_null, i);
         // Same-owner duplicate = overwrite (the reinit re-register path): OK.
         i->reg_rc_dup     = i->provider->register_capability("test.echo",    &h_echo,    i);
     }

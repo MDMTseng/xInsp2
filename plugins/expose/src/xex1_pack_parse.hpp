@@ -267,14 +267,31 @@ inline ParsedFrame parse_frame_v3(const uint8_t* data, size_t size) {
     return out;
 }
 
-// File convenience: read the whole dump file and parse it. Missing/unreadable
-// file is a !ok() result, not a throw.
+// File convenience: read the whole dump file and parse it. Missing/unreadable/
+// oversized file, or an allocation failure, is a !ok() result — NEVER a throw.
+// The caller (record_replay) turns a !ok result into a sealed $fault; an escaping
+// exception would unwind PAST that fail-loud emit and be swallowed at the pack
+// door, so the untrusted read is size-capped and exception-contained here.
 inline ParsedFrame parse_frame_v3_file(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in) { ParsedFrame r; r.error = "cannot open file: " + path; return r; }
-    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
-                               std::istreambuf_iterator<char>());
-    return parse_frame_v3(bytes.data(), bytes.size());
+    const std::streamoff size = in.tellg();
+    if (size < 0) { ParsedFrame r; r.error = "cannot size file: " + path; return r; }
+    // Refuse a pathologically large dump BEFORE slurping it into RAM — an
+    // unbounded read of an untrusted file is an OOM DoS. A generous ceiling (4×
+    // the per-blob pool cap) admits any legitimate single frame.
+    constexpr uint64_t kMaxReplayFileBytes = parse_detail::kPoolMaxBytes * 4;  // 4 GiB
+    if (static_cast<uint64_t>(size) > kMaxReplayFileBytes) {
+        ParsedFrame r; r.error = "replay file too large: " + path; return r;
+    }
+    in.seekg(0, std::ios::beg);
+    try {
+        std::vector<uint8_t> bytes(static_cast<size_t>(size));
+        if (size > 0) in.read(reinterpret_cast<char*>(bytes.data()), size);
+        return parse_frame_v3(bytes.data(), bytes.size());
+    } catch (...) {
+        ParsedFrame r; r.error = "cannot read replay file (alloc/io): " + path; return r;
+    }
 }
 
 }  // namespace xex1

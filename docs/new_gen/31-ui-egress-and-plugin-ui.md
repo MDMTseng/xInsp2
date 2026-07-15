@@ -45,14 +45,20 @@ expose = pure transport: channel subscriptions + WS fan-out, drop-not-queue
 - Cap absent → push is a fail-open no-op (the project's plugin list decides
   whether live UI exists at all).
 - Channel naming: `ui/<instance-id>` is the default panel channel.
-- Dispatch defaults: `xi/image` u8 → jpeg q80; f32/u16 → normalize→u8 (or
-  PNG16); `xi/jpeg` → pass-through; unknown `"t"` → metadata card; >2MP →
-  downscale to ≤1MP first. All expose/egress CONFIG, never ABI. (E1 ships a
-  SINGLE-GLOBAL config — the per-channel override table is DEFERRED until a real
-  consumer needs divergent per-channel policy.)
-- Dedup key = pool handle (+policy fingerprint): sealed buffers are immutable,
-  so the handle IS the content identity. LRU bounded (32 entries default),
-  retains while cached.
+- Dispatch defaults: `xi/image` u8 → jpeg q80; `xi/jpeg` → pass-through; >2MP →
+  box-downscale to ≤1MP first; unknown `"t"` → metadata card. All expose/egress
+  CONFIG, never ABI. (E1 ships a SINGLE-GLOBAL config — the per-channel override
+  table is DEFERRED until a real consumer needs divergent per-channel policy.)
+  **`f32`/`u16` → normalize→u8 (or PNG16) is DEFERRED** — E1 shows those as a
+  metadata card (the code comment says "we don't normalize yet"); implement when
+  a real non-u8 preview consumer exists.
+- Dedup key = **content hash** (FNV-1a over descriptor + payload) folded with the
+  policy fingerprint (quality + downscale target), NOT the pool handle: the @4
+  `get_blob` door surfaces descriptor + payload spans but not the handle (the same
+  ABI reason xi.imgcodec hashes content), and sealed buffers are immutable so
+  content IS identity. This also sidesteps the handle-recycle/generation ABA a
+  raw-handle key would have. The LRU caches the ENCODED byte copies (not a
+  retained pack); bounded (32 entries default), evicts LRU.
 - Codec caps are one-per-encoder (`xi.jpeg.encode`, later `xi.png16.encode`…),
   PURE encode — scaling/normalizing policy stays in egress.
 - Egress is the first STATEFUL, own-threaded cap service: it alone carries the

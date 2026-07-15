@@ -103,7 +103,7 @@ public:
         long long seen; bool subscribed;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            Channel& ch = channels_[channel];
+            Channel& ch = store_channel_(channel);
             ch.seq         = seq;
             ch.frame_bytes = frame;    // keep the latest encoded frame for pull
             seen = ++ch.seen;
@@ -141,7 +141,7 @@ public:
             std::lock_guard<std::mutex> lk(mu_);
             subscribed = subscribed_.count(channel) != 0;
             if (has_frame) {
-                Channel& ch = channels_[channel];
+                Channel& ch = store_channel_(channel);
                 ch.frame_bytes.assign((const uint8_t*)fp, (const uint8_t*)fp + fn);
                 seen = ++ch.seen;
             }
@@ -236,8 +236,29 @@ private:
     struct Channel {
         uint64_t                          seq  = 0;
         long long                         seen = 0;
+        uint64_t                          touched = 0;   // monotonic last-write order (bounded eviction)
         std::vector<uint8_t>              frame_bytes;  // latest encoded frame (pack-door path)
     };
+
+    // Bounded latest-wins store (caller holds mu_): stamp the channel's write
+    // order and, when a NEW channel pushes the map over the cap, evict the
+    // least-recently-touched OTHER channel — so a producer churning distinct
+    // $channel names (or a UI channel set) can't grow channels_ (and its retained
+    // MB frames) without bound (doc 28/31 finding F-B). std::map nodes are stable,
+    // so erasing a different node keeps the returned reference valid.
+    Channel& store_channel_(const std::string& channel) {
+        Channel& ch = channels_[channel];
+        ch.touched = ++touch_ctr_;
+        if (channels_.size() > kMaxChannels) {
+            auto victim = channels_.end();
+            for (auto it = channels_.begin(); it != channels_.end(); ++it)
+                if (it->first != channel &&
+                    (victim == channels_.end() || it->second.touched < victim->second.touched))
+                    victim = it;
+            if (victim != channels_.end()) channels_.erase(victim);
+        }
+        return ch;
+    }
 
     // --- pack-door encoders (the generic walk; docs/new_gen/08 Wave 2) --------
 
@@ -442,6 +463,8 @@ private:
 
     mutable std::mutex              mu_;
     std::map<std::string, Channel>  channels_;
+    uint64_t                        touch_ctr_ = 0;      // monotonic write order for bounded eviction
+    static constexpr size_t         kMaxChannels = 256;  // cap on retained channels (F-B)
     std::set<std::string>           subscribed_;
     bool                            wire_v3_ = true;    // v12 default: XEX1-v3 (v1 opt-out for one release)
 

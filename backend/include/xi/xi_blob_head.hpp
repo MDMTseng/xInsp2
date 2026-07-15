@@ -107,7 +107,17 @@ inline bool blob_head_bounds_ok(const uint8_t* base, size_t len) {
 inline bool blob_head_validate(const uint8_t* base, size_t len) {
     if (!blob_head_bounds_ok(base, len)) return false;
     uint32_t desc_len = pack_mp_detail::get_u32_le(base + 4);
-    return blob_desc_is_canonical_map(base + 8, desc_len);
+    if (!blob_desc_is_canonical_map(base + 8, desc_len)) return false;
+    // The pad [8+desc_len, payload_off) MUST be zero. A minted blob always zeroes
+    // it (mint_blob_impl), and it rides the wire VERBATIM (memory==wire), so a
+    // non-zero pad is a non-canonical / forged buffer. Reject it fail-loud here
+    // rather than silently normalizing it away on rebuild — that is what made the
+    // "byte-lossless blob round-trip" claim untrue for hostile input (doc 28 B②).
+    // bounds_ok guarantees payload_off <= len, so the range is in-bounds.
+    const uint64_t payload_off = blob_payload_off(desc_len);
+    for (uint64_t i = uint64_t(8) + desc_len; i < payload_off; ++i)
+        if (base[i] != 0) return false;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
