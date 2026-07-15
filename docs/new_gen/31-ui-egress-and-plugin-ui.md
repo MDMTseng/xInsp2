@@ -65,7 +65,10 @@ expose = pure transport: channel subscriptions + WS fan-out, drop-not-queue
   raw-handle key would have. The LRU caches the ENCODED byte copies (not a
   retained pack); bounded (32 entries default), evicts LRU.
 - Codec caps are one-per-encoder (`xi.jpeg.encode`, later `xi.png16.encode`…),
-  PURE encode — scaling/normalizing policy stays in egress.
+  PURE encode — scaling/normalizing policy stays in egress. A future
+  **video arm** (`xi.video.encode`, stateful sessions, WebCodecs client) is
+  design-settled in `docs/roadmap/video-egress.md` — need-driven, ladder
+  `h264(hw) → jpeg → raw`.
 - Egress is the first STATEFUL, own-threaded cap service: it alone carries the
   OwnerGuard + teardown discipline (slot packs released on reload/teardown);
   producer authors never learn it.
