@@ -502,25 +502,29 @@ public:
                         sto.tv_usec = (kSendTimeoutMs % 1000) * 1000;
                         ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &sto, sizeof(sto));
 #endif
-                        // Large-frame egress tuning (bench5mp: a raw 5MP preview is
-                        // ~15 MB/frame; the default 64 KB SNDBUF throttled the sole
-                        // writer to ~350 MB/s on loopback). A 4 MiB SNDBUF lets the
-                        // kernel stream ahead of the writer's chunk loop, and
-                        // TCP_NODELAY removes the tail-segment Nagle stall on each
-                        // enqueue boundary. Localhost-first numbers; both are also
-                        // sane (or no-ops) for a LAN client.
-                        // SIZE COUPLING (qa_slow_consumer phase 2): the kernel buffer
-                        // silently absorbs a WEDGED client's backlog before ::send
-                        // blocks, so SO_SNDTIMEO fires only after SNDBUF fills — the
-                        // wedge-drop bound grows with SNDBUF/production-rate. 4 MiB
-                        // measured the SAME throughput as 16 MiB (the producer is the
-                        // ceiling past ~483 MB/s) while keeping the wedge fill time
-                        // bounded for slow lanes; do NOT raise this without re-running
-                        // qa_slow_consumer.
+                        // Egress tuning. TCP_NODELAY here (removes the tail-segment
+                        // Nagle stall on each enqueue boundary; cheap, no memory tax).
+                        //
+                        // SO_SNDBUF is DEFERRED — the writer boosts it to 4 MiB the
+                        // FIRST time it is about to send a LARGE frame (>1 MiB) on this
+                        // connection (see kSndbufBoost / writer_loop_). Rationale
+                        // (adaptive SNDBUF, perf/ws-lean): a raw 5-20 MP preview needs
+                        // the big kernel buffer to stream ahead of the writer's chunk
+                        // loop (the default 64 KB throttled the sole writer to ~350
+                        // MB/s), but a big SNDBUF also WIDENS the wedge-detection window
+                        // — the kernel silently absorbs a wedged client's backlog before
+                        // ::send blocks, so SO_SNDTIMEO fires only after SNDBUF fills,
+                        // and the wedge-drop bound grows with SNDBUF/production-rate.
+                        // Setting 4 MiB on EVERY accept made a small-frame slow-consumer
+                        // lane (qa_slow_consumer, ~200 fps modest previews) miss its
+                        // 8s/12s wedge-drop bounds under machine load. Deferring the
+                        // boost to the first large frame keeps SHARP wedge detection for
+                        // small-frame / control-plane clients (they never trip the
+                        // threshold, so they keep the default buffer) AND the raw-preview
+                        // throughput win for large-frame lanes. Do NOT restore an
+                        // unconditional SNDBUF here without re-running qa_slow_consumer
+                        // solo AND inside a full gate (see docs/new_gen/23 §adaptive).
                         {
-                            int sndbuf = 4 * 1024 * 1024;
-                            ::setsockopt(s, SOL_SOCKET, SO_SNDBUF,
-                                         (const char*)&sndbuf, sizeof(sndbuf));
                             int nodelay = 1;
                             ::setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
                                          (const char*)&nodelay, sizeof(nodelay));
@@ -640,6 +644,16 @@ private:
     // at 20MP (or ~17 frames at 5MP): plenty for jitter, still a bounded blast
     // radius for a wedged localhost client.
     static constexpr size_t kOutboundHardCapBytes = 256u * 1024u * 1024u;
+
+    // Adaptive SO_SNDBUF (perf/ws-lean). Accepted sockets keep the small default
+    // buffer (sharp SO_SNDTIMEO wedge detection, no kernel memory tax on control-
+    // plane / small-frame clients). The writer boosts SO_SNDBUF to kSndbufBoost
+    // the first time it is about to send a frame whose total exceeds
+    // kSndbufBoostThreshold on the current connection — the raw-preview lanes that
+    // actually need the kernel to stream ahead of the chunk loop. Tracked against
+    // conn_epoch_ (sndbuf_boosted_for_epoch_) so a reconnect re-arms the boost.
+    static constexpr int    kSndbufBoost          = 4 * 1024 * 1024;   // 4 MiB
+    static constexpr size_t kSndbufBoostThreshold = 1u * 1024u * 1024u; // >1 MiB frame
 
     socket_t    listen_ = INVALID_SOCK;
     int         local_port_ = 0;   // actual bound port (see local_port())
@@ -773,6 +787,13 @@ private:
     // tx_mu_-guarded store↔writer-read pair is additionally ordered by tx_mu_.
     std::atomic<uint64_t>     conn_epoch_{0};
 
+    // Adaptive-SNDBUF state (guarded by tx_mu_, touched ONLY by the writer while it
+    // holds tx_mu_ to send): the conn_epoch_ for which SO_SNDBUF is already boosted.
+    // 0 = none (a live connection's epoch is always >=1 — the first accept bumps
+    // conn_epoch_ to 1 before publishing client_). A reconnect bumps the epoch, so
+    // it no longer matches and the next large frame re-boosts the fresh socket.
+    uint64_t                  sndbuf_boosted_for_epoch_ = 0;
+
 public:
     // Test-only seam (null in production; a single null-check per frame). Invoked
     // by the writer AFTER it pops a frame and releases out_mu_, but BEFORE it
@@ -904,9 +925,23 @@ private:
                 release_buf_(std::move(frame.bytes));  // recycle (perf/ws-lean)
                 continue;                            // connection gone or superseded — drop
             }
-            // Send one contiguous span in 4 MiB chunks (matches the accepted
-            // socket's SNDBUF): big enough that a 15 MB raw preview streams at
-            // memory speed, small enough that SO_SNDTIMEO still bounds a wedged
+            // Adaptive SO_SNDBUF (perf/ws-lean): the first LARGE frame on this
+            // connection boosts the kernel send buffer so a raw preview streams
+            // ahead of the chunk loop. Small-frame lanes never reach here (their
+            // frames stay under the threshold), so they keep the small default and
+            // its sharp SO_SNDTIMEO wedge detection. Under tx_mu_ with the fd live
+            // and frame.epoch == conn_epoch_ confirmed just above, so the boost is
+            // stamped against THIS connection; a reconnect (new epoch) re-arms it.
+            if (frame.total > kSndbufBoostThreshold &&
+                sndbuf_boosted_for_epoch_ != frame.epoch) {
+                int sndbuf = kSndbufBoost;
+                ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF,
+                             reinterpret_cast<const char*>(&sndbuf), sizeof(sndbuf));
+                sndbuf_boosted_for_epoch_ = frame.epoch;
+            }
+            // Send one contiguous span in 4 MiB chunks (matches the boosted
+            // SNDBUF for large frames): big enough that a 15 MB raw preview streams
+            // at memory speed, small enough that SO_SNDTIMEO still bounds a wedged
             // client per chunk (a progressing client must drain >2.7 MB/s, vs
             // >0.7 with the old 1 MiB chunks — still far below any live localhost
             // consumer). Returns false on a short/failed ::send (desynced/wedged):
