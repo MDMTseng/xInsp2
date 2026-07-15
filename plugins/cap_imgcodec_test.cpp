@@ -264,6 +264,39 @@ int main() {
         pk->release(in);
     }
 
+    SECTION("@1-ONLY HOST: no xi.pack@4 -> HARD-REFUSE, zero capabilities registered");
+    {
+        // A proxy host identical to the real one except the @4 blob door is
+        // absent — the pre-blob-plane host class. imgcodec's decode contract is
+        // a @4 blob; on such a host it must refuse to register ANYTHING (inert,
+        // named in status) rather than register and $fault its way into an
+        // on_fault:"refuse" quarantine at first use.
+        static xi_host_api legacy = host;                        // copy the real table
+        static auto real_gi = host.get_interface;
+        legacy.get_interface = [](const char* id, uint32_t v) -> const void* {
+            if (id && v == 4u && std::strcmp(id, "xi.pack") == 0) return nullptr;
+            return real_gi(id, v);
+        };
+        std::shared_ptr<xi::CAbiInstanceAdapter> old_codec;
+        {
+            xi::ImagePoolOwnerScope scope;
+            void* raw = scope.run_factory([&] { return create(&legacy, "codec_legacy"); });
+            CHECK(raw != nullptr);                               // loadable — just inert
+            if (raw) {
+                old_codec = std::make_shared<xi::CAbiInstanceAdapter>(
+                    "codec_legacy", "imgcodec", dll, raw, /*reentrant=*/true, /*max_conc=*/0);
+                old_codec->adopt_owner_id(scope.release());
+                xi::InstanceRegistry::instance().add(old_codec);
+            }
+        }
+        CHECK(cap->available("xi.jpeg.encode") == 0);            // NOTHING registered
+        CHECK(cap->available("xi.image.decode") == 0);
+        if (old_codec) {
+            xi::InstanceRegistry::instance().remove("codec_legacy");
+            old_codec.reset();
+        }
+    }
+
     SECTION("pack-registry balance");
     CHECK(xi::PackRegistry::instance().live_frames() == frames_baseline);
 

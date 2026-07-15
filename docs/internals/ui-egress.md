@@ -57,11 +57,16 @@ nothing — the "idle channels are literally free" refinement), then per channel
    unsubscribed → drop (fail-open: the project's plugin list decides whether live
    UI exists at all).
 2. **Dedup.** Content-keyed LRU memo (`lru_max`, default 32). The key is FNV-1a
-   over the descriptor + payload (+ quality). The `xi.pack@4` `get_blob` door
-   surfaces the descriptor + payload but NOT the pool handle, so — exactly as
-   `xi.imgcodec`'s memo does for the same ABI reason — content IS the identity
-   (sealed buffers are immutable). The same image pushed to two channels / across
-   ticks **encodes once**; `stats.encodes` vs `stats.dedup_hits` is the proof.
+   over the descriptor + payload, folded with the policy fingerprint (`quality` +
+   `downscale_mp`). The `xi.pack@4` `get_blob` door surfaces the descriptor +
+   payload but NOT the pool handle, so — exactly as `xi.imgcodec`'s memo does for
+   the same ABI reason — content IS the identity (sealed buffers are immutable).
+   Every hit is verified against an **identity witness** (a second, independent
+   FNV basis over the same bytes + the payload length) so a 64-bit hash collision
+   can never serve the WRONG image; a mismatch re-encodes and replaces the entry
+   (`stats.dedup_collisions` counts these — expected 0 in any real run). The same
+   image pushed to two channels / across ticks **encodes once**;
+   `stats.encodes` vs `stats.dedup_hits` is the proof.
 3. **Dispatch by descriptor `"t"`** (all config; E1 is SINGLE-GLOBAL — a
    per-channel override table is DEFERRED, see the Config note below):
    - `xi/image` u8 → `xi.jpeg.encode` at `quality` (default 80). Images larger
@@ -101,8 +106,13 @@ all shared state is mutex-guarded, counters are atomics.
 ## Config (params/def — never ABI)
 
 `ui_egress`: `fps` (30), `quality` (80), `downscale_mp` (2 → ~1MP target),
-`lru_max` (32). `exchange "stats"` → `{pushes, flushes, encodes, dedup_hits,
-dropped_no_sub, raw_fallbacks, lru_entries, registered}`; `"clear"` drains.
+`lru_max` (32), `encode` (true). **`encode:false` = RAW PASSTHROUGH** — the
+"this channel walks raw" knob (doc 31): the flusher ships the pushed
+self-describing blob verbatim (no jpeg, no downscale, no LRU), so push AND pull
+both see raw, at raw's honest bandwidth/memory cost. `exchange "stats"` →
+`{pushes, flushes, encodes, dedup_hits, dedup_collisions, dropped_no_sub,
+raw_fallbacks, raw_passthrough, flush_errors, lru_entries, registered}`;
+`"clear"` drains.
 Producer opt-in is per-producer (e.g. mock_camera's `ui_preview`, default off).
 
 **DEFERRED (E1): single-global config.** `set_def` sets ONE config for the whole
