@@ -422,6 +422,12 @@ public:
         static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
         return f_.get_image(std::string(Schema::keys[Slot]).c_str());
     }
+    // Blob-plane sibling of get_image<Slot> (spec 30): the xi/image blob view
+    // (w/h/c + dtype + payload), off the deprecated @1 get_image adapter.
+    template <int Slot> std::optional<ImageBlobView> image_blob() const {
+        static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
+        return f_.image_blob(std::string(Schema::keys[Slot]).c_str());
+    }
 
 private:
     ScriptPack f_;

@@ -36,6 +36,7 @@
 #include <xi/xi_image_pool.hpp>   // ImagePool::make_host_api (the real pool)
 #include <xi/xi_pack_abi.hpp>     // install_pack_abi + pack_v1_iface/pack_v4_iface (host pack ABI)
 #include <xi/xi_mp.hpp>           // canonical msgpack Writer — the xi/image blob descriptor
+#include <xi/xi_image_blob.hpp>   // xi::read_image_blob — the xi/image blob consumer reader
 #include "yyjson.h"
 
 #include <opencv2/opencv.hpp>
@@ -46,6 +47,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <span>
 #include <string>
 #include <vector>
 #include <utility>
@@ -356,22 +358,27 @@ int main(int argc, char** argv) {
                 break;
             }
             case XI_PACK_TAG_BLOB: {
-                // spec 30: a non-scalar entry is a self-describing blob. An
-                // "xi/image" blob parses through the @1 get_image adapter into
-                // an xi_pack_image we can save as PNG; any other blob type is
-                // reported by its payload size (get_blob), not written out.
-                xi_pack_image img{};
-                if (fi->get_image(out, key.c_str(), &img)) {
-                    std::string path = out_dir + "/" + key + ".png";
-                    if (save_image(img, path)) saved.push_back(path);
-                    val = "{\"$image\":[" + std::to_string(img.width) + "," +
-                          std::to_string(img.height) + "," +
-                          std::to_string(img.channels) + "]}";
-                } else if (fi4) {
-                    const void* dp = nullptr; int32_t dl = 0;
-                    const void* pp = nullptr; int64_t pl = 0;
-                    if (fi4->get_blob(out, key.c_str(), &dp, &dl, &pp, &pl))
+                // spec 30: a non-scalar entry is a self-describing blob. Read it
+                // via the @4 get_blob + xi::read_image_blob (NOT the deprecated @1
+                // get_image adapter): a u8 "xi/image" blob saves as PNG; any other
+                // blob type is reported by its payload size.
+                const void* dp = nullptr; int32_t dl = 0;
+                const void* pp = nullptr; int64_t pl = 0;
+                if (fi4 && fi4->get_blob(out, key.c_str(), &dp, &dl, &pp, &pl)) {
+                    auto ib = xi::read_image_blob(
+                        std::span<const uint8_t>(static_cast<const uint8_t*>(dp), dl > 0 ? (size_t)dl : 0),
+                        std::span<const uint8_t>(static_cast<const uint8_t*>(pp), pl > 0 ? (size_t)pl : 0));
+                    if (ib && ib->dt == "u8") {
+                        xi_pack_image img{};
+                        img.width = ib->width; img.height = ib->height; img.channels = ib->channels;
+                        img.pixels = ib->payload.data(); img.length = (int32_t)ib->payload.size();
+                        std::string path = out_dir + "/" + key + ".png";
+                        if (save_image(img, path)) saved.push_back(path);
+                        val = "{\"$image\":[" + std::to_string(ib->width) + "," +
+                              std::to_string(ib->height) + "," + std::to_string(ib->channels) + "]}";
+                    } else {
                         val = "{\"$blob_bytes\":" + std::to_string(pl) + "}";
+                    }
                 }
                 break;
             }

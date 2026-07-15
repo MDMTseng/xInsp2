@@ -23,7 +23,7 @@ XI_INSPECT_ENTRY(t, frame) {
     if (!f) return;                                  // no pack on this tick → NA
 
     int64_t seq = f.get_i64("seq").value_or(-1);
-    auto    img = f.get_image("frame");
+    auto    img = f.image_blob("frame");
     int w = img ? img->width    : 0;
     int h = img ? img->height   : 0;
     int c = img ? img->channels : 0;

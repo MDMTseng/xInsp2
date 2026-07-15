@@ -41,9 +41,9 @@
 #include <string>
 
 namespace {
-long long pixel_sum(const xi::ScriptPackImage& img) {
+long long pixel_sum(const xi::ImageBlobView& img) {
     long long s = 0;
-    for (uint8_t b : img.pixels) s += b;
+    for (uint8_t b : img.payload) s += b;
     return s;
 }
 }  // namespace
@@ -69,7 +69,7 @@ XI_INSPECT_ENTRY(t, frame) {
     if (src == "cam") {
         // ---- phase 1: RECORD — route the camera pack into record_save ------
         const long long seq = (long long)tp.get_i64("seq").value_or(-1);
-        auto img = tp.get_image("frame");
+        auto img = tp.image_blob("frame");
         if (!img) { xi::ng(1, "rec: camera pack has no 'frame' image"); return; }
         const long long psum = pixel_sum(*img);
 
@@ -85,8 +85,9 @@ XI_INSPECT_ENTRY(t, frame) {
         built = b.add_i64("seq", seq) && built;
         built = b.add_i64("psum", psum) && built;        // self-validating checksum
         built = b.add_mp("meta", meta) && built;
-        built = b.add_image("frame", img->width, img->height, img->channels,
-                            img->pixels.data()) && built;
+        built = b.add_image_blob("frame", img->width, img->height, img->channels, "u8",
+                            img->payload.data(),
+                            (int64_t)img->width * img->height * img->channels) && built;
         auto cap = b.seal();
         if (!(built && cap.valid())) { xi::ng(1, "rec: capture pack build failed"); return; }
 
@@ -122,7 +123,7 @@ XI_INSPECT_ENTRY(t, frame) {
         const long long seq  = (long long)tp.get_i64("seq").value_or(-2);
         const long long psum = (long long)tp.get_i64("psum").value_or(-1);
         auto meta = tp.get_mp("meta");
-        auto img  = tp.get_image("frame");
+        auto img  = tp.image_blob("frame");
 
         int entries = 0;
         tp.for_each([&](auto&&, auto&&) { ++entries; });
@@ -140,8 +141,9 @@ XI_INSPECT_ENTRY(t, frame) {
         rebuilt = rb.add_i64("seq", seq) && rebuilt;
         rebuilt = rb.add_i64("psum", psum) && rebuilt;
         if (meta) rebuilt = rb.add_mp("meta", *meta) && rebuilt;
-        if (img)  rebuilt = rb.add_image("frame", img->width, img->height,
-                                         img->channels, img->pixels.data()) && rebuilt;
+        if (img)  rebuilt = rb.add_image_blob("frame", img->width, img->height,
+                                         img->channels, "u8", img->payload.data(),
+                                         (int64_t)img->width * img->height * img->channels) && rebuilt;
         auto rep = rb.seal();
         const bool pushed = rebuilt && rep.valid() && xi::use("expose").push(rep);
 

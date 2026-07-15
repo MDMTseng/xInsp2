@@ -264,6 +264,24 @@ inline void f_add_bin(xi_pack_builder b, const char* key, const void* data, int3
     if (auto* fb = PackRegistry::instance().builder(b))
         fb->add_bin(key ? key : "", data, len > 0 ? (size_t)len : 0);
 }
+// SOFT-RETIREMENT (CT ruling, 2026-07): the four @1 image slots are DEPRECATED
+// door adapters over the blob plane. They keep working unchanged — hard
+// retirement is deferred to the xInsp3 cutover — but each warns ONCE per process
+// per slot, naming the replacement, so residual callers surface. Same warn-once
+// pattern as the add_mp seam above (an inline function's local static has one
+// instance program-wide → one line per slot regardless of TU).
+inline void warn_legacy_image_slot_(std::atomic<bool>& warned, const char* slot) {
+    if (!warned.exchange(true)) {
+        std::fprintf(stderr,
+            "[xinsp2] xi.pack@1 %s: LEGACY image adapter (deprecated, still "
+            "working; hard-retire at the xInsp3 cutover). New code: "
+            "blob_mint/adopt_blob to produce + read_image_blob to consume an "
+            "xi/image self-describing blob — see docs/new_gen/"
+            "30-self-describing-blob-plane.md and 31-ui-egress-and-plugin-ui.md.\n",
+            slot);
+    }
+}
+
 // The frozen @1 image slots are DOOR ADAPTERS over the blob plane (spec 30,
 // TODO(selfdesc-B) inheritance marker). add_image synthesizes an "xi/image"
 // descriptor + mints a headed blob + copies pixels. A u8 (w,h,c) image → payload
@@ -272,6 +290,8 @@ inline void f_add_image(xi_pack_builder b, const char* key,
                         int32_t w, int32_t h, int32_t c, const void* px) {
     auto* fb = PackRegistry::instance().builder(b);
     if (!fb) return;
+    static std::atomic<bool> warned{false};
+    warn_legacy_image_slot_(warned, "builder_add_image");
     // Guard the dims BEFORE the signed w*h*c multiply (mint_image does; this
     // adapter must too — doc 28 finding B①). A non-positive dim, or a product
     // over the pool cap, is refused rather than dropped silently via a wrapped
@@ -295,6 +315,8 @@ inline void f_adopt_image(xi_pack_builder b, const char* key,
                           int32_t w, int32_t h, int32_t c, xi_image_handle handle) {
     auto* fb = PackRegistry::instance().builder(b);
     if (!fb) return;
+    static std::atomic<bool> warned{false};
+    warn_legacy_image_slot_(warned, "builder_adopt_image");
     const size_t need = size_t(w) * size_t(h) * size_t(c);
     auto px = xi::pack_pool::view(handle);           // {} for a dead handle
     if (px.size() < need) return;                    // fail-closed on short/dead
@@ -412,6 +434,8 @@ inline int32_t f_get_bin(xi_pack_handle f, const char* key, const void** ptr, in
 inline int32_t f_get_image(xi_pack_handle f, const char* key, xi_pack_image* out) {
     Pack* fr = PackRegistry::instance().pack(f);
     if (!fr || !key) return 0;
+    static std::atomic<bool> warned{false};
+    warn_legacy_image_slot_(warned, "get_image");
     auto bv = fr->get_blob(key);
     if (!bv) return 0;
     auto t = Pack::desc_find_str(bv->desc, "t");

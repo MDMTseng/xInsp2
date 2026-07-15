@@ -82,7 +82,7 @@ XI_INSPECT_ENTRY(t, frame) {
         for (int x = 5; x < 10; ++x) gray[(size_t)y * W + x] = 255;
     xi::ScriptPackBuilder hb;
     bool hbuilt = hb.valid();
-    hbuilt = hb.add_image("gray", W, H, 1, gray.data()) && hbuilt;
+    hbuilt = hb.add_image_blob("gray", W, H, 1, "u8", gray.data(), (int64_t)W * H * 1) && hbuilt;
     hbuilt = hb.add_i64("threshold", 128) && hbuilt;
     hbuilt = hb.add_i64("min_area", 1) && hbuilt;
     auto hr = xi::use("det").process(hb.seal());
