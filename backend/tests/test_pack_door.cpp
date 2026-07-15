@@ -59,6 +59,75 @@ static int g_failures = 0;
 
 static int pool_live() { return xi::ImagePool::instance().cumulative().live_now; }
 
+// ---- stderr capture (fd dup/dup2) — for the @1-image-adapter warn-once pin ----
+#ifdef _WIN32
+#  include <io.h>
+#  define XI_DUP _dup
+#  define XI_DUP2 _dup2
+#  define XI_FILENO _fileno
+#  define XI_CLOSE _close
+#else
+#  include <unistd.h>
+#  define XI_DUP dup
+#  define XI_DUP2 dup2
+#  define XI_FILENO fileno
+#  define XI_CLOSE close
+#endif
+template <class Fn>
+static std::string capture_stderr_(Fn&& fn) {
+    std::fflush(stderr);
+    int saved = XI_DUP(XI_FILENO(stderr));
+    std::FILE* tmp = std::tmpfile();
+    XI_DUP2(XI_FILENO(tmp), XI_FILENO(stderr));
+    fn();
+    std::fflush(stderr);
+    XI_DUP2(saved, XI_FILENO(stderr));           // restore the real stderr
+    XI_CLOSE(saved);
+    std::rewind(tmp);
+    std::string out; char buf[512]; size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, tmp)) > 0) out.append(buf, n);
+    std::fclose(tmp);
+    return out;
+}
+static size_t count_substr_(const std::string& hay, const char* needle) {
+    size_t c = 0, p = 0, nl = std::strlen(needle);
+    while ((p = hay.find(needle, p)) != std::string::npos) { ++c; p += nl; }
+    return c;
+}
+
+// ---------------------------------------------------------------------------
+// (0) @1 image adapter SOFT-RETIREMENT pin. The four @1 image slots are
+// deprecated but keep working; each warns ONCE per process per slot (CT ruling
+// 2026-07). This test deliberately drives the adapter (the compatibility pin —
+// it must NOT migrate away from the thing it tests) and captures stderr to
+// assert the warn-once fires exactly once per slot. Runs FIRST so it observes
+// the process's first adapter use (the warn-once static is process-global).
+// ---------------------------------------------------------------------------
+static void test_image_adapter_warn_once() {
+    SECTION("(0) @1 image adapter deprecation: each slot warns exactly once");
+    xi::install_pack_abi();
+    const xi_pack_v1* fi = xi::pack_v1_iface();
+    std::vector<uint8_t> gray(16, 7);
+    std::string err = capture_stderr_([&] {
+        // Drive each slot TWICE; the warn must fire only on the first.
+        for (int i = 0; i < 2; ++i) {
+            xi_pack_builder b = fi->builder_new();
+            fi->builder_add_image(b, "img", 4, 4, 1, gray.data());
+            xi_image_handle h = xi::pack_pool::alloc_bytes(gray.data(), gray.size());
+            fi->builder_adopt_image(b, "adopted", 4, 4, 1, h);
+            xi::pack_pool::release(h);            // adopt COPIES; drop our raw ref
+            xi_pack_handle f = fi->builder_seal(b);
+            xi_pack_image iv{};
+            fi->get_image(f, "img", &iv);
+            fi->release(f);
+        }
+    });
+    CHECK(count_substr_(err, "builder_add_image") == 1);
+    CHECK(count_substr_(err, "builder_adopt_image") == 1);
+    CHECK(count_substr_(err, "get_image") == 1);
+    CHECK(count_substr_(err, "LEGACY image adapter") == 3);   // one line per slot
+}
+
 // ---------------------------------------------------------------------------
 // (1) Door probe.
 // ---------------------------------------------------------------------------
@@ -871,6 +940,7 @@ static void test_reinit_creator_tag_ownerguard() {
 
 int main() {
     std::printf("[test] xi.pack@1 carved data-plane door + dispatch dual-carry\n");
+    test_image_adapter_warn_once();   // FIRST: observe the process's first adapter use
     test_door_probe();
     test_build_read_roundtrip();
     test_refcount_lifecycle();

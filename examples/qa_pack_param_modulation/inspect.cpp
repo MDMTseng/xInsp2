@@ -74,7 +74,7 @@ XI_INSPECT_ENTRY(t, frame) {
     // ---- LEG A: the per-frame parameter rides IN the pack (data cadence) ---
     xi::ScriptPackBuilder ba;
     bool built = ba.valid();
-    built = ba.add_image("gray", W, H, 1, gray.data()) && built;
+    built = ba.add_image_blob("gray", W, H, 1, "u8", gray.data(), (int64_t)W * H * 1) && built;
     built = ba.add_i64("threshold", thr) && built;   // THE modulated parameter
     auto in_a = ba.seal();
     built = built && in_a.valid();
@@ -91,7 +91,7 @@ XI_INSPECT_ENTRY(t, frame) {
     // instance, this call would echo it. It must echo the instance.json def.
     xi::ScriptPackBuilder bb;
     bool built_b = bb.valid();
-    built_b = bb.add_image("gray", W, H, 1, gray.data()) && built_b;
+    built_b = bb.add_image_blob("gray", W, H, 1, "u8", gray.data(), (int64_t)W * H * 1) && built_b;
     auto in_b = bb.seal();
     built_b = built_b && in_b.valid();
 

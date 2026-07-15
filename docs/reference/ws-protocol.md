@@ -370,10 +370,11 @@ reassembly — a consumer always receives a whole record atomically.
 > ```
 >
 > Each `frame` entry is a `[tag, value]` pair (the pack's typed key slots).
-> On the WS-send path an image entry may carry a nested-mp `preview` map
-> `{ w, h, c, enc: "jpeg", q, data: <bin> }` beside the frozen image tag when the
-> `xi.jpeg.encode` capability is live (it fails **open** to the raw image tag when
-> no encoder is present). The legacy `v: 1` body documented below stays selectable
+> On the WS-send path an `xi/image` blob entry may carry a nested-mp `preview`
+> map `{ w, h, c, enc: "jpeg", q, data: <bin> }` under the BLOB tag when the
+> `xi.jpeg.encode` capability is live (it fails **open** to the raw verbatim
+> blob when no encoder is present). (The pre-blob image tag is retired — an
+> image on the wire IS a blob entry; see docs/new_gen/30.) The legacy `v: 1` body documented below stays selectable
 > for **one release** via the `expose` def knob `"frame_wire_v3": false`, then is
 > deleted; a decoder should gate on `v` and handle both until then.
 

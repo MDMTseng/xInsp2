@@ -232,10 +232,12 @@ were removed at v11 and v12 respectively.
 ### Image pool — the refcount contract
 
 Images are **refcounted handles**, never raw `malloc`/`free`. `image_create`
-returns a handle at refcount 1 whose pixels are **zero-filled and 64-byte
-aligned** (the buffer comes from a size-class recycler since 2026-07 —
-`pixpool` in `xi_image_pool.hpp` — but the zeroed-on-create contract is
-unchanged); `image_addref` increments, `image_release`
+returns a handle at refcount 1 whose pixels are **64-byte aligned but
+UNINITIALISED** (CT ruling 2026-07: the size-class recycler — `pixpool` in
+`xi_image_pool.hpp` — hands a recycled buffer back as-is, no per-create memset,
+so it carries the previous image's bytes; the producer overwrites what it
+exposes, and a partial-paint producer must clear the regions it does not
+write); `image_addref` increments, `image_release`
 decrements (freed at 0; invalid handles are no-ops). `image_stride(h)` is
 `width*channels` (no padding — SIMD-safe). Ownership rules:
 - **Input handles** belong to the host for the `process()` call. To keep one
@@ -512,6 +514,18 @@ What it adds over v1 (and why v1's shape could not express it):
   rather than drop the entry; new code uses `blob_mint` + DMA + `adopt_blob`).
   `tag_of` an image entry now reports `XI_PACK_TAG_BLOB`, not the retired
   `IMAGE` tag.
+
+  > **LEGACY — SOFT-RETIRED (deprecated, still working).** These four `xi/image`
+  > adapter slots (`builder_add_image` / `builder_adopt_image` / `get_image`, and
+  > the script-side `ScriptPackBuilder::add_image` / `ScriptPack::get_image` that
+  > delegate to them) are **deprecated**. Behaviour is unchanged and they remain
+  > in the frozen v1 vtable — but each emits a **warn-once** stderr diagnostic
+  > per process per slot naming the replacement. New code produces with
+  > `blob_mint`/`adopt_blob` (host) or `PackOut::blob`/`blob_mint` /
+  > `ScriptPackBuilder::add_image_blob` (SDK) and consumes with `xi::read_image_blob`
+  > / `PackIn::image_blob` / `ScriptPack::image_blob` over an `xi/image` blob
+  > (docs/new_gen/30, 31). **Hard retirement is deferred to the xInsp3 cutover**;
+  > until then a vendored panel or an older plugin keeps working as-is.
 - **Ordinal-explicit iteration** — `entry_at(i)` (the whole directory row —
   borrowed non-NUL-terminated key span, `tag`, `external` storage flag — in
   **one** call per index; same insertion order as v1 `key_at`/`tag_at`). The

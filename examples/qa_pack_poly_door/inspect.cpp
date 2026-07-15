@@ -46,7 +46,7 @@ XI_INSPECT_ENTRY(t, frame) {
     xi::ScriptPackBuilder mb;
     built = mb.valid() && built;
     built = mb.add_str("type", "measure") && built;
-    built = mb.add_image("gray", W, H, 1, gray.data()) && built;
+    built = mb.add_image_blob("gray", W, H, 1, "u8", gray.data(), (int64_t)W * H * 1) && built;
     auto mpk = mb.seal();
     built = built && mpk.valid();
     auto mo = xi::use("door").process(mpk);
@@ -66,26 +66,26 @@ XI_INSPECT_ENTRY(t, frame) {
     built = ab.valid() && built;
     built = ab.add_str("type", "annotate") && built;
     built = ab.add_i64("threshold", 128) && built;
-    built = ab.add_image("gray", W, H, 1, gray.data()) && built;
+    built = ab.add_image_blob("gray", W, H, 1, "u8", gray.data(), (int64_t)W * H * 1) && built;
     auto ain = ab.seal();
     built = built && ain.valid();
     auto ao = xi::use("door").process(ain);
-    auto ov = ao.get_image("overlay");
+    auto ov = ao.image_blob("overlay");
     const bool a_ok = ao.valid() && !ao.is_fault() &&
                       ao.get_str("type").value_or("") == "annotate" &&
                       ao.get_i64("threshold_used").value_or(-1) == 128 &&
                       ao.get_i64("marked").value_or(-1) == 25 &&
                       ov && ov->width == W && ov->height == H &&
                       ov->channels == 1 &&
-                      ov->pixels[(size_t)7 * W + 7] == 255 &&   // inside square
-                      ov->pixels[0] == 0;                        // outside
+                      ov->payload[(size_t)7 * W + 7] == 255 &&   // inside square
+                      ov->payload[0] == 0;                        // outside
     if (a_ok) xi::kv().set_i64("n_annotate", xi::kv().get_i64("n_annotate", 0) + 1);
 
     // ---- 3. UNKNOWN type through the SAME door: the fault leg ---------------
     xi::ScriptPackBuilder ub;
     built = ub.valid() && built;
     built = ub.add_str("type", "rotate") && built;
-    built = ub.add_image("gray", W, H, 1, gray.data()) && built;
+    built = ub.add_image_blob("gray", W, H, 1, "u8", gray.data(), (int64_t)W * H * 1) && built;
     auto uin = ub.seal();
     built = built && uin.valid();
     auto uo = xi::use("door").process(uin);
