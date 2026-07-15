@@ -99,17 +99,20 @@ public:
         // add_image over the @1 blob-adapter slot) work regardless; add_blob
         // then fail-closes (returns false).
         fi4_ = static_cast<const xi_pack_v4*>(host->get_interface("xi.pack", 4));
+        // xi.imaging@1 — needed ONLY by mint_image_blob (perf/ws-lean) to drop the
+        // mint's own ref after adopt. OPTIONAL: null-checked at the mint call.
+        fi_img_ = static_cast<const xi_imaging_v1*>(host->get_interface("xi.imaging", 1));
         b_ = fi_->builder_new();
     }
 
     // Move-only (like the host PackBuilder): exactly one owner of the
     // host-side builder id, so scope exit abandons it exactly once.
     ScriptPackBuilder(ScriptPackBuilder&& o) noexcept
-        : fi_(o.fi_), fi4_(o.fi4_), b_(o.b_) { o.b_ = XI_PACK_BUILDER_NULL; }
+        : fi_(o.fi_), fi4_(o.fi4_), fi_img_(o.fi_img_), b_(o.b_) { o.b_ = XI_PACK_BUILDER_NULL; }
     ScriptPackBuilder& operator=(ScriptPackBuilder&& o) noexcept {
         if (this != &o) {
             abandon();
-            fi_ = o.fi_; fi4_ = o.fi4_; b_ = o.b_;
+            fi_ = o.fi_; fi4_ = o.fi4_; fi_img_ = o.fi_img_; b_ = o.b_;
             o.b_ = XI_PACK_BUILDER_NULL;
         }
         return *this;
@@ -218,6 +221,49 @@ public:
         return add_blob(key, db.data(), int32_t(db.size()), pixels, payload_len);
     }
 
+    // MINT-THEN-FILL — the zero-copy producer convention (perf/ws-lean). Where
+    // add_image_blob fills a SEPARATE pixel buffer and then COPIES it into the
+    // pack's pool buffer (a full w*h*c copy every frame — the single largest per-
+    // frame producer cost for a large raw image), this mints the pool buffer up
+    // front and hands `fill` a writable, 64B-aligned payload pointer to write the
+    // pixels IN PLACE (camera DMA target, a render/decode loop). No intermediate
+    // buffer, no copy.
+    //
+    //   fill(uint8_t* payload, int64_t len)   // write exactly `len` bytes
+    //
+    // Order is mint -> fill -> adopt -> drop-mint-ref, so the payload is written
+    // while still mutable and frozen only at seal(). `dt` names the dtype and
+    // `payload_len` its byte length (w*h*c for u8). Returns false (nothing added)
+    // on a host without the blob plane, bad args, or pool exhaustion — the same
+    // fail-closed discipline as every add above. `fill` is NOT called on failure.
+    template <class Fill>
+    bool mint_image_blob(const char* key, int32_t w, int32_t h, int32_t c,
+                         std::string_view dt, int64_t payload_len, Fill&& fill) {
+        if (!valid() || !key) return false;
+        if (!fi4_ || !fi4_->blob_mint || !fi4_->builder_adopt_blob) return false;
+        if (!fi_img_ || !fi_img_->image_release) return false;
+        if (w <= 0 || h <= 0 || c <= 0 || payload_len <= 0) return false;
+        xi::mp::Writer d;
+        d.map(5);
+        d.key("t");  d.str("xi/image");
+        d.key("w");  d.int_(w);
+        d.key("h");  d.int_(h);
+        d.key("c");  d.int_(c);
+        d.key("dt"); d.str(dt);
+        const xi::mp::Bytes& db = d.bytes();
+        void* payload = nullptr;
+        xi_image_handle bh =
+            fi4_->blob_mint(db.data(), (int32_t)db.size(), payload_len, &payload);
+        if (bh == XI_IMAGE_NULL || !payload) return false;
+        // Fill IN PLACE while the buffer is still mutable (pre-adopt/seal).
+        fill(static_cast<uint8_t*>(payload), payload_len);
+        // Adopt into the builder (pack co-owns; addref'd), then drop our mint ref
+        // so the pack holds the only ref. The buffer is frozen at seal().
+        const bool ok = fi4_->builder_adopt_blob(b_, key, bh) == 1;
+        fi_img_->image_release(bh);
+        return ok;
+    }
+
     // Nested canonical msgpack value (ONE complete scalar / str / bin / map /
     // array subtree). THE CANONICAL GATE: the bytes are validated AND
     // normalized through xi::mp::canonicalize with the reject-all ext policy
@@ -297,9 +343,10 @@ private:
         }
     };
 
-    const xi_pack_v1* fi_  = nullptr;
-    const xi_pack_v4* fi4_ = nullptr;   // xi.pack@4 blob supplement; null with no blob plane
-    xi_pack_builder   b_  = XI_PACK_BUILDER_NULL;
+    const xi_pack_v1*    fi_     = nullptr;
+    const xi_pack_v4*    fi4_    = nullptr;   // xi.pack@4 blob supplement; null with no blob plane
+    const xi_imaging_v1* fi_img_ = nullptr;   // xi.imaging@1; mint_image_blob's ref-release only
+    xi_pack_builder      b_  = XI_PACK_BUILDER_NULL;
 };
 
 } // namespace xi

@@ -317,6 +317,68 @@ static void test_script_pack_v4() {
 }
 
 // ---------------------------------------------------------------------------
+// (4b) mint-then-fill (perf/ws-lean): mint the pool buffer + fill IN PLACE,
+// equivalent to add_image_blob's copy path but with no intermediate buffer.
+// Proves: the filled bytes round-trip byte-identical, the descriptor is a valid
+// xi/image, and the mint/adopt/release refcount dance leaks nothing (the pool +
+// frame oracles balance).
+// ---------------------------------------------------------------------------
+static void test_mint_image_blob() {
+    SECTION("script SDK: mint_image_blob fills in place, byte-identical + balanced");
+    size_t base_frames = xi::PackRegistry::instance().live_frames();
+    int    base_pool   = pool_live();
+    {
+        const int W = 4, H = 3, C = 2;
+        const int64_t N = (int64_t)W * H * C;   // u8: 24 bytes
+        // Reference pixels a copying add would carry.
+        std::vector<uint8_t> ref((size_t)N);
+        for (int64_t i = 0; i < N; ++i) ref[(size_t)i] = (uint8_t)(i * 7 + 1);
+
+        xi::ScriptPackBuilder b;
+        CHECK(b.valid());
+        bool filled = false;
+        CHECK(b.mint_image_blob("img", W, H, C, "u8", N,
+              [&](uint8_t* p, int64_t n) {
+                  CHECK(n == N);
+                  for (int64_t i = 0; i < n; ++i) p[i] = (uint8_t)(i * 7 + 1);
+                  filled = true;
+              }));
+        CHECK(filled);
+        // A reference copy-path blob with the SAME pixels, to compare against.
+        CHECK(b.add_image_blob("ref", W, H, C, "u8", ref.data(), N));
+
+        xi::ScriptPack sp = b.seal();
+        CHECK(sp.valid());
+        CHECK(sp.count() == 2);
+        CHECK(sp.tag_of("img") == XI_PACK_TAG_BLOB);
+
+        // The minted blob's payload equals the fill AND the copy-path reference.
+        auto mint = sp.get_blob("img");
+        auto copy = sp.get_blob("ref");
+        CHECK(mint.has_value() && copy.has_value());
+        if (mint && copy) {
+            CHECK((int64_t)mint->payload.size() == N);
+            CHECK(std::memcmp(mint->payload.data(), ref.data(), (size_t)N) == 0);
+            // Mint and copy paths produce byte-identical self-describing buffers.
+            CHECK(mint->payload.size() == copy->payload.size() &&
+                  std::memcmp(mint->payload.data(), copy->payload.data(),
+                              mint->payload.size()) == 0);
+            CHECK(mint->desc.size() == copy->desc.size() &&
+                  std::memcmp(mint->desc.data(), copy->desc.data(),
+                              mint->desc.size()) == 0);
+        }
+        // Descriptor decodes as a map (the xi/image {t,w,h,c,dt}).
+        if (mint) {
+            xi::mp::Reader r(mint->desc.data(), mint->desc.size());
+            xi::mp::Element m;
+            CHECK(r.next(m) == xi::mp::Status::Ok && m.kind == xi::mp::Kind::Map);
+        }
+    }
+    CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
+    CHECK(pool_live() == base_pool);   // mint ref + adopt ref both accounted, nothing leaked
+}
+
+// ---------------------------------------------------------------------------
 // (5) Lifecycle: seal-consumes, abandon, refcount balance.
 // ---------------------------------------------------------------------------
 static void test_lifecycle() {
@@ -388,6 +450,7 @@ int main() {
     test_build_read_canonical();
     test_canonical_enforcement();
     test_script_pack_v4();
+    test_mint_image_blob();
     test_lifecycle();
 
     if (g_failures == 0) {
