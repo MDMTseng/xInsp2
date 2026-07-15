@@ -134,11 +134,12 @@ public:
             char buf[256];
             std::snprintf(buf, sizeof(buf),
                 "{\"pushes\":%lld,\"flushes\":%lld,\"encodes\":%lld,\"dedup_hits\":%lld,"
-                "\"dropped_no_sub\":%lld,\"raw_fallbacks\":%lld,\"lru_entries\":%zu,"
-                "\"registered\":%s}",
+                "\"dropped_no_sub\":%lld,\"raw_fallbacks\":%lld,\"flush_errors\":%lld,"
+                "\"lru_entries\":%zu,\"registered\":%s}",
                 (long long)pushes_.load(), (long long)flushes_.load(),
                 (long long)encodes_.load(), (long long)dedup_hits_.load(),
                 (long long)dropped_no_sub_.load(), (long long)raw_fallbacks_.load(),
+                (long long)flush_errors_.load(),
                 lru_size_(), registered_ ? "true" : "false");
             return buf;
         }
@@ -211,7 +212,14 @@ private:
                 wake_.wait_for(lk, period, [this] { return !run_.load(std::memory_order_acquire); });
             }
             if (!run_.load(std::memory_order_acquire)) break;
-            flush_once_();
+            // The flusher owns this thread: an exception escaping the functor is
+            // std::terminate (whole-backend crash). Everything below (parse_desc,
+            // the Encoded byte copies, box_downscale_, encode_frame_v3) allocates
+            // and can throw bad_alloc/length_error on a large or crafted preview.
+            // Catch here so a single bad frame is dropped, not fatal — the
+            // "fail-open at every seam" contract the inbound push path already keeps.
+            try { flush_once_(); }
+            catch (...) { flush_errors_.fetch_add(1, std::memory_order_relaxed); }
         }
     }
 
@@ -220,7 +228,13 @@ private:
         std::unordered_map<std::string, xi_pack_handle> pending;
         {
             std::lock_guard<std::mutex> lk(slot_mu_);
-            for (auto& [ch, h] : slots_) { if (h != XI_PACK_NULL) { pending[ch] = h; h = XI_PACK_NULL; } }
+            // ERASE consumed keys (not just null them): a producer churning
+            // distinct $channel names would otherwise grow slots_ without bound
+            // (doc 28/31 finding F7). A later push re-materialises the key.
+            for (auto it = slots_.begin(); it != slots_.end(); ) {
+                if (it->second != XI_PACK_NULL) { pending[it->first] = it->second; it = slots_.erase(it); }
+                else ++it;
+            }
         }
         for (auto& [channel, in] : pending) {
             flush_channel_(channel, in);
@@ -248,7 +262,11 @@ private:
         // (3) Dedup by content identity (descriptor + payload) — reuse the memo.
         uint64_t key = fnv1a((const uint8_t*)pay, (size_t)pay_len,
                              fnv1a((const uint8_t*)desc, (size_t)desc_len));
+        // Policy fingerprint: fold in EVERY encode-affecting config param so a
+        // live set_def (quality OR downscale_mp) can't serve a preview encoded
+        // under the old policy for the same content (doc 28/31 finding F6).
         key ^= (uint64_t)quality * 1099511628211ull;
+        key ^= (uint64_t)downscale_mp * 14695981039346656037ull;
         std::shared_ptr<Encoded> enc = lru_get_(key);
         if (enc) {
             dedup_hits_.fetch_add(1, std::memory_order_relaxed);
@@ -290,8 +308,18 @@ private:
             out->w = (int32_t)d.w; out->h = (int32_t)d.h; out->c = (int32_t)d.c; out->q = quality;
             return out;
         }
-        if (d.t == "xi/image" && d.dt == "u8" && d.w > 0 && d.h > 0 && d.c > 0 &&
-            (int64_t)pay_len == d.w * d.h * d.c) {
+        // Overflow-safe u8 gate: bound each dim to INT32 and compute w*h*c in
+        // uint64 with an early wh-bound so the product cannot wrap (a wrapped
+        // product happening to equal pay_len would slip a truncated width into
+        // box_downscale_/encode → OOB). pay_len <= pool cap (INT32_MAX), so wh
+        // exceeding INT32_MAX can never match and is rejected before *c.
+        const bool u8_dims_ok =
+            d.t == "xi/image" && d.dt == "u8" &&
+            d.w > 0 && d.h > 0 && d.c > 0 &&
+            d.w <= INT32_MAX && d.h <= INT32_MAX && d.c <= INT32_MAX &&
+            (uint64_t)d.w * (uint64_t)d.h <= (uint64_t)INT32_MAX &&
+            (uint64_t)d.w * (uint64_t)d.h * (uint64_t)d.c == (uint64_t)pay_len;
+        if (u8_dims_ok) {
             int w = (int)d.w, h = (int)d.h, c = (int)d.c;
             const uint8_t* px = pay;
             std::vector<uint8_t> scaled;
@@ -307,10 +335,17 @@ private:
                 return out;
             }
             // Fail-open: no cap / codec down / $fault -> raw pixels on the wire.
+            // The payload here is the (possibly downscaled) px/w/h/c — so the
+            // descriptor that rides with it MUST describe the EMITTED dims, not
+            // the original. Riding the untouched original descriptor over a
+            // downscaled payload made a w*h*c-vs-payload mismatch that passes
+            // blob_head_validate (offsets only) and garbles / over-reads on the
+            // client (doc 28/31 finding: downscale + raw fail-open). Rebuild it.
             raw_fallbacks_.fetch_add(1, std::memory_order_relaxed);
             out->is_jpeg = false;
             out->raw.assign(px, px + (size_t)w * h * c);
             out->w = w; out->h = h; out->c = c;
+            out->desc = image_desc_(w, h, c, "u8");
             return out;
         }
         // Unknown "t" (or a non-u8 image we don't normalize yet) -> a metadata
@@ -393,6 +428,22 @@ private:
         }
         entries.push_back(std::move(v));
         return xi::xex1::encode_frame_v3(channel, ++seq_, entries);
+    }
+
+    // Build a canonical xi/image descriptor {t,w,h,c,dt} for the EMITTED dims —
+    // the raw fail-open path rebuilds this so the descriptor matches its
+    // (possibly downscaled) payload. Same shape as host xi::make_image_desc,
+    // built plugin-side with xi::mp::Writer (canonical by construction).
+    static std::vector<uint8_t> image_desc_(int w, int h, int c, const char* dt) {
+        xi::mp::Writer wr;
+        wr.map(5);
+        wr.key("t");  wr.str("xi/image");
+        wr.key("w");  wr.int_(w);
+        wr.key("h");  wr.int_(h);
+        wr.key("c");  wr.int_(c);
+        wr.key("dt"); wr.str(dt);
+        auto b = wr.take();
+        return std::vector<uint8_t>(b.data(), b.data() + b.size());
     }
 
     static std::vector<uint8_t> make_blob_buffer_(const std::vector<uint8_t>& desc,
@@ -512,7 +563,7 @@ private:
     uint64_t seq_ = 0;
 
     std::atomic<int64_t> pushes_{0}, flushes_{0}, encodes_{0}, dedup_hits_{0},
-                         dropped_no_sub_{0}, raw_fallbacks_{0};
+                         dropped_no_sub_{0}, raw_fallbacks_{0}, flush_errors_{0};
 };
 
 XI_PLUGIN_IMPL(UiEgress)
