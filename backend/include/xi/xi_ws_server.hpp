@@ -656,6 +656,51 @@ private:
     std::thread               writer_thread_;
     bool                      writer_stop_ = false;  // guarded by out_mu_
 
+    // ---- recycled outbound payload buffers (perf/ws-lean) ----
+    // A large WS frame's buffer (a raw 5–20 MP preview is 15–60 MB) is expensive
+    // to allocate: the OS commits + zero-fills fresh pages on first touch (the
+    // "page-zero" fault cost), and a >1 MiB block is released straight back to the
+    // OS on free, so a per-frame FRESH vector re-faults every page EVERY frame.
+    // The writer returns a just-sent frame's buffer here instead of freeing it;
+    // send_frame reuses one of adequate capacity, so a steady same-size stream
+    // pays that fault cost ONCE, not per frame. Bounded by kBufPoolMax buffers so
+    // a transient huge frame cannot pin memory (worst-case idle ≈ kBufPoolMax ×
+    // max-frame). Only buffers at/above kBufPoolMinCap are pooled — tiny control-
+    // frame buffers free normally. Guarded by its OWN short mutex (buf_pool_mu_),
+    // taken only to pop/push a buffer — NEVER held across the big frame memcpy or
+    // the ::send, so it never serializes producers or the writer.
+    std::vector<std::vector<uint8_t>> buf_pool_;
+    std::mutex                        buf_pool_mu_;
+    static constexpr size_t kBufPoolMax    = 4;            // ≤ N idle buffers retained
+    static constexpr size_t kBufPoolMinCap = 64u * 1024u; // don't pool sub-64KiB buffers
+
+    // Take a cleared buffer with capacity ≥ need — a pooled one if available, else
+    // a fresh reservation. Runs OUTSIDE out_mu_ (send_frame calls it before the
+    // enqueue critical section) so the big fill/memcpy that follows is unlocked.
+    std::vector<uint8_t> acquire_buf_(size_t need) {
+        {
+            std::lock_guard<std::mutex> g(buf_pool_mu_);
+            if (!buf_pool_.empty()) {
+                std::vector<uint8_t> v = std::move(buf_pool_.back());
+                buf_pool_.pop_back();
+                v.clear();                          // size→0, capacity (resident pages) kept
+                if (v.capacity() < need) v.reserve(need);
+                return v;
+            }
+        }
+        std::vector<uint8_t> v;
+        v.reserve(need);
+        return v;
+    }
+    // Return a spent buffer for reuse (moves the storage in). Sub-64KiB buffers
+    // and pool-overflow buffers are simply dropped (freed by the vector's dtor).
+    void release_buf_(std::vector<uint8_t>&& v) {
+        if (v.capacity() < kBufPoolMinCap) return;
+        std::lock_guard<std::mutex> g(buf_pool_mu_);
+        if (buf_pool_.size() < kBufPoolMax)
+            buf_pool_.push_back(std::move(v));
+    }
+
     // Connection epoch. Incremented (under tx_mu_) each time a new client is
     // published on a successful accept, so every distinct connection has a unique
     // tag. send_frame stamps the CURRENT epoch onto each queued frame; the writer,
@@ -744,6 +789,13 @@ private:
             out_q_.clear();
             out_bytes_ = 0;
         }
+        // Drop the recycled-buffer pool too (perf/ws-lean): with no client attached
+        // there is no stream to serve, so idle retained buffers are pure waste. The
+        // next client's first few frames re-fault their pages once — negligible.
+        {
+            std::lock_guard<std::mutex> g(buf_pool_mu_);
+            buf_pool_.clear();
+        }
         // Clear any pending drop request so it can't fire on the NEXT client (the
         // one we just closed satisfied it). Safe: the send side only re-arms it
         // while a client is attached, and none is now.
@@ -790,6 +842,7 @@ private:
             // (valid), but frame.epoch (A's) != conn_epoch_ (B's), so we drop it.
             if (fd == INVALID_SOCK ||
                 frame.epoch != conn_epoch_.load(std::memory_order_acquire)) {
+                release_buf_(std::move(frame.bytes));  // recycle (perf/ws-lean)
                 continue;                            // connection gone or superseded — drop
             }
             const std::vector<uint8_t>& bytes = frame.bytes;
@@ -813,6 +866,7 @@ private:
                 }
                 sent += (size_t)s;
             }
+            release_buf_(std::move(frame.bytes));  // recycle for the next frame (perf/ws-lean)
         }
     }
 
@@ -1120,8 +1174,7 @@ private:
             for (int i = 0; i < 8; ++i) hdr[2 + i] = (uint8_t)((v >> ((7 - i) * 8)) & 0xFF);
             hlen = 10;
         }
-        std::vector<uint8_t> frame;
-        frame.reserve(hlen + n);
+        std::vector<uint8_t> frame = acquire_buf_(hlen + n);  // pooled buffer (perf/ws-lean)
         frame.insert(frame.end(), hdr, hdr + hlen);
         if (n) frame.insert(frame.end(), data, data + n);
 
