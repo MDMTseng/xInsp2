@@ -3,7 +3,7 @@
 // xi_pack_abi.hpp — the HOST side of the xi.pack@1 data-plane door (polaris2
 // wave-2, docs/new_gen/07-uniform-keyed-buffer-plane.md + 08 Wave 2).
 //
-// The Pack value type (xi_pack.hpp) is a C++ container that OWNS an arena and
+// The Pack value type (xi_pack.hpp) is a C++ container that OWNS a slab and
 // pool handles; a plugin in another DLL cannot touch its layout. So the pack
 // crosses the ABI as an OPAQUE HANDLE (xi_pack_handle) plus the accessor C
 // functions in `xi_pack_v1` (xi_abi.h) — spans in / spans out, never raw
@@ -27,10 +27,13 @@
 
 #include "xi_abi.h"          // xi_pack_handle / xi_pack_v1 / xi_pack_image
 #include "xi_pack.hpp"      // xi::Pack / xi::PackBuilder (the container)
+#include "xi_image_blob_mint.hpp" // xi::make_image_desc (the @1 image-slot adapter's convention helper)
+#include "xi_ingress.hpp"   // xi::ingress::canonicalize_into (the foreign-mp gate)
 #include "xi_image_pool.hpp" // ImagePool::publish_pack_iface (the door slot)
 #include "xi_trigger_bus.hpp"// TriggerBus::emit_pack / set_pack_releaser
 
 #include <atomic>
+#include <cstdio>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -261,18 +264,79 @@ inline void f_add_bin(xi_pack_builder b, const char* key, const void* data, int3
     if (auto* fb = PackRegistry::instance().builder(b))
         fb->add_bin(key ? key : "", data, len > 0 ? (size_t)len : 0);
 }
+// The frozen @1 image slots are DOOR ADAPTERS over the blob plane (spec 30,
+// TODO(selfdesc-B) inheritance marker). add_image synthesizes an "xi/image"
+// descriptor + mints a headed blob + copies pixels. A u8 (w,h,c) image → payload
+// w*h*c bytes.
 inline void f_add_image(xi_pack_builder b, const char* key,
                         int32_t w, int32_t h, int32_t c, const void* px) {
-    if (auto* fb = PackRegistry::instance().builder(b)) fb->add_image(key ? key : "", w, h, c, px);
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return;
+    // Guard the dims BEFORE the signed w*h*c multiply (mint_image does; this
+    // adapter must too — doc 28 finding B①). A non-positive dim, or a product
+    // over the pool cap, is refused rather than dropped silently via a wrapped
+    // length or left to signed-overflow UB.
+    if (w <= 0 || h <= 0 || c <= 0) return;
+    const uint64_t need = uint64_t(w) * uint64_t(h) * uint64_t(c);
+    if (need > uint64_t(INT32_MAX)) return;                    // pool per-buffer cap
+    xi::mp::Bytes desc = xi::make_image_desc(w, h, c, "u8");   // {t,w,h,c,dt}
+    if (desc.empty()) return;                                  // bad shape/dtype
+    fb->add_blob(key ? key : "", desc.data(), int32_t(desc.size()),
+                 px, int64_t(need));
 }
+// adopt_image over a RAW pixel handle: a raw pool buffer has no self-describing
+// head, so zero-copy adoption is impossible in the blob plane. The adapter
+// COPIES the pixels into a freshly-minted headed "xi/image" blob — keeping the
+// frozen slot honest (get_image still returns the pixels) rather than dropping
+// the entry. The caller keeps its own handle ref (we do NOT addref); it releases
+// as before. Zero-copy image hand-off is now: blob_mint(xi/image desc) → DMA into
+// the payload → builder_adopt_blob (package D migrates producers to it).
 inline void f_adopt_image(xi_pack_builder b, const char* key,
                           int32_t w, int32_t h, int32_t c, xi_image_handle handle) {
-    if (auto* fb = PackRegistry::instance().builder(b))
-        fb->adopt_image(key ? key : "", w, h, c, handle);
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return;
+    const size_t need = size_t(w) * size_t(h) * size_t(c);
+    auto px = xi::pack_pool::view(handle);           // {} for a dead handle
+    if (px.size() < need) return;                    // fail-closed on short/dead
+    xi::mp::Bytes desc = xi::make_image_desc(w, h, c, "u8");
+    if (desc.empty()) return;
+    fb->add_blob(key ? key : "", desc.data(), int32_t(desc.size()),
+                 px.data(), int64_t(need));
 }
+// Finding ⑦: canonicalize foreign msgpack AT THE C-ABI SEAM. Before this fix
+// "all foreign msgpack is canonicalized at ingress" was a CONVENTION — only
+// ScriptPack::add_mp and xi::ingress gated; this raw trampoline (reached by
+// PackOut::mp and any plugin calling builder_add_mp directly) copied caller
+// bytes verbatim into the slab via PackBuilder::add_mp (which trusts). Hostile
+// or malformed msgpack — including handle-shaped ext (a forged pool ref) — could
+// enter a pack entry and travel onto the wire or a replay file. Route it through
+// the SAME xi::ingress::canonicalize_into machinery ingress uses (reject-all ext
+// policy by default), turning the convention into structure:
+//   * already-canonical input re-emits byte-identical (canonicalize is
+//     idempotent), so wire/golden bytes are unaffected;
+//   * malformed / ext-bearing / non-string-keyed / duplicate-keyed bytes are
+//     REFUSED — nothing is stored, matching ScriptPack::add_mp's fail-closed
+//     drop. The seam is void (no bool the foreign caller could check), so the
+//     refusal is made loud with a warn-once diagnostic instead of a silent drop.
 inline void f_add_mp(xi_pack_builder b, const char* key, const void* mp, int32_t len) {
-    if (auto* fb = PackRegistry::instance().builder(b))
-        fb->add_mp(key ? key : "", mp, len > 0 ? (size_t)len : 0);
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return;
+    const size_t n = len > 0 ? (size_t)len : 0;
+    if (n == 0 || !mp) { fb->add_mp(key ? key : "", mp, n); return; }  // empty/nil: nothing to validate
+    std::span<const uint8_t> foreign(static_cast<const uint8_t*>(mp), n);
+    ingress::Result r = ingress::canonicalize_into(*fb, key ? key : "",
+                                                   foreign, /*type_tag=*/{});
+    if (!r.ok()) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            std::fprintf(stderr,
+                "[xinsp2] xi.pack builder_add_mp REFUSED foreign msgpack for key "
+                "'%s' (codec status %d, semantic_ok %d) — malformed / ext-bearing "
+                "/ non-canonical bytes are rejected at the C-ABI seam, not stored "
+                "(finding ⑦). The entry is omitted.\n",
+                key ? key : "", (int)r.codec_status, (int)r.semantic_ok);
+        }
+    }
 }
 inline xi_pack_handle f_seal(xi_pack_builder b) { return PackRegistry::instance().seal(b); }
 inline void f_abandon(xi_pack_builder b) { PackRegistry::instance().abandon(b); }
@@ -285,7 +349,7 @@ inline int32_t f_count(xi_pack_handle f) {
 inline const char* f_key_at(xi_pack_handle f, int32_t i, int32_t* len) {
     Pack* fr = PackRegistry::instance().pack(f);
     if (!fr || i < 0 || (size_t)i >= fr->size()) { if (len) *len = 0; return nullptr; }
-    std::string_view k = fr->key_at((size_t)i);   // borrowed arena bytes, not NUL-terminated
+    std::string_view k = fr->key_at((size_t)i);   // borrowed slab bytes, not NUL-terminated
     if (len) *len = (int32_t)k.size();
     return k.data();
 }
@@ -342,17 +406,36 @@ inline int32_t f_get_bin(xi_pack_handle f, const char* key, const void** ptr, in
     if (len) *len = (int32_t)v->size();
     return 1;
 }
+// get_image adapter: parse a Blob whose descriptor is "xi/image" back into the
+// frozen xi_pack_image shape (w/h/c from the descriptor, pixels = the payload).
+// Fail-closed (0) if the key is absent, not a blob, or not an xi/image blob.
 inline int32_t f_get_image(xi_pack_handle f, const char* key, xi_pack_image* out) {
     Pack* fr = PackRegistry::instance().pack(f);
     if (!fr || !key) return 0;
-    auto v = fr->get_image(key);
-    if (!v) return 0;
+    auto bv = fr->get_blob(key);
+    if (!bv) return 0;
+    auto t = Pack::desc_find_str(bv->desc, "t");
+    if (!t || *t != std::string_view("xi/image")) return 0;
+    // The frozen xi_pack_image contract is u8 pixels with length == w*h*c. An
+    // xi/image blob may legitimately be u16/f32 (the SDK reader handles dt); the
+    // @1 adapter must NOT lie about it — fail closed unless it is a u8 image
+    // whose payload size matches the dims. A dt-less descriptor is u8 by the
+    // xi/image convention. (doc 28 finding A①: "the frozen door lies".)
+    auto dt = Pack::desc_find_str(bv->desc, "dt");
+    if (dt && *dt != std::string_view("u8")) return 0;
+    auto w = Pack::desc_find_i64(bv->desc, "w");
+    auto h = Pack::desc_find_i64(bv->desc, "h");
+    auto c = Pack::desc_find_i64(bv->desc, "c");
+    if (!w || !h || !c) return 0;
+    if (*w <= 0 || *h <= 0 || *c <= 0) return 0;
+    if (uint64_t(bv->payload.size()) != uint64_t(*w) * uint64_t(*h) * uint64_t(*c))
+        return 0;                                  // dims must match the u8 payload
     if (out) {
-        out->width    = v->width;
-        out->height   = v->height;
-        out->channels = v->channels;
-        out->pixels   = v->pixels.data();
-        out->length   = (int32_t)v->pixels.size();
+        out->width    = int32_t(*w);
+        out->height   = int32_t(*h);
+        out->channels = int32_t(*c);
+        out->pixels   = bv->payload.data();
+        out->length   = int32_t(bv->payload.size());
     }
     return 1;
 }
@@ -363,6 +446,57 @@ inline int32_t f_get_mp(xi_pack_handle f, const char* key, const void** ptr, int
     if (!v) return 0;
     if (ptr) *ptr = v->data();
     if (len) *len = (int32_t)v->size();
+    return 1;
+}
+
+// ---- xi.pack@4 trampolines (the self-describing blob door, spec 30) ----------
+// Same registry, same handle/builder ids as v1 — @4 only adds the blob surface.
+// Builder verbs return 1 = entry added, 0 = refused (fail-closed, nothing added);
+// getters follow v1's 1/0 discipline. Descriptor validity (canonical map, head
+// bounds) is enforced by the core seam (blob_head_validate / mint_blob).
+inline xi_image_handle f4_blob_mint(const void* desc, int32_t desc_len,
+                                    int64_t payload_len, void** payload_out) {
+    xi::BufRef ref = xi::mint_blob(desc, desc_len, payload_len);
+    if (!ref) { if (payload_out) *payload_out = nullptr; return XI_IMAGE_NULL; }
+    if (payload_out) *payload_out = ref.payload();
+    return ref.take();   // hand rc1 to the C caller; adopt addrefs, caller releases its ref
+}
+inline int32_t f4_builder_adopt_blob(xi_pack_builder b, const char* key,
+                                     xi_image_handle h) {
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return 0;
+    return fb->adopt_blob(key ? key : "", h) ? 1 : 0;
+}
+inline int32_t f4_builder_add_blob(xi_pack_builder b, const char* key,
+                                   const void* desc, int32_t desc_len,
+                                   const void* payload, int64_t payload_len) {
+    auto* fb = PackRegistry::instance().builder(b);
+    if (!fb) return 0;
+    return fb->add_blob(key ? key : "", desc, desc_len, payload, payload_len) ? 1 : 0;
+}
+inline int32_t f4_get_blob(xi_pack_handle f, const char* key,
+                           const void** desc, int32_t* desc_len,
+                           const void** payload, int64_t* payload_len) {
+    Pack* fr = PackRegistry::instance().pack(f);
+    if (!fr || !key) return 0;
+    auto v = fr->get_blob(key);
+    if (!v) return 0;
+    if (desc)        *desc        = v->desc.data();
+    if (desc_len)    *desc_len    = int32_t(v->desc.size());
+    if (payload)     *payload     = v->payload.data();
+    if (payload_len) *payload_len = v->payload_len;
+    return 1;
+}
+inline int32_t f4_entry_at(xi_pack_handle f, int32_t i, xi_pack_entry* out) {
+    Pack* fr = PackRegistry::instance().pack(f);
+    if (!fr || i < 0 || (size_t)i >= fr->size()) return 0;
+    Pack::EntryView e = fr->entry_at((size_t)i);
+    if (out) {
+        out->key      = e.key.data();
+        out->key_len  = int32_t(e.key.size());
+        out->tag      = int32_t(e.tag);
+        out->external = e.external ? 1 : 0;
+    }
     return 1;
 }
 
@@ -453,12 +587,29 @@ inline const xi_pack_v1* pack_v1_iface() {
     return &iface;
 }
 
-// Publish the Pack data plane so host->get_interface("xi.pack", 1) resolves it,
-// and wire the dispatch releaser so a pack event's ref is dropped correctly.
+// The process-stable xi.pack@4 supplement (self-describing blob door, spec 30).
+// Same Meyers-singleton discipline as v1: the address and every fn-pointer are
+// stable for the host's life. A consumer resolves it ALONGSIDE v1 — lifetime/
+// scalars/str/bin/mp/emit + the @1 image-adapter slots stay v1 verbs.
+inline const xi_pack_v4* pack_v4_iface() {
+    static const xi_pack_v4 iface = {
+        &pack_abi_detail::f4_blob_mint,
+        &pack_abi_detail::f4_builder_adopt_blob,
+        &pack_abi_detail::f4_builder_add_blob,
+        &pack_abi_detail::f4_get_blob,
+        &pack_abi_detail::f4_entry_at,
+    };
+    return &iface;
+}
+
+// Publish the Pack data plane so host->get_interface("xi.pack", 1) resolves it
+// (and ("xi.pack", 4) the blob supplement, spec 30), and wire the dispatch
+// releaser so a pack event's ref is dropped correctly.
 // Idempotent; call once next to install_trigger_hook (default_host_api / certify)
 // and in any test that builds a host_api it drives packs through.
 inline void install_pack_abi() {
     ImagePool::publish_pack_iface(pack_v1_iface());
+    ImagePool::publish_pack4_iface(pack_v4_iface());
     ImagePool::publish_pack_sweeper(&pack_abi_detail::f_sweep_packs_for);
     ImagePool::publish_pack_untagger(&pack_abi_detail::f_untag_pack_ref);
     TriggerBus::instance().set_pack_releaser(&pack_abi_detail::f_release_for_bus);

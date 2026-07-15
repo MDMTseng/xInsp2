@@ -1,0 +1,50 @@
+<!doctype html>
+<!--
+  A REPRESENTATIVE VS Code-webview-style plugin panel, mirroring the real
+  toolbox panels' contract (aravis_camera / ct_shape_based_matching /
+  dim_measure ui/index.html): acquireVsCodeApi() + {type:'exchange',cmd} out,
+  a window 'message' handler that gates on e.data.type === 'status' and reads
+  body fields, and data-param / data-action wiring. Used by test/vscode-shim.mjs
+  to prove the acquireVsCodeApi→XiClient shim round-trips exchanges unchanged.
+-->
+<html>
+<body>
+  <input id="thresh" type="number" data-param="threshold" value="0">
+  <button id="reload" data-action="refresh">Reload</button>
+  <span id="statusText">idle</span>
+  <span id="errText"></span>
+  <script>
+    const vscode = acquireVsCodeApi();
+
+    // data-param inputs push a single-field set_config exchange on change.
+    for (const el of document.querySelectorAll('[data-param]')) {
+      el.addEventListener('change', () => {
+        const cmd = { command: 'set_config' };
+        cmd[el.dataset.param] = Number(el.value);
+        vscode.postMessage({ type: 'exchange', cmd });
+      });
+    }
+    // data-action buttons dispatch their action verb.
+    document.getElementById('reload').addEventListener('click', () => {
+      vscode.postMessage({ type: 'exchange', cmd: { command: 'get_status' } });
+    });
+
+    // The reply arrives as a window 'message'. Gate on the status envelope,
+    // surface an error, else read body fields (exactly like the real panels).
+    window.addEventListener('message', (e) => {
+      const m = e.data;
+      if (!m || m.type !== 'status') return;
+      if (typeof m.error === 'string') {
+        document.getElementById('errText').textContent = m.error;
+        return;
+      }
+      if (typeof m.status === 'string') {
+        document.getElementById('statusText').textContent = m.status;
+      }
+      if (typeof m.threshold === 'number') {
+        document.getElementById('thresh').value = String(m.threshold);
+      }
+    });
+  </script>
+</body>
+</html>

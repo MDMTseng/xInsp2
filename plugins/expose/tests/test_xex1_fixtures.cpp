@@ -30,14 +30,45 @@
 #include <utility>
 #include <vector>
 
+#include <cstring>
+
 #include <xi/xi_b64.hpp>
+#include <xi/xi_blob_head.hpp>   // blob head format: kBlobMagic / blob_payload_off / put_u32_le
 #include <xi/xi_json.hpp>
+#include <xi/xi_mp.hpp>
 
 #include "xex1_encode.hpp"
 
 using xi::xex1::EncImage;
 
 namespace {
+
+// Build the canonical descriptor map for an xi/image blob: {t,w,h,c,dt}.
+std::vector<uint8_t> image_desc(int w, int h, int c, const char* dt) {
+    xi::mp::Writer d;
+    d.map(5);
+    d.key("t");  d.str("xi/image");
+    d.key("w");  d.int_(w);
+    d.key("h");  d.int_(h);
+    d.key("c");  d.int_(c);
+    d.key("dt"); d.str(dt);
+    return d.take();
+}
+
+// Assemble a self-describing blob buffer (spec 30): magic 'XBD1' (LE) +
+// desc_len (LE) + descriptor + zero pad to the 64B payload alignment + payload.
+// This is byte-identical to what xi::mint_blob writes host-side.
+std::vector<uint8_t> make_blob_buffer(const std::vector<uint8_t>& desc,
+                                      const std::vector<uint8_t>& payload) {
+    const uint32_t desc_len = (uint32_t)desc.size();
+    const uint64_t payload_off = xi::blob_payload_off(desc_len);
+    std::vector<uint8_t> buf((size_t)payload_off + payload.size(), 0);  // pad = zero
+    xi::pack_mp_detail::put_u32_le(buf.data() + 0, xi::kBlobMagic);
+    xi::pack_mp_detail::put_u32_le(buf.data() + 4, desc_len);
+    if (desc_len) std::memcpy(buf.data() + 8, desc.data(), desc_len);
+    if (!payload.empty()) std::memcpy(buf.data() + (size_t)payload_off, payload.data(), payload.size());
+    return buf;
+}
 
 // Deterministic synthetic "JPEG" payload of a given size — content is irrelevant
 // to the codec (images ride as opaque msgpack bin); the pattern just makes each
@@ -132,20 +163,32 @@ std::vector<uint8_t> encode(const Frame& f) {
 // A v3 golden is a channel/seq + a generic entry list. Each field carries its
 // value as a decoder-visible expectation AND is encoded into a V3Entry with its
 // canonical msgpack bytes (scalars/str/bin via xi::mp::Writer, nested msgpack
-// verbatim, image pixels inlined as bin) — the exact bytes the expose pack door
-// emits for the same logical frame. The JS + Python decoders decode these same
-// .bin files and assert the field values below.
+// verbatim, and BLOBS — spec 30 — as the ENTIRE self-describing buffer inlined
+// in one bin) — the exact bytes the expose pack door emits for the same logical
+// frame. The JS + Python decoders decode these same .bin files and assert the
+// field values below.
 
 struct V3Field {
     std::string          key;
-    std::string          kind;   // "i64" | "f64" | "bool" | "str" | "bin" | "mp" | "image"
+    std::string          kind;   // "i64" | "f64" | "bool" | "str" | "bin" | "mp" | "blob"
     int64_t              i = 0;
     double               f = 0;
     bool                 b = false;   // bool value
     std::string          s;      // str value
-    std::vector<uint8_t> bytes;  // bin payload / mp canonical bytes / image pixels
-    int32_t              w = 0, h = 0, c = 0;   // image dims
+    std::vector<uint8_t> bytes;  // bin payload / mp canonical bytes / blob PAYLOAD
     xi::Json             mp_value = xi::Json();  // decoded expectation for an mp field
+    // Blob (kind == "blob", spec 30): `desc` is the canonical descriptor map
+    // bytes, `bytes` (above) is the payload. `t` is the descriptor's "t" type
+    // string (a decoder-visible expectation); w/h/c/dt are set for xi/image blobs.
+    std::vector<uint8_t> desc;
+    std::string          t;
+    std::string          dt;
+    int32_t              w = 0, h = 0, c = 0;   // xi/image dims (from the descriptor)
+    // WS-preview arm (kind == "preview"): the encoder's WS-SEND substitution for
+    // an xi/image blob. `w/h/c` are the source dims, `bytes` is the JPEG, `pv_q`
+    // the quality — emitted as { preview:{w,h,c,enc:"jpeg",q,data} }. WS-only
+    // (never persisted), but the codec is exercised here so all 3 legs guard it.
+    int32_t              pv_q = 0;
 };
 
 struct FrameV3 {
@@ -156,10 +199,14 @@ struct FrameV3 {
     std::string          note;
 };
 
-// Encode one FrameV3 into wire bytes through the SHARED v3 encoder.
+// Encode one FrameV3 into wire bytes through the SHARED v3 encoder. Blob buffers
+// are assembled here into `blob_store`, which must outlive encode_frame_v3 (the
+// V3Entry.blob pointers borrow into it) — hence built up front, never realloc'd.
 std::vector<uint8_t> encode_v3(const FrameV3& f) {
     std::vector<xi::xex1::V3Entry> entries;
     entries.reserve(f.fields.size());
+    std::vector<std::vector<uint8_t>> blob_store;
+    blob_store.reserve(f.fields.size());
     for (const auto& fld : f.fields) {
         xi::xex1::V3Entry e;
         e.key = fld.key;
@@ -176,9 +223,17 @@ std::vector<uint8_t> encode_v3(const FrameV3& f) {
             e.value = w.take();
         } else if (fld.kind == "mp") {
             e.tag = XI_PACK_TAG_MP; e.value = fld.bytes;   // already-canonical nested bytes
-        } else if (fld.kind == "image") {
-            e.tag = XI_PACK_TAG_IMAGE; e.w = fld.w; e.h = fld.h; e.c = fld.c;
-            e.px = fld.bytes.data(); e.px_len = fld.bytes.size();
+        } else if (fld.kind == "blob") {
+            e.tag = XI_PACK_TAG_BLOB;
+            blob_store.push_back(make_blob_buffer(fld.desc, fld.bytes));
+            const std::vector<uint8_t>& buf = blob_store.back();
+            e.blob = buf.data(); e.blob_len = buf.size();
+        } else if (fld.kind == "preview") {
+            // WS-preview arm: { preview:{w,h,c,enc:"jpeg",q,data} } (bytes = jpeg).
+            e.tag = XI_PACK_TAG_BLOB;
+            e.preview = true;
+            e.pv_w = fld.w; e.pv_h = fld.h; e.pv_c = fld.c; e.pv_q = fld.pv_q;
+            e.pv_jpeg = fld.bytes.data(); e.pv_len = fld.bytes.size();
         }
         entries.push_back(std::move(e));
     }
@@ -202,11 +257,32 @@ std::vector<FrameV3> build_frames_v3() {
     }
 
     {
-        FrameV3 f; f.name = "v3_image"; f.channel = "c"; f.seq = 3;
-        V3Field img; img.key = "frame"; img.kind = "image";
-        img.w = 2; img.h = 2; img.c = 1; img.bytes = {10, 20, 30, 40};   // raw pixels
+        // An xi/image self-describing blob (spec 30): the descriptor
+        // {"t":"xi/image","w":2,"h":2,"c":1,"dt":"u8"} + 4 raw u8 pixels, inlined
+        // as the ENTIRE buffer (magic+desc_len+desc+pad+payload) in one bin.
+        FrameV3 f; f.name = "v3_blob_image"; f.channel = "c"; f.seq = 3;
+        V3Field img; img.key = "frame"; img.kind = "blob";
+        img.t = "xi/image"; img.dt = "u8"; img.w = 2; img.h = 2; img.c = 1;
+        img.desc  = image_desc(2, 2, 1, "u8");
+        img.bytes = {10, 20, 30, 40};   // raw pixels (the payload)
         f.fields.push_back(std::move(img));
-        f.note = "image descriptor {w,h,c,px} with raw pixels inlined as bin (doc 07 D2)";
+        f.note = "xi/image blob: self-describing buffer (head+descriptor+payload) inlined as one bin (spec 30)";
+        fs.push_back(std::move(f));
+    }
+
+    {
+        // A generic (non-image) self-describing blob: a custom descriptor
+        // {"t":"acme/roi","n":3} + arbitrary payload bytes. Exercises the
+        // decoders' GENERIC blob path (head validation + descriptor decode) — the
+        // core owns no type space, so "t" is convention only.
+        FrameV3 f; f.name = "v3_blob_data"; f.channel = "c"; f.seq = 4;
+        xi::mp::Writer d;
+        d.map(2); d.key("t"); d.str("acme/roi"); d.key("n"); d.int_(3);
+        V3Field blob; blob.key = "roi"; blob.kind = "blob";
+        blob.t = "acme/roi"; blob.desc = d.take();
+        blob.bytes = {0xAA, 0xBB, 0xCC};   // opaque payload
+        f.fields.push_back(std::move(blob));
+        f.note = "generic (non-image) blob: custom descriptor + opaque payload (self-describing, spec 30)";
         fs.push_back(std::move(f));
     }
 
@@ -236,6 +312,21 @@ std::vector<FrameV3> build_frames_v3() {
         blobs.mp_value = arr;
         f.fields.push_back(std::move(blobs));
         f.note = "nested canonical msgpack (array of maps) rides verbatim — doc 07 D3";
+        fs.push_back(std::move(f));
+    }
+
+    {
+        // The WS-preview arm (E2, spec 30): an xi/image blob whose raw payload is
+        // substituted on the live wire by { preview:{w,h,c,enc:"jpeg",q,data} }.
+        // WS-SEND-only (record_save never emits it), but pinned here so all three
+        // decoder legs guard the preview shape — the regression that shipped
+        // preview WITHOUT w/h/c would have failed this golden.
+        FrameV3 f; f.name = "v3_preview"; f.channel = "c"; f.seq = 5;
+        V3Field pv; pv.key = "frame"; pv.kind = "preview";
+        pv.w = 4; pv.h = 2; pv.c = 1; pv.pv_q = 80;
+        pv.bytes = synth(24, 'j');   // stand-in JPEG bytes (opaque to the codec)
+        f.fields.push_back(std::move(pv));
+        f.note = "WS-preview arm: { preview:{w,h,c,enc:jpeg,q,data} } — behavior-equivalent to the old IMAGE preview";
         fs.push_back(std::move(f));
     }
 
@@ -273,9 +364,25 @@ xi::Json manifest_v3(const FrameV3& f) {
         else if (fld.kind == "str")   j.set("value", fld.s);
         else if (fld.kind == "bin") { j.set("b64", b64(fld.bytes)); j.set("size", (int64_t)fld.bytes.size()); }
         else if (fld.kind == "mp")    j.set("value", fld.mp_value);
-        else if (fld.kind == "image") {
+        else if (fld.kind == "blob") {
+            // A decoder extracts the whole buffer from the entry's bin, validates
+            // the head (magic 'XBD1' + desc_len + payload_off), then byte-compares
+            // the descriptor + payload against these, and decodes "t" from the desc.
+            j.set("t", fld.t);
+            j.set("desc_b64", b64(fld.desc));
+            j.set("desc_size", (int64_t)fld.desc.size());
+            j.set("payload_b64", b64(fld.bytes));
+            j.set("payload_size", (int64_t)fld.bytes.size());
+            if (fld.t == "xi/image") {
+                j.set("w", fld.w); j.set("h", fld.h); j.set("c", fld.c); j.set("dt", fld.dt);
+            }
+        }
+        else if (fld.kind == "preview") {
+            // A decoder surfaces images[key]["preview"] = {w,h,c,enc,q,data}.
             j.set("w", fld.w); j.set("h", fld.h); j.set("c", fld.c);
-            j.set("b64", b64(fld.bytes)); j.set("size", (int64_t)fld.bytes.size());
+            j.set("q", fld.pv_q); j.set("enc", std::string("jpeg"));
+            j.set("data_b64", b64(fld.bytes));
+            j.set("data_size", (int64_t)fld.bytes.size());
         }
         fields.push(j);
     }

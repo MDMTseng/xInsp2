@@ -16,7 +16,7 @@
 //   5. kept BufRef    : a consumer takes `BufRef kept = pb["img"].buf_ref();`
 //                       BOTH packs die at scope exit; the buffer lives until
 //                       kept's release
-#include <xi/proto/xi_pack_c.hpp>
+#include "proto/xi_pack_c.hpp"
 
 #include <cstdio>
 #include <cstring>

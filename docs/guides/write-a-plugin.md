@@ -474,6 +474,17 @@ encoding the **read-only-input / writable-output invariant** in the types:
 > returns null for a shared handle). **Never** do an in-place cv:: op on an input;
 > always `as_cv_read(src)` → `as_cv_write(dst)` into a separate `pool_image`.
 
+> **A `pool_image` slot is UNINITIALISED memory.** The pool no longer zero-fills
+> a fresh buffer (a recycled slot carries a previous image's bytes). **Fully
+> overwriting the output is the producer's responsibility.** A whole-frame op
+> (`cv::threshold`, `cv::cvtColor`, a full paint loop) is fine — it writes every
+> pixel. But a **partial** paint (drawing shapes/text onto a "blank" canvas,
+> filling a sub-region) must `memset`/clear the bytes it does not write first, or
+> the stale pixels ride onto the wire and into recorded frames. The same holds
+> for a minted blob payload (`blob_mint` / `PackOut::blob_mint`): its payload is
+> uninitialised; only the blob **head pad** stays deterministically zero (wire
+> determinism).
+
 Don't hand-roll Image⇄Mat copies or the RGB↔BGR flip — `<xi/xi_cv.hpp>` ships the
 canonical helpers: `xi::to_cv(img)` (owning copy), `xi::from_cv_mat(mat)` /
 `xi::to_image(mat)` (Mat→owning Image), and `xi::encode_preview(img, ".jpg")`

@@ -1,0 +1,9 @@
+{
+  "name": "qa_ui_egress_no_codec",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam",    "plugin": "mock_camera" },
+    { "name": "egress", "plugin": "ui_egress" },
+    { "name": "expose", "plugin": "expose" }
+  ]
+}

@@ -99,11 +99,13 @@ static void expect_packs_identical(const xi::Pack& a, const xi::Pack& b) {
                       std::vector<uint8_t>(y.begin(), y.end()));
                 break;
             }
-            case xi::PackTag::Image: {
-                auto x = *a.get_image(key); auto y = *b.get_image(key);
-                CHECK(x.width == y.width && x.height == y.height && x.channels == y.channels);
-                CHECK(std::vector<uint8_t>(x.pixels.begin(), x.pixels.end()) ==
-                      std::vector<uint8_t>(y.pixels.begin(), y.pixels.end()));
+            case xi::PackTag::Blob: {
+                // Self-describing blob (spec 30): descriptor + payload byte-identical.
+                auto x = *a.get_blob(key); auto y = *b.get_blob(key);
+                CHECK(std::vector<uint8_t>(x.desc.begin(), x.desc.end()) ==
+                      std::vector<uint8_t>(y.desc.begin(), y.desc.end()));
+                CHECK(std::vector<uint8_t>(x.payload.begin(), x.payload.end()) ==
+                      std::vector<uint8_t>(y.payload.begin(), y.payload.end()));
                 break;
             }
             default: break;
@@ -208,7 +210,7 @@ int main() {
         CHECK(saver.ad->set_def(def));
 
         xi_pack_handle in = build_input();
-        xi::PackIn view(fi, in);
+        xi::PackIn view(fi, in, xi::pack_v4_iface());   // @4 door: PackIn::blob() needs it
         expected = xi::xex1::encode_pack_v3(view, "cam0", 7);   // the shared-encoder oracle
 
         xi_pack_handle ack = saver.ad->run_pack_door(in);
@@ -256,7 +258,7 @@ int main() {
     // -----------------------------------------------------------------------
     SECTION("parity: re-dumping the replayed pack reproduces the file bytes");
     if (replayed != XI_PACK_NULL) {
-        xi::PackIn view(fi, replayed);
+        xi::PackIn view(fi, replayed, xi::pack_v4_iface());   // @4 door: PackIn::blob() needs it
         // Lift channel/seq exactly the way the record_save sink does.
         const std::string channel(view.str(xi::pack_contract::kChannel).value_or("default"));
         const uint64_t    seq = (uint64_t)view.i64_or(xi::pack_contract::kSeq, 0);

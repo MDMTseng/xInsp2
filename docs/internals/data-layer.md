@@ -1,9 +1,11 @@
 # Data layer — the sealed keyed-buffer Pack plane
 
-**Shipped design-of-record (ABI v12).** How plugin/script data crosses every
-(in-process) plugin boundary as a **Pack** — one sealed, keyed, typed container
-(canonical msgpack) that is **byte-identical in memory, on the WS wire (XEX1-v3),
-and on disk (`.xex1`)** — and how the host refcounts it across the ABI.
+**Shipped design-of-record (ABI v12; storage = the pack-v3 slab, packv3
+branch).** How plugin/script data crosses every (in-process) plugin boundary
+as a **Pack** — one sealed, keyed, typed container whose **canonical-msgpack
+wire form (XEX1-v3) and disk form (`.xex1`) are the same bytes**,
+stored inline as those canonical bytes (memory == wire) and spliced verbatim at
+the serialization edge — and how the host refcounts it across the ABI.
 
 > **THE CUT (v12).** The data layer this page describes REPLACED the Record/doc
 > plane. THE CUT deleted `xi::Record`, its yyjson mutable-doc backing, the
@@ -16,25 +18,36 @@ and on disk (`.xex1`)** — and how the host refcounts it across the ABI.
 > design-of-record for the Pack data layer's refcount + storage mechanics.
 
 A **Pack** is a sealed, insertion-ordered list of `(key, tag, value)` entries.
-Values are the msgpack scalar/binary tags plus two domain tags: an **image**
-(dims + a pool-backed pixel buffer) and a **nested-mp** subtree (one canonical
-msgpack blob for arrays/maps). Once sealed a pack is **immutable** — new
-information is always a new pack. That immutability is what makes the three
-representations one format: the in-memory arena, the XEX1-v3 frame on the wire,
-and the `.xex1` file on disk are the same canonical bytes, so record → replay is
-byte-lossless with nothing to re-serialize.
+Values are the msgpack scalar/binary tags plus the domain tags: an **image**
+(dims + a pool-backed pixel buffer), a **nested-mp** subtree (one canonical
+msgpack blob for arrays/maps), and — since the pack-v3 slab — a **tensor**
+(logical shape + `PackDtype` over a pool buffer) and typed **user blobs**.
+Once sealed a pack is **immutable** — new information is always a new pack.
+
+**Storage model (pack-v3 slab): memory == wire (④A).** In memory a sealed pack
+is one contiguous slab (header + hash-sorted directory + insertion-order table +
+payload) in which an **inline entry stores its canonical msgpack value** — a
+typed read is a directory binary search plus a fixed-width header skip at a known
+offset ([`pack-plane.md`](./pack-plane.md) § container memory model). Because the
+inline payload IS the wire value, the walk API (`for_each_entry` +
+`canonical_value(i, mp::Writer&)`) **splices each inline entry's stored bytes
+verbatim** — a copy, not a re-encode (only EXTERN Image/Tensor/large-bin entries
+build their wire shape at the edge). Immutability plus that structural identity
+is what keeps the *two external* representations one format: the XEX1-v3 frame on
+the wire and the `.xex1` file on disk are the same canonical bytes, so record →
+replay is byte-lossless with nothing to re-serialize.
 
 ## The model: mirror the image pool, for packs
 
-A sealed pack is a C++ container (`xi::Pack`, `xi_pack.hpp`) that **owns an arena
-and pool handles**; a plugin in another DLL cannot touch its layout. So — exactly
+A sealed pack is a C++ container (`xi::Pack`, `xi_pack.hpp`) that **owns one
+slab and pool handles**; a plugin in another DLL cannot touch its layout. So — exactly
 like an image — a pack crosses the ABI as an **opaque handle** (`xi_pack_handle`)
 plus a table of accessor C functions, never as raw struct layout:
 
 | | image | pack |
 |---|---|---|
 | crosses the ABI as | `uint64` handle | `uint64` handle (`xi_pack_handle`) |
-| backing store | host pixel pool (`ImagePool`) | host `PackRegistry` (arena + adopted pool handles) |
+| backing store | host pixel pool (`ImagePool`) | host `PackRegistry` (slab + adopted pool handles) |
 | reads / writes | `image_data(handle)` | the `xi_pack_v1` C vtable (spans in / spans out) |
 | reclaim | refcount → return slot | refcount → destroy pack, release its pool handles |
 | cache across frames | `image_addref` | `retain` (refcount bump, no copy) |
@@ -63,7 +76,7 @@ address and every fn-pointer are stable for the host's life (a Meyers singleton,
   `std::optional` so absence is explicit. `retain`/`release` are the refcount, and
   `emit_pack` is the source dispatch verb.
 
-Reads hand back **borrowed spans** into the pack's arena/pool buffers, valid while
+Reads hand back **borrowed spans** into the pack's slab/pool buffers, valid while
 the caller's ref on the handle is held. There are no string literals at call sites
 in ported plugins: a plugin reads/writes with its schema's key **constants**
 (`_keys.gen.h`, see [`typed-io.md`](./typed-io.md)), still drift-proof, but the
@@ -74,13 +87,17 @@ consumers).
 
 ### Storage duality (D1)
 
-A binary or image entry lives either **inline in the arena** (small payloads) or
+A binary or image entry lives either **inline in the slab** (small payloads) or
 in a **pool buffer** (large / image pixels, adopted by refcount so a source's
-painted frame crosses into the pack with no heap→pool copy — `adopt_image`). The
-consumer never sees the difference: `get_bin`/`get_image` resolve both to one
-borrowed span. Image pixels ride the same zero-copy `ImagePool` slots the image
-plane uses, so `get_image` yields a pixel span + dims a `cv::Mat` can wrap
-directly.
+painted frame crosses into the pack with no heap→pool copy — `adopt_image`).
+The slab side holds a 24-byte `ExtRecord {handle, logical w/h/c, length}` per
+pooled entry. The consumer never sees the difference: `get_bin`/`get_image`
+resolve both to one borrowed span. Image pixels ride the same zero-copy
+`ImagePool` slots the image plane uses, so `get_image` yields a pixel span +
+dims a `cv::Mat` can wrap directly. Tensors (`add_tensor`/`get_tensor_of<T>`,
+dtype fail-closed) and typed user blobs (`add_blob`) use the same pooled
+storage in-process; they have **no `xi_pack_v1` door accessor** — that surface
+is reserved for the `xi.pack@3` door (in flight on the packv3 line).
 
 ## Refcount + owner-tagged sweep — `PackRegistry` (`xi_pack_abi.hpp`)
 
@@ -125,11 +142,12 @@ for all three sides of the seam: `xi/xi_pack_contract.hpp`. Full semantics:
 
 ## Fallback paths
 
-- **Cross-process / remote / persistence / WS→JS** — the pack's canonical msgpack
-  IS the wire (XEX1-v3) and disk (`.xex1`) form, so there is no separate
-  serialize step to fall back to: the same bytes travel unchanged. (Human-readable
-  JSON remains the currency of the *control* plane — `exchange`/config — which is
-  independent of the pack data plane.)
+- **Cross-process / remote / persistence / WS→JS** — the pack's ONE canonical
+  msgpack emit (the `canonical_value` walk feeding the XEX1-v3 encoder) is both
+  the wire and the disk (`.xex1`) form, so there is no *second* serializer to
+  fall back to or drift from: the same bytes travel unchanged between wire and
+  disk. (Human-readable JSON remains the currency of the *control* plane —
+  `exchange`/config — which is independent of the pack data plane.)
 
 ## Tests
 

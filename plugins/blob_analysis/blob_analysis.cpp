@@ -138,19 +138,22 @@ public:
     // the xi::contract reason code (PackOut::fault), which the caller routes to a
     // verdict — never a silent default.
     void process(xi::PackIn& in, xi::PackOut& out) override {
-        auto gray = in.image(keys::kGray);
-        if (!gray || !gray->pixels) {
+        // Read the input as an xi/image self-describing blob (spec 30): one
+        // fail-loud call carrying the real dtype + the zero-copy payload, no
+        // bounce through the @1 xi_pack_image adapter (which assumes u8).
+        auto gray = in.image_blob(keys::kGray);
+        if (!gray) {
             out.fault(xi::contract::kMissingInput, keys::kGray,
-                      "blob_analysis(pack): required image 'gray' is missing");
+                      "blob_analysis(pack): required xi/image 'gray' is missing");
             return;
         }
-        if (gray->channels != 1) {
+        if (gray->channels != 1 || gray->dt != "u8") {
             out.fault(xi::contract::kWrongType, keys::kGray,
-                      "blob_analysis(pack): 'gray' must be single-channel");
+                      "blob_analysis(pack): 'gray' must be single-channel u8");
             return;
         }
         const int w = gray->width, h = gray->height;
-        const uint8_t* sp = static_cast<const uint8_t*>(gray->pixels);
+        const uint8_t* sp = gray->payload.data();
 
         int def_thresh, def_min, def_max; bool def_inv;
         {
@@ -162,13 +165,35 @@ public:
         const int  max_area = (int)in.i64_or(keys::kMaxArea,   def_max);
         const bool inv      = in.bool_or(keys::kInvert, def_inv);
 
-        std::vector<uint8_t> bin((size_t)w * (size_t)h);
+        // Output the binary image as a self-describing xi/image BLOB (spec 30):
+        // mint a headed pool buffer and threshold straight INTO its 64B-aligned
+        // payload, then adopt it zero-copy — no heap→pool memcpy. find_blobs
+        // labels the same payload bytes in place. (The frozen @1 out.image door
+        // adapter would copy a heap buffer into a headed blob; an in-tree
+        // producer mints the blob directly.)
+        xi::mp::Writer dw;                        // {"t":"xi/image","w","h","c","dt"}
+        dw.map(5);
+        dw.key("t");  dw.str("xi/image");
+        dw.key("w");  dw.int_(w);
+        dw.key("h");  dw.int_(h);
+        dw.key("c");  dw.int_(1);
+        dw.key("dt"); dw.str("u8");
+        void* pp = nullptr;
+        xi_image_handle bh = out.blob_mint(dw.bytes().data(), (int32_t)dw.bytes().size(),
+                                           (int64_t)w * h, &pp);
+        if (!bh || !pp) {
+            out.fault("no_blob_plane", keys::kBinary,
+                      "blob_analysis(pack): host has no xi.pack@4 blob plane");
+            return;
+        }
+        uint8_t* bin = static_cast<uint8_t*>(pp);
         for (int i = 0; i < w * h; ++i)
             bin[i] = inv ? (sp[i] < thresh ? 255 : 0) : (sp[i] > thresh ? 255 : 0);
 
-        auto blobs = find_blobs(bin.data(), w, h, min_area, max_area);
+        auto blobs = find_blobs(bin, w, h, min_area, max_area);
 
-        out.image(keys::kBinary, w, h, 1, bin.data());
+        out.adopt_blob(keys::kBinary, bh);
+        host_->image_release(bh);                 // pack holds its own addref now
         out.i64(keys::kBlobCount, (int64_t)blobs.size());
         out.i64(keys::kThresholdUsed, thresh);
 

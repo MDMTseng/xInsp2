@@ -59,7 +59,7 @@ namespace xi {
 // =====================================================================
 // pixpool — size-class pixel-buffer recycling (perf/imagepool-sizeclass).
 //
-// Backported from the design-C prototype (proto/xi_pack_c.hpp raw_class_alloc):
+// Backported from the design-C prototype (tests/proto/xi_pack_c.hpp raw_class_alloc):
 // the production create()/release() cycle used to pay `new PoolEntry` +
 // `vector::resize` (heap alloc + zero-fill + first-touch page faults) per
 // create and a full heap free per release — ~508 us for a 1920x1200 frame.
@@ -243,8 +243,8 @@ inline Magazine* tls_magazine() {
 } // namespace detail
 
 // Alloc: magazine -> shelf -> fresh heap; > 64 MiB takes the direct lane.
-// Returned bytes are UNSPECIFIED (recycled buffers carry stale pixels);
-// ImagePool::create() decides the zero-fill policy.
+// Returned bytes are UNSPECIFIED (recycled buffers carry stale pixels).
+// ImagePool::create() hands them back as-is — no zero-fill (CT ruling 2026-07).
 inline PixBuf pixel_alloc(uint64_t bytes) {
     PixBuf b;
     b.cls = class_for(bytes);
@@ -331,11 +331,6 @@ public:
     static constexpr uint64_t SLOT_MASK  = SLOT_COUNT - 1;
     // Max generation that fits in (64 - 8 - SLOT_BITS) = 40 bits.
     static constexpr uint64_t GEN_MAX    = (1ull << 40) - 1;
-    // create() returns ZEROED pixels — the documented contract since the
-    // vector-value-init days; recycled buffers are memset to preserve it
-    // (see create()). Keep true unless every read-before-write caller is gone.
-    static constexpr bool kZeroFillCreate = true;
-
     // INTENTIONALLY LEAKED: the pool is process-lifetime state, so it is never
     // destroyed — heap-allocated once, reclaimed by the OS at exit. This makes
     // every late-teardown path (a static-destruction adapter dtor's owner
@@ -353,7 +348,19 @@ public:
 
     // ---- create / release -------------------------------------------
 
+    // create() returns UNINITIALISED pixels (CT ruling, 2026-07: canvas
+    // zero-fill removed — the info-leak from a recycled buffer's stale bytes is
+    // accepted). A producer MUST fully overwrite every byte it exposes; a
+    // partial-paint producer must clear the regions it does not write, or stale
+    // pixels ride onto the wire / into a record. A recycled magazine buffer
+    // carries the PREVIOUS image's bytes. (The prior create()/create_uninit()
+    // split collapsed here: both were the same mint once zero-fill went away.)
     xi_image_handle create(int32_t w, int32_t h, int32_t ch) {
+        return create_(w, h, ch);
+    }
+
+private:
+    xi_image_handle create_(int32_t w, int32_t h, int32_t ch) {
         // D-P1-7: validate dimensions BEFORE entering counter / slot
         // bookkeeping. The original `(size_t)w * h * ch` cast applies
         // only to the first multiplicand; `h * ch` is int32 mul first,
@@ -377,16 +384,10 @@ public:
             return 0;
         }
         entry->size = (uint64_t)pixels;
-        // ZERO-FILL: create() has always returned zeroed pixels (the old
-        // vector::resize value-init), and callers exist that rely on it
-        // (e.g. plugins that paint shapes onto a "blank" canvas). A recycled
-        // magazine buffer carries the PREVIOUS image's bytes, so we memset
-        // the logical size explicitly. Still ~5-10x cheaper than the old
-        // path for the hot same-size case: the memset writes warm, already-
-        // faulted-in pages instead of malloc + zero + first-touch faults.
-        // Flip kZeroFillCreate ONLY with proof no caller reads-before-write.
-        if (kZeroFillCreate)
-            std::memset(entry->buf.mem, 0, (size_t)pixels);
+        // NO ZERO-FILL (CT ruling, 2026-07): the buffer is handed back with
+        // whatever bytes it carries (a recycled magazine buffer holds the
+        // previous image's pixels). The producer overwrites what it exposes; the
+        // pool spends no per-create memset. See create()'s contract note above.
         entry->width    = w;
         entry->height   = h;
         entry->channels = ch;
@@ -420,6 +421,7 @@ public:
         return ((uint64_t)gen << SLOT_BITS) | (uint64_t)idx;
     }
 
+public:
     void addref(xi_image_handle h) {
         if (auto* e = lookup(h)) {
             e->refcount.fetch_add(1, std::memory_order_relaxed);
@@ -858,6 +860,18 @@ public:
     static void publish_pack_iface(const void* iface) {
         pack_iface_slot().store(iface, std::memory_order_release);
     }
+    // blob plane (spec 30): the xi.pack@4 self-describing-blob door (const
+    // xi_pack_v4* — blob_mint/adopt_blob/add_blob/get_blob + ordinal entry_at),
+    // published by the same install_pack_abi through the same layering bridge.
+    // Replaces the retired @3 slot. Null until installed / on a host with no
+    // blob plane.
+    static std::atomic<const void*>& pack4_iface_slot() {
+        static std::atomic<const void*> slot{nullptr};
+        return slot;
+    }
+    static void publish_pack4_iface(const void* iface) {
+        pack4_iface_slot().store(iface, std::memory_order_release);
+    }
 
     // Pack-plane hardening: the PackRegistry OWNER-SWEEP bridge — the pack
     // analogue of release_all_for's leak sweep. Published by install_pack_abi
@@ -1009,6 +1023,12 @@ public:
         // (slot-bridged from xi_pack_abi.hpp; null on a host with no pack plane).
         if (std::strcmp(id, "xi.pack") == 0 && version == 1)
             return pack_iface_slot().load(std::memory_order_acquire);
+        // blob plane (spec 30): the xi.pack@4 self-describing-blob supplement to
+        // xi.pack@1. The retired @3 (and the never-existed @2) answer NULL by
+        // falling through — no version branch produces them. TODO(selfdesc-B):
+        // wire is package C.
+        if (std::strcmp(id, "xi.pack") == 0 && version == 4)
+            return pack4_iface_slot().load(std::memory_order_acquire);
         // Capability plane (docs/new_gen/14 pilot), published via
         // install_cap_plane (slot-bridged from xi_cap_abi.hpp; null on a host
         // with no capability plane). ZERO xi_host_api slots — both directions

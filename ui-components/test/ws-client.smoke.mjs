@@ -30,8 +30,10 @@ test("XiClient drives the orchestrator verbs end-to-end", { timeout: 30000 }, as
 
     assert.equal((await c.ping()).pong, true, "ping");
 
-    await c.cmd("load_plugin", { name: "config_swap_probe" });
     await c.cmd("create_project", { folder: resolve(tmpdir(), `xi_shim_${Date.now()}`), name: "shim" });
+    // create_instance resolves + loads the plugin by name itself (the standalone
+    // `load_plugin` WS command was retired at THE CUT, v12 — cmd_create_instance_
+    // now calls plugin_mgr.load_plugin internally, surfacing any load error).
     await c.cmd("create_instance", { name: "sw0", plugin: "config_swap_probe" });
 
     // created → state "created"

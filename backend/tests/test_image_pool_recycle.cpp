@@ -8,8 +8,8 @@
 //   1. Same-size create/release cycles are served by the per-thread magazine
 //      (magazine_hits counter advances; no fresh heap alloc after warmup).
 //   2. Every pool buffer is 64-byte aligned (SIMD/cacheline contract).
-//   3. Zero-fill contract: create() returns zeroed pixels EVEN on a recycled
-//      buffer that was dirtied by its previous life (kZeroFillCreate).
+//   3. No zero-fill (CT ruling 2026-07): create() returns UNINITIALISED pixels;
+//      a recycled buffer carries its previous life's stale bytes verbatim.
 //   4. Budget eviction: pushing more frees than magazine+shelf budgets allow
 //      routes the excess to _aligned_free (evicted_frees advances) and the
 //      shelf never exceeds its per-class cap.
@@ -96,12 +96,11 @@ static void test_alignment() {
     CHECK(pool.stats().handle_count == 0);
 }
 
-// ---------- 3: zero-fill survives recycling ---------------------------
+// ---------- 3: NO zero-fill — a recycled buffer keeps its stale bytes --------
 
-static void test_zero_fill_on_recycled_buffer() {
-    SECTION("create() returns zeroed pixels even from a dirty recycled buffer");
-    static_assert(xi::ImagePool::kZeroFillCreate,
-                  "zero-fill contract flipped — rewrite this test + the docs");
+static void test_no_zero_fill_on_recycled_buffer() {
+    SECTION("create() returns UNINITIALISED pixels — a recycled buffer carries "
+            "stale bytes (CT ruling 2026-07: canvas zero-fill removed)");
     auto& pool = xi::ImagePool::instance();
     constexpr int W = 640, H = 480, C = 3;
     constexpr size_t N = size_t(W) * H * C;
@@ -112,18 +111,19 @@ static void test_zero_fill_on_recycled_buffer() {
     std::memset(pool.data(a), 0xDD, N);
     pool.release(a);
 
-    // The next same-size create recycles that exact buffer (LIFO magazine);
-    // its bytes must read back as zero.
+    // The next same-size create recycles that exact buffer (LIFO magazine). With
+    // zero-fill removed, create() spends no memset — the 0xDD bytes survive
+    // verbatim. (The producer is responsible for overwriting what it exposes.)
     Stats s0 = xi::ImagePool::pixel_alloc_stats();
     xi_image_handle b = pool.create(W, H, C);
     CHECK(b != 0);
     Stats s1 = xi::ImagePool::pixel_alloc_stats();
     CHECK(s1.magazine_hits == s0.magazine_hits + 1);   // proven recycled
     const uint8_t* p = pool.data(b);
-    bool all_zero = true;
+    bool stale_preserved = true;
     for (size_t i = 0; i < N; ++i)
-        if (p[i] != 0) { all_zero = false; break; }
-    CHECK(all_zero);
+        if (p[i] != 0xDD) { stale_preserved = false; break; }
+    CHECK(stale_preserved);
     pool.release(b);
     CHECK(pool.stats().handle_count == 0);
 }
@@ -242,7 +242,7 @@ int main() {
 
     test_magazine_hit_on_same_size_churn();
     test_alignment();
-    test_zero_fill_on_recycled_buffer();
+    test_no_zero_fill_on_recycled_buffer();
     test_budget_eviction();
     test_cross_thread_migration();
     test_direct_lane_above_max();

@@ -21,6 +21,7 @@
 //
 
 #include <xi/xi_json.hpp>
+#include <xi/xi_mp.hpp>         // canonical msgpack Writer — the xi/image blob descriptor
 #include <xi/xi_contract.hpp>   // canonical fail-loud reason codes for out.fault()
 
 #include <atomic>
@@ -54,46 +55,58 @@ public:
     void process(xi::PackIn& in, xi::PackOut& out) override {
         // Fail loud: a missing/mis-typed required input is a NORMAL sealed
         // pack stamped with a $fault reason the caller routes to a verdict —
-        // never a silent empty default. (in.image() returns nullopt when
-        // "gray" is absent or not an image entry; no coercion.)
-        auto src = in.image("gray");
-        if (!src || !src->pixels) {
+        // never a silent empty default. in.image_blob() returns nullopt when
+        // "gray" is absent, not a blob, or not an xi/image (no coercion) — one
+        // call carrying the real dtype + the zero-copy payload span.
+        auto src = in.image_blob("gray");
+        if (!src) {
             out.fault(xi::contract::kMissingInput, "gray",
-                      "{{NAME}}: required image 'gray' is missing");
+                      "{{NAME}}: required xi/image 'gray' is missing");
             return;
         }
 
-        // A fresh single-channel output allocated IN THE HOST POOL — cv::
-        // writes land in pool memory, so adopt_image below hands it over
-        // zero-copy (no heap→pool memcpy across the ABI). This is the
-        // standard way to produce an output image.
-        xi::Image dst = pool_image(src->width, src->height, 1);
-
-        // Read the INPUT through a non-owning view + as_cv_read (the pack's
-        // pixels are a zero-copy pool span shared with other consumers — read
-        // them, never mutate them) and WRITE the OUTPUT through as_cv_write.
-        // Collapse a colour input to gray first so the threshold has a single
-        // channel to work on.
-        xi::Image srcView = xi::Image::view(src->width, src->height, src->channels,
-                                            static_cast<const uint8_t*>(src->pixels));
-        cv::Mat srcMat = xi::as_cv_read(srcView);
+        // Read the INPUT as a cv::Mat over the blob payload — as_cv_read maps the
+        // descriptor's dt to the CV type (zero-copy; the pixels are a pool span
+        // shared with other consumers — read them, never mutate them). Collapse a
+        // colour input to gray first so the threshold has a single channel.
+        cv::Mat srcMat = xi::as_cv_read(*src);
         cv::Mat gray;
         if (srcMat.channels() == 1) gray = srcMat;
         else                        cv::cvtColor(srcMat, gray, cv::COLOR_BGR2GRAY);
 
-        cv::Mat binMat = xi::as_cv_write(dst);
+        // Produce the output as a self-describing xi/image BLOB (spec 30): mint a
+        // headed pool buffer, wrap its 64B-aligned payload as a WRITABLE cv::Mat
+        // with as_cv_write_blob, and let cv::threshold write the binary image
+        // straight INTO it — then adopt the buffer zero-copy (the pack addrefs;
+        // we drop our mint ref). No heap→pool memcpy. (The frozen @1
+        // out.adopt_image door adapter now copies, so an in-tree producer mints
+        // the headed buffer directly.)
+        const int w = src->width, h = src->height;
+        xi::mp::Writer dw;                        // {"t":"xi/image","w","h","c","dt"}
+        dw.map(5);
+        dw.key("t");  dw.str("xi/image");
+        dw.key("w");  dw.int_(w);
+        dw.key("h");  dw.int_(h);
+        dw.key("c");  dw.int_(1);
+        dw.key("dt"); dw.str("u8");
+        void* pp = nullptr;
+        xi_image_handle bh = out.blob_mint(dw.bytes().data(), (int32_t)dw.bytes().size(),
+                                           (int64_t)w * h, &pp);
+        if (!bh || !pp) {
+            out.fault("no_blob_plane", "binary", "{{NAME}}: host has no xi.pack@4 blob plane");
+            return;
+        }
+        cv::Mat binMat = xi::as_cv_write_blob(pp, w, h, 1, "u8");  // writable payload view
         cv::threshold(gray, binMat, (double)threshold_.load(), 255.0, cv::THRESH_BINARY);
 
-        const double pixels = (double)src->width * src->height;
+        const double pixels = (double)w * h;
         const double fg_pct = pixels > 0 ? (double)cv::countNonZero(binMat) / pixels : 0.0;
         last_fg_pct_ = fg_pct;
         status("thr=" + std::to_string(threshold_.load()) +
                " fg=" + std::to_string(fg_pct));
 
-        // adopt_image hands the pool slot to the pack by refcount (zero-copy);
-        // scalars chain through the i64/f64/str/boolean builders.
-        out.adopt_image("binary", dst.width, dst.height, dst.channels,
-                        dst.pool_handle());
+        out.adopt_blob("binary", bh);
+        host_->image_release(bh);                 // pack holds its own addref now
         out.f64("fg_pct",    fg_pct);
         out.i64("threshold", threshold_.load());
     }

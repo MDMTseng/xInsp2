@@ -5,14 +5,27 @@
 # capture box" pattern as perf_hotpath / perf_record: a per-machine latency number
 # is meaningless on any other machine (05 review #3, #30).
 #
-# This is the wave-1 GO/NO-GO bench (docs/new_gen/08 §1d): Pack (v3 uniform
-# keyed-buffer plane) vs Record (v2 shared doc) on the per-frame hot path. The
-# gated metrics are:
-#   frame_micro_record_roundtrip_ns          v2 metadata roundtrip (min-of-batches)
-#   frame_micro_framebuilder_ns              v3 PackBuilder+seal+read+drop (dynamic)
-#   frame_micro_plane_memcpy_hop_ns          v3 mp plane + memcpy-hop + offset-read
-#   frame_hotpath_record_p50_us_320x240x3_p1 v2 closed-loop single-worker p50
+# Historically the wave-1 GO/NO-GO bench (docs/new_gen/08 §1d): Pack (v3) vs
+# Record (v2 shared doc) — the Record lanes (frame_micro_record_roundtrip_ns,
+# frame_hotpath_record_p50_us_320x240x3_p1) were retired at THE CUT. The
+# gated metrics the bench emits now are:
+#   frame_micro_framebuilder_ns              v3 PackBuilder+seal+read+drop (slab
+#                                            build + raw reads + one-shot free)
+#   frame_micro_slab_read_ns                 v3 M typed raw-slab reads on one
+#                                            sealed pack (binary search + raw
+#                                            load, no msgpack decode)
 #   frame_hotpath_frame_p50_us_320x240x3_p1  v3 closed-loop single-worker p50
+#                                            (event carries a sealed Pack by
+#                                            MOVE; consumer reads raw slab)
+#
+# SLAB MIGRATION (packv3, 2026-07-14): frame_micro_slab_read_ns REPLACES the
+# retired frame_micro_plane_memcpy_hop_ns ("mp plane + memcpy-hop +
+# offset-read") — that lane measured the pre-slab representation (a contiguous
+# canonical-msgpack small plane hopped by memcpy, fields decoded at precomputed
+# offsets), which nothing in production does anymore. Pre-migration numbers for
+# frame_micro_framebuilder_ns and the hotpath p50 are also NOT comparable:
+# scalars now store RAW in one slab (no msgpack encode on build, no decode on
+# read). Recapture from scratch on the gating machine.
 # All slower-is-worse. Capture on this machine with:
 #   cmake -DBENCH_EXE=<bench_pack.exe> -DBASELINE=<this file> \
 #         -DUPDATE_BASELINE=ON -P backend/tests/perf_gate.cmake

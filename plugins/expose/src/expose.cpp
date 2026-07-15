@@ -51,8 +51,19 @@ public:
     // raw, never to nothing).
     ExposeSink(const xi_host_api* host, const std::string& name)
         : xi::Plugin(host, name) {
-        if (host && host->get_interface)
+        if (host && host->get_interface) {
             cap_ = static_cast<const xi_cap_v1*>(host->get_interface("xi.cap", 1));
+            provider_ = static_cast<const xi_cap_provider_v1*>(
+                host->get_interface("xi.cap.provider", 1));
+        }
+        if (provider_)   // spec 31: the live-UI transport ingestion (byte-blind)
+            ui_sink_registered_ =
+                (provider_->register_capability("xi.ui.sink", &h_ui_sink, this) == XI_CAP_REG_OK);
+    }
+
+    ~ExposeSink() override {
+        if (provider_ && ui_sink_registered_)
+            provider_->unregister_capability("xi.ui.sink", this);
     }
 
     // polaris2 wave-2 (docs/new_gen/08 Wave 2 step 3): the xi.pack@1 pack-in/
@@ -101,6 +112,50 @@ public:
         if (subscribed) emit_binary(frame);
 
         out.str("channel", channel).i64("seen", (int64_t)seen);
+    }
+
+    // xi.ui.sink@1 (spec 31): egress hands us a pre-encoded UI frame. We are a
+    // byte-BLIND store-and-broadcast — no encode/policy here.
+    //   pack in : str "$channel" (required), optional bin "frame" (pre-encoded
+    //             XEX1 wire bytes). Frame absent = a cheap subscription PROBE.
+    //   pack out: i64 "subscribed" (1/0), i64 "seen".
+    // With a frame + a subscriber -> emit_binary (broadcast; client filters by
+    // channel), drop-not-queue at the host WS pipe (the slow-consumer machinery).
+    xi_pack_handle ui_sink_(xi_pack_handle in) {
+        const xi_pack_v1* pk = pack_iface();
+        if (!pk || in == XI_PACK_NULL) return XI_PACK_NULL;
+        int32_t probe = 0;
+        if (pk->get_bool && pk->get_bool(in, "$probe", &probe) && probe) {
+            xi_pack_builder b = pk->builder_new();
+            pk->builder_add_str(b, "$versions", "1", 1);
+            return pk->builder_seal(b);
+        }
+        const char* cp = nullptr; int32_t cn = 0;
+        std::string channel = (pk->get_str(in, xi::pack_contract::kChannel, &cp, &cn) && cp)
+                              ? std::string(cp, cn > 0 ? (size_t)cn : 0) : std::string("default");
+        const void* fp = nullptr; int32_t fn = 0;
+        const bool has_frame = pk->get_bin(in, "frame", &fp, &fn) && fp && fn > 0;
+
+        long long seen = 0; bool subscribed;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            subscribed = subscribed_.count(channel) != 0;
+            if (has_frame) {
+                Channel& ch = channels_[channel];
+                ch.frame_bytes.assign((const uint8_t*)fp, (const uint8_t*)fp + fn);
+                seen = ++ch.seen;
+            }
+        }
+        if (has_frame && subscribed) emit_binary(fp, (int)fn);   // byte-blind broadcast
+
+        xi_pack_builder b = pk->builder_new();
+        pk->builder_add_i64(b, "subscribed", subscribed ? 1 : 0);
+        pk->builder_add_i64(b, "seen", (int64_t)seen);
+        return pk->builder_seal(b);
+    }
+    static xi_pack_handle h_ui_sink(void* self, xi_pack_handle in) {
+        try { return static_cast<ExposeSink*>(self)->ui_sink_(in); }
+        catch (...) { return XI_PACK_NULL; }
     }
 
     std::string exchange(const std::string& cmd) override {
@@ -347,7 +402,10 @@ private:
                     vals.set(key.c_str(), in.boolean(key.c_str()).value_or(false)); break;
                 case XI_PACK_TAG_STR:
                     vals.set(key.c_str(), std::string(in.str(key.c_str()).value_or(""))); break;
-                case XI_PACK_TAG_IMAGE: {
+                case XI_PACK_TAG_BLOB: {
+                    // xi/image blobs (spec 30) get the legacy v1 JPEG treatment;
+                    // in.image() parses an xi/image blob via the @1 adapter and
+                    // returns nullopt for any other blob type (no v1 display form).
                     auto im = in.image(key.c_str());
                     if (!im || !im->pixels) break;
                     std::vector<uint8_t> jpeg = compress_px_(
@@ -355,7 +413,7 @@ private:
                     if (!jpeg.empty()) images.push_back({key, std::move(jpeg)});
                     break;
                 }
-                default: break;  // bin/mp: no v1 display form
+                default: break;  // non-image blobs / bin / mp: no v1 display form
             }
         }
         return xi::xex1::encode_frame(channel, seq, vals.dump(), images);
@@ -386,6 +444,15 @@ private:
     std::map<std::string, Channel>  channels_;
     std::set<std::string>           subscribed_;
     bool                            wire_v3_ = true;    // v12 default: XEX1-v3 (v1 opt-out for one release)
+
+    // --- xi.ui.sink@1 provider (spec 31): the egress -> transport ingestion ---
+    // A data-plane plugin may ALSO provide a cap (cap-plane-consistent). This
+    // makes expose a byte-BLIND store-and-broadcast for the live-UI plane: the
+    // xi.ui.egress plugin owns ALL policy (encode/dedup/dispatch) and hands us
+    // pre-encoded frame bytes we never inspect. One provider per process; a
+    // second expose instance just runs as a normal sink (ETAKEN tolerated).
+    const xi_cap_provider_v1* provider_ = nullptr;
+    bool                      ui_sink_registered_ = false;
 
     // --- E2 preview state (all guarded by mu_) --------------------------------
     const xi_cap_v1*  cap_ = nullptr;      // xi.jpeg.encode funnel (resolved in ctor)

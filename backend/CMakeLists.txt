@@ -643,6 +643,16 @@ if(NOT MSVC)
 endif()
 add_test(NAME xi_pack COMMAND test_xi_pack)
 
+# Package E — the xi/image blob CONSUMER sugar (spec 30): xi::read_image_blob
+# (CV-free descriptor reader) + the cv::Mat wrappers over it. Links xi_core for
+# the OpenCV INTERFACE (the cv:: mapping under test lives in <xi/xi_cv.hpp>).
+add_executable(test_image_blob tests/test_image_blob.cpp)
+target_link_libraries(test_image_blob PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_image_blob PRIVATE pthread)
+endif()
+add_test(NAME image_blob COMMAND test_image_blob)
+
 # Ingress canonicalizer (xi_ingress.hpp) — the domain edge (task 1c). The ONLY
 # path from foreign/untrusted msgpack bytes to a Pack entry: structural
 # validation + profile normalization (NaN flatten, dup/non-string-key reject) +
@@ -1046,7 +1056,8 @@ if(NOT MSVC)
 endif()
 _xinsp_perf_gate(perf_pack bench_pack pack.txt)
 
-# --- proto/pack-c PROTOTYPE (design C, backend/include/xi/proto/xi_pack_c.hpp)
+# --- proto/pack-c PROTOTYPE (design C, backend/tests/proto/xi_pack_c.hpp — an
+# experiment record kept OUT of include/; see docs/new_gen/29-pack-c-prototype-record.md)
 # Experiment-only additions: a correctness net in the regular suite, and a
 # head-to-head bench (current Pack vs design C) that is runnable but NOT
 # perf-gated — no baseline, no _xinsp_perf_gate; its numbers feed the
@@ -1058,11 +1069,18 @@ if(NOT MSVC)
 endif()
 add_test(NAME pack_c COMMAND test_pack_c)
 
-add_executable(bench_pack_c tests/bench_pack_c.cpp)
-target_link_libraries(bench_pack_c PRIVATE xi_core)
-if(NOT MSVC)
-    target_link_libraries(bench_pack_c PRIVATE pthread)
-endif()
+# bench_pack_c (removed, self-describing blob plane, package D): this microbench
+# was a HEAD-TO-HEAD of the real xi::Pack's image/tensor ops against the design-C
+# prototype (tests/proto/xi_pack_c.hpp) — it existed only to feed the
+# migrate/don't-migrate judgment for the slab container. That judgment is made
+# (the slab shipped; spec 30 supersedes it), the current-Pack side was written
+# entirely around now-deleted verbs (add_image/add_tensor/get_image/get_tensor/
+# typed blobs), and its opponent proto is retired to tests/proto/ as an inert
+# experiment record (its own unit test is `test_pack_c`/`pack_c` above). With one
+# side gone and the other re-cut required from scratch, the comparison is moot;
+# absolute build/read/hop/free numbers for the current pack live in bench_pack.
+# Deleted rather than re-cut (doc 28 finding ⑥ contraction). The proto header +
+# test_pack_c stay as the deliberate experiment record.
 
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_IPP=1)

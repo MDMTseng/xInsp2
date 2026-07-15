@@ -9,10 +9,13 @@
 //      mock_camera.cpp /Fe:mock_camera.dll
 //
 
-#include <xi/xi_abi.hpp>       // xi::Plugin, xi::PackOut, xi::Image, pool_image()/emit()
+#include <xi/xi_abi.hpp>       // xi::Plugin, xi::PackOut, xi::Image, new_pack()/emit()
+#include <xi/xi_mp.hpp>        // canonical msgpack Writer — build the xi/image blob descriptor
 #include <xi/xi_thread.hpp>    // xi::spawn_worker — SEH-safe capture thread
 #include <xi/xi_json.hpp>      // parses set_def/exchange (canonical over cmd.find)
 #include <xi/xi_contract.hpp>  // fail-loud command inputs + schema-skew errors
+
+#include <utility>
 
 #include "mock_camera_keys.gen.h"
 
@@ -79,7 +82,13 @@ namespace keys = xi::mock_camera::keys;
 class MockCamera : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
-    MockCamera(const xi_host_api* host, const char* name) : xi::Plugin(host, name) {}
+    MockCamera(const xi_host_api* host, const char* name) : xi::Plugin(host, name) {
+        // Live-UI egress (spec 31): resolve the xi.ui.egress cap ONCE. Cap absent
+        // (no ui_egress lib plugin loaded) => the one-line push below is a no-op.
+        if (host && host->get_interface)
+            ui_cap_ = static_cast<const xi_cap_v1*>(host->get_interface("xi.cap", 1));
+        ui_channel_ = "ui/" + std::string(name ? name : "cam");
+    }
 
     ~MockCamera() override { stop_(); }
 
@@ -90,6 +99,7 @@ public:
             .set(keys::kFps, fps_.load())
             .set(keys::kStreaming, running_.load())
             .set(keys::kGain, gain_.load())
+            .set("ui_preview", ui_preview_.load())
             .dump();
     }
 
@@ -114,6 +124,9 @@ public:
         // polaris2 ex-feedback: brightness multiplier (default 1.0) applied to
         // the emitted pixels.
         if (p[keys::kGain].is_number()) gain_ = clamp_gain_(p[keys::kGain].as_double());
+        // Live-UI preview push (spec 31), param-gated, DEFAULT OFF: when on, each
+        // emitted frame is also pushed to xi.ui.egress on ui/<instance>.
+        if (p["ui_preview"].is_bool()) ui_preview_ = p["ui_preview"].as_bool();
         return true;
     }
 
@@ -209,6 +222,9 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<double> gain_{1.0};        // polaris2 ex-feedback brightness gain
     std::atomic<int> seq_{0};              // frame counter (door acks read it)
+    std::atomic<bool> ui_preview_{false};  // spec 31 live-UI preview push (default off)
+    const xi_cap_v1*  ui_cap_ = nullptr;   // xi.ui.egress funnel (resolved in ctor)
+    std::string       ui_channel_;         // ui/<instance>
     std::thread thread_;
 
     void start_() {
@@ -226,60 +242,103 @@ private:
         if (thread_.joinable()) thread_.join();
     }
 
+    // Zero-copy xi/image emit (spec 30): mint a self-describing blob, paint into
+    // its 64B-aligned payload region IN PLACE (via a non-owning Image view over
+    // the payload), adopt it into the pack (which addrefs), then drop our mint
+    // ref. No per-frame image memcpy — the successor to the old adopt_image
+    // pool-handle hand-off (that @1 door adapter now copies raw pixels into a
+    // headed blob, so an in-tree producer mints the headed buffer directly).
+    template <class Paint>
+    bool add_image_blob_(xi::PackOut& f, const char* key,
+                         int w, int h, int c, Paint&& paint) {
+        xi::mp::Writer dw;                    // {"t":"xi/image","w","h","c","dt"}
+        dw.map(5);
+        dw.key("t");  dw.str("xi/image");
+        dw.key("w");  dw.int_(w);
+        dw.key("h");  dw.int_(h);
+        dw.key("c");  dw.int_(c);
+        dw.key("dt"); dw.str("u8");
+        void* pp = nullptr;
+        xi_image_handle bh = f.blob_mint(dw.bytes().data(), (int32_t)dw.bytes().size(),
+                                         (int64_t)w * h * c, &pp);
+        if (!bh || !pp) return false;
+        xi::Image v = xi::Image::view(w, h, c, static_cast<const uint8_t*>(pp));
+        paint(v);
+        // Live-UI preview push (spec 31): the painted pixels are right here in the
+        // minted payload — push them to xi.ui.egress (one line, param-gated). The
+        // cap writes a latest-wins slot and returns; it never blocks this loop.
+        if (ui_preview_.load()) ui_preview_push_(w, h, c, static_cast<const uint8_t*>(pp));
+        bool ok = f.adopt_blob(key, bh);
+        host_->image_release(bh);             // pack holds its own addref now
+        return ok;
+    }
+
+    // Resolve-once + one-line push (spec 31). Builds {$channel, image} and calls
+    // xi.ui.egress. Cap absent => no-op. builder_add_image synthesizes the
+    // xi/image blob egress dispatches on.
+    void ui_preview_push_(int w, int h, int c, const uint8_t* px) {
+        const xi_pack_v1* pk = pack_iface();
+        if (!pk || !ui_cap_ || !px) return;
+        xi_pack_builder b = pk->builder_new();
+        pk->builder_add_str(b, xi::pack_contract::kChannel,
+                            ui_channel_.c_str(), (int32_t)ui_channel_.size());
+        pk->builder_add_image(b, "image", w, h, c, px);
+        xi_pack_handle req = pk->builder_seal(b);
+        xi_pack_handle rsp = XI_PACK_NULL;
+        ui_cap_->call("xi.ui.egress", req, &rsp);
+        pk->release(req);
+        if (rsp != XI_PACK_NULL) pk->release(rsp);
+    }
+
     void run_loop() {
         seq_.store(0);
         while (running_) {
             const int seq = seq_.load();
             // Snapshot config once per frame (set_def/exchange may retune it live).
             const int w = w_.load(), h = h_.load(), fps = fps_.load();
-
-            // Paint straight into a fresh host-pool slot: emit() then hands the
-            // frame over via the pool refcount path (zero heap-to-pool copy).
-            xi::Image img = pool_image(w, h, 3);
-            uint8_t* p = img.data();
-
-            // Background: gradient that shifts with frame
-            for (int y = 0; y < h; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    int i = (y * w + x) * 3;
-                    p[i + 0] = static_cast<uint8_t>((x * 200 / w + seq * 2) & 0xFF);
-                    p[i + 1] = static_cast<uint8_t>((y * 180 / h + seq * 3) & 0xFF);
-                    p[i + 2] = static_cast<uint8_t>(80 + (seq & 0x3F));
-                }
-            }
-
-            // Draw frame counter in top-left
-            // Black background box
-            for (int y = 2; y < 20; ++y) {
-                for (int x = 2; x < 80; ++x) {
-                    if (x < w && y < h) {
-                        int i = (y * w + x) * 3;
-                        p[i] = p[i+1] = p[i+2] = 0;
-                    }
-                }
-            }
-            draw_number(img, 4, 4, seq);
-
-            // v12: the sealed xi.pack@1 Pack is the sole data plane. Emit the
-            // frame's pixels (adopt_image is a zero-copy pool-handle addref, not a
-            // memcpy) plus a "seq" entry and the gain it was painted with.
-            //
-            // ex-feedback: apply the door-controlled brightness gain to THIS frame
-            // (saturating multiply; 1.0 is the identity). The pack ECHOES the gain
-            // so a closed-loop script controls against the actual per-frame plant
-            // state.
             const double g = gain_.load();
-            if (g != 1.0) {
-                const size_t n = (size_t)w * (size_t)h * 3;
-                for (size_t i = 0; i < n; ++i) {
-                    const double v = p[i] * g;
-                    p[i] = v >= 255.0 ? (uint8_t)255 : (uint8_t)(v + 0.5);
-                }
-            }
+
+            // v12 + spec 30: the sealed pack is the sole data plane. Emit the
+            // frame as a self-describing xi/image BLOB whose pixels are painted
+            // IN PLACE in the minted buffer — a true zero-copy hand-off (seq +
+            // the gain it was painted with ride alongside).
+            //
+            // ex-feedback: apply the door-controlled brightness gain to THIS
+            // frame (saturating multiply; 1.0 is the identity). The pack ECHOES
+            // the gain so a closed-loop script controls against the actual
+            // per-frame plant state.
             xi::PackOut f = new_pack();
             f.i64(keys::kSeq, seq);
             f.f64(keys::kGain, g);
-            f.adopt_image(keys::kFrame, w, h, 3, img.pool_handle());
+            add_image_blob_(f, keys::kFrame, w, h, 3, [&](xi::Image& img) {
+                uint8_t* p = img.data();
+                // Background: gradient that shifts with frame.
+                for (int y = 0; y < h; ++y) {
+                    for (int x = 0; x < w; ++x) {
+                        int i = (y * w + x) * 3;
+                        p[i + 0] = static_cast<uint8_t>((x * 200 / w + seq * 2) & 0xFF);
+                        p[i + 1] = static_cast<uint8_t>((y * 180 / h + seq * 3) & 0xFF);
+                        p[i + 2] = static_cast<uint8_t>(80 + (seq & 0x3F));
+                    }
+                }
+                // Frame counter in the top-left, on a black box.
+                for (int y = 2; y < 20; ++y) {
+                    for (int x = 2; x < 80; ++x) {
+                        if (x < w && y < h) {
+                            int i = (y * w + x) * 3;
+                            p[i] = p[i+1] = p[i+2] = 0;
+                        }
+                    }
+                }
+                draw_number(img, 4, 4, seq);
+                if (g != 1.0) {
+                    const size_t n = (size_t)w * (size_t)h * 3;
+                    for (size_t i = 0; i < n; ++i) {
+                        const double v = p[i] * g;
+                        p[i] = v >= 255.0 ? (uint8_t)255 : (uint8_t)(v + 0.5);
+                    }
+                }
+            });
             emit(std::move(f));
             seq_.fetch_add(1);
 
