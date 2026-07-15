@@ -54,6 +54,7 @@
   #include <arpa/inet.h>
   #include <fcntl.h>        // O_NONBLOCK — the busy-reject drain (see poll())
   #include <netinet/in.h>
+  #include <netinet/tcp.h>   // TCP_NODELAY
   #include <sys/socket.h>
   #include <unistd.h>
   using socket_t = int;
@@ -495,6 +496,29 @@ public:
                         sto.tv_usec = (kSendTimeoutMs % 1000) * 1000;
                         ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &sto, sizeof(sto));
 #endif
+                        // Large-frame egress tuning (bench5mp: a raw 5MP preview is
+                        // ~15 MB/frame; the default 64 KB SNDBUF throttled the sole
+                        // writer to ~350 MB/s on loopback). A 4 MiB SNDBUF lets the
+                        // kernel stream ahead of the writer's chunk loop, and
+                        // TCP_NODELAY removes the tail-segment Nagle stall on each
+                        // enqueue boundary. Localhost-first numbers; both are also
+                        // sane (or no-ops) for a LAN client.
+                        // SIZE COUPLING (qa_slow_consumer phase 2): the kernel buffer
+                        // silently absorbs a WEDGED client's backlog before ::send
+                        // blocks, so SO_SNDTIMEO fires only after SNDBUF fills — the
+                        // wedge-drop bound grows with SNDBUF/production-rate. 4 MiB
+                        // measured the SAME throughput as 16 MiB (the producer is the
+                        // ceiling past ~483 MB/s) while keeping the wedge fill time
+                        // bounded for slow lanes; do NOT raise this without re-running
+                        // qa_slow_consumer.
+                        {
+                            int sndbuf = 4 * 1024 * 1024;
+                            ::setsockopt(s, SOL_SOCKET, SO_SNDBUF,
+                                         (const char*)&sndbuf, sizeof(sndbuf));
+                            int nodelay = 1;
+                            ::setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
+                                         (const char*)&nodelay, sizeof(nodelay));
+                        }
                         // Publish under tx_mu_ so the store is ordered against
                         // the writer's snapshot of client_ (which also holds
                         // tx_mu_) — symmetric with the close side. Bump the
@@ -586,10 +610,13 @@ private:
     // buffered (unsent) outbound bytes past this, the client is a slow-but-alive
     // consumer that never trips SO_SNDTIMEO yet cannot keep up — we drop it
     // cleanly (shutdown → poll's recv returns → close_client) rather than let the
-    // backend's memory grow without bound. 64 MiB ≈ a few seconds of MB-scale
-    // previews; well past any healthy client's transient backlog, small enough to
-    // bound the blast radius on a localhost control channel.
-    static constexpr size_t kOutboundHardCapBytes = 64u * 1024u * 1024u;
+    // backend's memory grow without bound. Sized for RAW-preview streaming
+    // (bench5mp): a 20MP RGB frame is ~59 MB, so the old 64 MiB cap held ONE
+    // frame — any scheduling jitter meant enqueue #2 crossed the cap and dropped
+    // the client on an otherwise-sustainable stream. 256 MiB ≈ a 3-4 frame burst
+    // at 20MP (or ~17 frames at 5MP): plenty for jitter, still a bounded blast
+    // radius for a wedged localhost client.
+    static constexpr size_t kOutboundHardCapBytes = 256u * 1024u * 1024u;
 
     socket_t    listen_ = INVALID_SOCK;
     int         local_port_ = 0;   // actual bound port (see local_port())
@@ -768,7 +795,12 @@ private:
             const std::vector<uint8_t>& bytes = frame.bytes;
             size_t sent = 0;
             while (sent < bytes.size()) {
-                int chunk = (int)std::min<size_t>(bytes.size() - sent, 1 << 20);
+                // 4 MiB chunks (matches the accepted socket's SNDBUF): big enough
+                // that a 15 MB raw preview streams at memory speed, small enough
+                // that SO_SNDTIMEO still bounds a wedged client per chunk (a
+                // progressing client now must drain >2.7 MB/s, vs >0.7 with the
+                // old 1 MiB chunks — still far below any live localhost consumer).
+                int chunk = (int)std::min<size_t>(bytes.size() - sent, 4u << 20);
                 int s = ::send(fd, reinterpret_cast<const char*>(bytes.data() + sent), chunk, 0);
                 if (s <= 0) {
                     // Desynced/dead/wedged: half a frame went out (or SO_SNDTIMEO
