@@ -130,6 +130,61 @@ static void test_rejects() {
     }
 }
 
+// Round-4 Tier-1 hardening: the reader is the trust boundary for descriptor-
+// supplied dims — int32 bound + overflow-safe w*h*c*elem, and the CV wrappers
+// re-verify a hand-built view instead of trusting it.
+static void test_overflow_and_cv_bounds() {
+    // Descriptor with int64 dims (desc_of narrows to int, so build directly).
+    auto desc64 = [](int64_t w, int64_t h, int64_t c, std::string_view dt) {
+        xi::mp::Writer dw;
+        dw.map(5);
+        dw.key("t");  dw.str("xi/image");
+        dw.key("w");  dw.int_(w);
+        dw.key("h");  dw.int_(h);
+        dw.key("c");  dw.int_(c);
+        dw.key("dt"); dw.str(dt);
+        xi::mp::Bytes b = dw.take();
+        return std::vector<uint8_t>(b.begin(), b.end());
+    };
+    std::vector<uint8_t> pay(64, 0);
+
+    // A dim past INT32_MAX must be refused BEFORE the int32 narrowing cast —
+    // a truncated width over a "large enough" payload is the OOB setup.
+    const int64_t big = int64_t(INT32_MAX) + 1;
+    CHECK(!xi::read_image_blob(desc64(big, 1, 1, "u8"), pay).has_value(),
+          "reject: w > INT32_MAX");
+    CHECK(!xi::read_image_blob(desc64(1, big, 1, "u8"), pay).has_value(),
+          "reject: h > INT32_MAX");
+    CHECK(!xi::read_image_blob(desc64(1, 1, big, "u8"), pay).has_value(),
+          "reject: c > INT32_MAX");
+    // In-bound dims whose PRODUCT overflows a signed 64-bit multiply chain —
+    // the overflow-safe u64 need computation must reject, never wrap-and-pass.
+    CHECK(!xi::read_image_blob(desc64(INT32_MAX, INT32_MAX, 4, "f64"), pay).has_value(),
+          "reject: w*h*c*elem beyond uint64 (wrapped product must not pass)");
+    CHECK(!xi::read_image_blob(desc64(INT32_MAX, INT32_MAX, 1, "u8"), pay).has_value(),
+          "reject: giant-but-valid product over a short payload");
+
+    // as_cv_read re-verifies a PUBLIC-aggregate view: channels past CV_CN_MAX
+    // would wrap CV_MAKETYPE's packed cn bits; a short payload must not yield
+    // an oversized Mat.
+    {
+        std::vector<uint8_t> px((size_t)4 * 4 * (CV_CN_MAX + 1), 0);
+        xi::ImageBlobView v;
+        v.width = 4; v.height = 4; v.channels = CV_CN_MAX + 1; v.dt = "u8";
+        v.payload = px;
+        CHECK(xi::as_cv_read(v).empty(), "as_cv_read rejects channels > CV_CN_MAX");
+        CHECK(xi::as_cv_write_blob(px.data(), 4, 4, CV_CN_MAX + 1, "u8").empty(),
+              "as_cv_write_blob rejects channels > CV_CN_MAX");
+    }
+    {
+        std::vector<uint8_t> px(16, 0);                   // far short of 100*100*3
+        xi::ImageBlobView v;
+        v.width = 100; v.height = 100; v.channels = 3; v.dt = "u8";
+        v.payload = px;
+        CHECK(xi::as_cv_read(v).empty(), "as_cv_read rejects a payload shorter than h*w*c*elem");
+    }
+}
+
 // The WRITE flavor over a minted payload (producer mint window).
 static void test_write_blob() {
     const int W = 5, H = 3, C = 1;
@@ -147,6 +202,7 @@ int main() {
     std::printf("test_image_blob\n");
     test_dt_matrix();
     test_rejects();
+    test_overflow_and_cv_bounds();
     test_write_blob();
     if (g_fail == 0) { std::printf("  OK (all checks passed)\n"); return 0; }
     std::fprintf(stderr, "  %d check(s) FAILED\n", g_fail);
