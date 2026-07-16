@@ -166,6 +166,20 @@ next round has a record:
   faulting thread; the terminate-path minidump unwinds the fault frame (module
   blame is preserved via `xi::last_fault_addr()`, but the culprit cross-check is
   weaker). A signal-time dump would conflict with the fault-catching model.
+- **WS wedged-client-drop detection window is too wide on Linux** (qa_slow_consumer,
+  the only pack-*/multi-plugin driver still nt-only). The other 15 pack-* drivers
+  pass — global plugins load fine — but qa_slow_consumer's phase 2 fails: a wedged
+  client (slow/0-drain reader) is NOT dropped within its 12 s budget, so the
+  single-client slot never frees. `xi_ws_server.hpp` drops a wedged peer via the
+  `kOutboundHardCapBytes` outbound byte budget + `SO_SNDTIMEO`; but as the header's
+  own comment notes, a **large SNDBUF widens the wedge-detection window** (the
+  kernel silently absorbs the backlog before `::send` blocks), and the 2026-07
+  merge added **adaptive per-connection SNDBUF** — so on Linux a slow consumer's
+  modest backlog is absorbed and the byte cap isn't hit inside 12 s.
+  `test_ws_async_writer` (unit) passes because it floods straight to the byte cap;
+  only the e2e slow-consumer shape exposes it. Fix: cap the adaptive SNDBUF for
+  wedge-detection purposes, or lower `kOutboundHardCapBytes` on Linux, so a wedged
+  peer trips the drop within the budget.
 
 ## Going-forward rule
 
