@@ -46,9 +46,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(REPO_ROOT / "examples" / "lib"))
-from ports import free_port  # noqa: E402
+from ports import free_port, backend_exe, fe_exe  # noqa: E402
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
-FE_EXE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-fe{EXE_SUFFIX}"
+FE_EXE = fe_exe()
 PORT = free_port()  # ephemeral (was 7861); no squatter cross-talk
 CRASH_COUNT = 2                       # must match instances/healer/instance.json
 FE_LOG = ROOT / "fe.log"
@@ -86,9 +86,6 @@ def read_marker(path: Path) -> int:
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: xinsp-fe is Windows-only today (see docs/roadmap/linux-port.md)")
-        return 0
     if not FE_EXE.exists():
         sys.exit(f"FAIL: xinsp-fe not found: {FE_EXE}\n"
                  f"build it: cmake --build backend/build --config Release "
@@ -112,6 +109,7 @@ def main() -> int:
          f"--port={PORT}",
          f"--project={ROOT}",
          "--autostart-fps=4",
+         "--boot-timeout-ms=180000",
          f"--be-log={BE_LOG}"],
         cwd=str(FE_EXE.parent),
         stdout=fe_log, stderr=fe_log, stdin=subprocess.DEVNULL,
