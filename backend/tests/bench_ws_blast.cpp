@@ -145,21 +145,38 @@ static constexpr uint64_t kServerCap = 256ull * 1024 * 1024;
 struct Measure { double mbps; double fps; };
 
 static Measure blast(xi::ws::Server& srv, DrainClient& cli,
-                     const std::vector<uint8_t>& frame, bool owned,
+                     const std::vector<std::vector<uint8_t>>& bufs, bool owned,
                      double warmup_s, double window_s) {
-    xi::ws::BinSpan seg{ frame.data(), frame.size() };
-    const uint64_t guard = std::min<uint64_t>(8ull * frame.size(), kServerCap / 2);
+    const size_t frame_bytes = bufs[0].size();
+    const uint64_t guard = std::min<uint64_t>(8ull * frame_bytes, kServerCap / 2);
+    size_t idx = 0;   // cycles through bufs — 1 buffer = cache-HOT reuse, K buffers
+                      // (K*frame > L3) = cache-COLD source each send.
 
     auto offer = [&]() -> bool {
         // Client-driven backpressure: never let the unsent backlog approach the
         // cap (which would drop the client). Wait for the drain to catch up.
-        while (g_offered - cli.bytes.load(std::memory_order_relaxed) > guard) {
+        // NB: cli.bytes counts DELIVERED bytes INCLUDING the per-frame WS header,
+        // while g_offered counts PAYLOAD only, so delivered can legitimately exceed
+        // g_offered by the accumulated header bytes — compute backlog with an
+        // underflow guard (else the unsigned subtraction wraps to a huge value and
+        // the producer waits forever → three-way deadlock with the idle writer and
+        // the blocked-in-recv client).
+        auto backlog = [&]() -> uint64_t {
+            uint64_t deliv = cli.bytes.load(std::memory_order_relaxed);
+            return g_offered > deliv ? g_offered - deliv : 0;
+        };
+        auto wait_start = clk::now();
+        while (backlog() > guard) {
             if (!cli.connected.load(std::memory_order_acquire)) return false;
+            if (clk::now() - wait_start > std::chrono::seconds(5)) return false;  // stalled — bail
             std::this_thread::yield();
         }
+        const std::vector<uint8_t>& frame = bufs[idx];
+        if (bufs.size() > 1) idx = (idx + 1) % bufs.size();
+        xi::ws::BinSpan seg{ frame.data(), frame.size() };
         bool ok = owned ? srv.send_binary_owned(&seg, 1, (void*)&frame, &noop_release)
                         : srv.send_binary(frame.data(), frame.size());
-        if (ok) g_offered += frame.size();
+        if (ok) g_offered += frame_bytes;
         return ok;
     };
 
@@ -182,11 +199,12 @@ static Measure blast(xi::ws::Server& srv, DrainClient& cli,
     double secs  = std::chrono::duration<double>(t1 - t0).count();
     double bytes = (double)(b1 - b0);
     double mbps  = bytes / (1024.0 * 1024.0) / secs;
-    double fps   = (bytes / (double)frame.size()) / secs;
+    double fps   = (bytes / (double)frame_bytes) / secs;
     return { mbps, fps };
 }
 
 int main() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered — see progress live
     xi::ws::Server srv;
     std::atomic<bool> opened{false};
     srv.on_open  = [&] { opened.store(true, std::memory_order_release); };
@@ -219,28 +237,49 @@ int main() {
         { "20MP RGB   (56.25 MB)", k20MP * 3 },
     };
 
+    // Cold working-set target: enough distinct buffers that the source can't stay
+    // resident in CPU cache between reuses (L3 is tens of MB). 96 MiB comfortably
+    // exceeds any desktop L3, so a K-buffer cycle reads cold memory each send.
+    const size_t kColdWorkingSet = 96ull * 1024 * 1024;
+
+    auto fill = [](std::vector<uint8_t>& b, uint8_t salt) {
+        for (size_t i = 0; i < b.size(); i += 4096) b[i] = (uint8_t)((i >> 12) ^ salt);
+    };
+
     std::printf("\n== WS raw-frame egress ceiling (loopback, in-process raw drain) ==\n");
-    std::printf("box: this machine | port %d | window 2.5s + 0.5s warmup per run\n\n", port);
-    std::printf("%-24s | %-18s | %-18s\n", "frame", "OWNED (no memcpy)", "COPY (send_binary)");
-    std::printf("%-24s-+-%-18s-+-%-18s\n",
-                "------------------------", "------------------", "------------------");
+    std::printf("box: this machine | port %d | window 2.5s + 0.5s warmup per run\n", port);
+    std::printf("HOT = one reused buffer (cache-resident) | COLD = cycle K buffers, K*frame>96MiB (cache-cold source)\n\n");
+    std::printf("%-24s | %-16s | %-16s | %-16s\n",
+                "frame", "OWNED hot", "OWNED cold", "COPY hot");
+    std::printf("%-24s-+-%-16s-+-%-16s-+-%-16s\n",
+                "------------------------", "----------------", "----------------", "----------------");
 
     for (const auto& s : scen) {
-        std::vector<uint8_t> frame(s.frame_bytes);
-        // Touch every page so first-run faults don't skew the warmup, and give the
-        // bytes a non-zero pattern (irrelevant to the socket, but avoids any lazy
-        // zero-page trickery).
-        for (size_t i = 0; i < frame.size(); i += 4096) frame[i] = (uint8_t)(i >> 12);
+        // HOT: a single reused buffer.
+        std::vector<std::vector<uint8_t>> hot(1);
+        hot[0].resize(s.frame_bytes);
+        fill(hot[0], 0);
 
-        Measure o = blast(srv, cli, frame, /*owned=*/true,  0.5, 2.5);
-        Measure c = blast(srv, cli, frame, /*owned=*/false, 0.5, 2.5);
+        // COLD: K distinct buffers whose total exceeds cache.
+        size_t K = (size_t)std::max<uint64_t>(2, (kColdWorkingSet + s.frame_bytes - 1) / s.frame_bytes);
+        std::vector<std::vector<uint8_t>> cold(K);
+        for (size_t k = 0; k < K; ++k) { cold[k].resize(s.frame_bytes); fill(cold[k], (uint8_t)(k + 1)); }
 
-        char ocol[64], ccol[64];
-        if (o.fps < 0) std::snprintf(ocol, sizeof(ocol), "CLIENT DROPPED");
-        else std::snprintf(ocol, sizeof(ocol), "%6.0f MB/s %5.1ffps", o.mbps, o.fps);
-        if (c.fps < 0) std::snprintf(ccol, sizeof(ccol), "CLIENT DROPPED");
-        else std::snprintf(ccol, sizeof(ccol), "%6.0f MB/s %5.1ffps", c.mbps, c.fps);
-        std::printf("%-24s | %-18s | %-18s\n", s.name, ocol, ccol);
+        std::fprintf(stderr, "[%s] owned-hot..", s.name); std::fflush(stderr);
+        Measure oh = blast(srv, cli, hot,  /*owned=*/true,  0.5, 2.5);
+        std::fprintf(stderr, "owned-cold.."); std::fflush(stderr);
+        Measure oc = blast(srv, cli, cold, /*owned=*/true,  0.5, 2.5);
+        std::fprintf(stderr, "copy-hot.."); std::fflush(stderr);
+        Measure ch = blast(srv, cli, hot,  /*owned=*/false, 0.5, 2.5);
+        std::fprintf(stderr, "done\n"); std::fflush(stderr);
+
+        auto fmt = [](char* out, size_t n, Measure m) {
+            if (m.fps < 0) std::snprintf(out, n, "DROPPED");
+            else std::snprintf(out, n, "%5.0f MB/s %5.1ffps", m.mbps, m.fps);
+        };
+        char c1[48], c2[48], c3[48];
+        fmt(c1, sizeof(c1), oh); fmt(c2, sizeof(c2), oc); fmt(c3, sizeof(c3), ch);
+        std::printf("%-24s | %-16s | %-16s | %-16s\n", s.name, c1, c2, c3);
     }
     std::printf("\n");
 

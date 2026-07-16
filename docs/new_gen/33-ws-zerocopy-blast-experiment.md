@@ -26,52 +26,61 @@ which it attributed to shallow OWNED pacing (3 inflight) vs COPY (8 frames).
 `backend/tests/bench_ws_blast.cpp`. A real `xi::ws::Server` on an ephemeral loopback
 port (poll thread + writer), plus an **in-process Winsock client** that does the
 RFC-6455 handshake then drains raw bytes as fast as `recv()` allows — NO WS-frame
-parse, the fastest possible consumer. For each frame it blasts ONE fixed hot buffer
-for 2.5 s (after 0.5 s warmup) via both paths, measuring **delivered bytes at the
-client**. Both paths are paced identically by a client-driven backpressure guard =
+parse, the fastest possible consumer. For each frame it blasts for 2.5 s (after 0.5 s
+warmup) via each path, measuring **delivered bytes at the client**, in two source
+modes: HOT (reuse one buffer, cache-resident) and COLD (cycle K buffers whose total
+> 96 MiB so each send reads cache-cold memory — the realistic producer). Both paths
+are paced identically by a client-driven backpressure guard =
 `min(8×frame, cap/2 = 128 MiB)` — deep enough to saturate the writer, shallow enough
 never to trip the server's 256 MiB slow-consumer drop (doc 32's `min(8×frame, cap/2)`
 guard). Equal depth for both paths is the whole point: it isolates copy-vs-no-copy
 from pipe depth.
 
-## Results (this box, 3-run stable ±5%)
+## Results (this box, 2-run stable ±5%)
 
-| raw frame              | OWNED (no memcpy)     | COPY (send_binary)   | owned/copy |
-|------------------------|-----------------------|----------------------|-----------|
-| 5 MP  mono8 (4.78 MB)  | **~1210 fps** 5.8 GB/s | ~300 fps  1.44 GB/s | **4.0×**  |
-| 5 MP  RGB   (14.34 MB) | **~101 fps** 1.46 GB/s | ~92 fps   1.33 GB/s | 1.10×     |
-| 20 MP mono8 (18.75 MB) | **~76 fps** 1.44 GB/s  | ~70 fps   1.31 GB/s | 1.09×     |
-| 20 MP RGB   (56.25 MB) | **~26 fps** 1.45 GB/s  | ~23 fps   1.33 GB/s | 1.12×     |
+HOT = one reused buffer (stays in L3 across sends). COLD = cycle K distinct buffers,
+K×frame > 96 MiB, so every send reads a cache-cold source — which is what a REAL
+producer (camera DMA / decoder / procedural fill) always hands over.
+
+| raw frame              | OWNED hot          | OWNED cold (real)   | COPY hot           |
+|------------------------|--------------------|---------------------|--------------------|
+| 5 MP  mono8 (4.78 MB)  | ~1180 fps 5.6 GB/s | **~320 fps** 1.5 GB/s | ~305 fps 1.45 GB/s |
+| 5 MP  RGB   (14.34 MB) | ~101 fps  1.45 GB/s | **~104 fps** 1.49 GB/s | ~93 fps  1.34 GB/s |
+| 20 MP mono8 (18.75 MB) | ~78 fps   1.47 GB/s | **~77 fps** 1.45 GB/s | ~70 fps  1.32 GB/s |
+| 20 MP RGB   (56.25 MB) | ~26 fps   1.48 GB/s | **~26 fps** 1.46 GB/s | ~23 fps  1.33 GB/s |
 
 ## Findings
 
-1. **Zero-copy ≥ copy at every size, given equal pipe depth.** This settles doc 32's
-   caveat: the earlier "OWNED 826 < COPY 1183" was a **harness inflight-depth
-   artifact** (3 vs 8), NOT the copy path being faster. Level the depth and the
-   no-memcpy path wins everywhere.
+1. **The one true ceiling is a ~1.4–1.5 GB/s writer/socket wall — for EVERY frame
+   size.** fps = ~1.45 GB/s ÷ frame bytes. Cache-cold (the realistic column):
+   5 MP RGB ≈ **100 fps**, 20 MP RGB ≈ **26 fps**, 5 MP mono8 ≈ **320 fps**,
+   20 MP mono8 ≈ **77 fps**.
 
-2. **The win scales inversely with frame size — it's the producer-side memcpy.** At
-   4.78 MB the COPY path is bottlenecked by its own per-frame `acquire_buf_ + insert`
-   (a full-frame memcpy on the producer thread): ~300 fps × 4.78 MB ≈ 1.44 GB/s is
-   the copy ceiling, while OWNED (no such copy) runs 4× faster. As frames grow the
-   kernel user→kernel copy in `::send` dominates and both paths converge (~1.1×) onto
-   a ~**1.4 GB/s writer/socket wall** for frames ≥ ~14 MB.
+2. **"5 MP mono8 = 1180 fps" was a CACHE artifact, not a real number** (answers CT's
+   "why is 5 MP mono so much faster"). At 4.78 MB the reused hot buffer stays resident
+   in L3, so the whole loopback copy pipeline (send→kernel→recv) runs cache-hot →
+   5.6 GB/s. Rotate through 21 distinct buffers so the source is cache-cold (COLD
+   column) and it **collapses 5.6 → 1.5 GB/s** — straight onto the wall. The larger
+   frames (≥14 MB) never fit in cache, so hot ≈ cold for them (nothing to lose). A
+   real camera/decoder ALWAYS produces cache-cold frames, so the COLD column is the
+   honest fps; the HOT small-frame number does not occur in production.
 
-3. **Direct answer — raw max fps (send-path ceiling, no memcpy):**
-   5 MP RGB ≈ **100 fps**, 20 MP RGB ≈ **26 fps**; mono8 ≈ 3× those (5 MP small-frame
-   regime hits ~1200 fps). The ~1.4 GB/s plateau is the ceiling; fps = 1.4 GB/s ÷
-   frame bytes.
+3. **Zero-copy ≥ copy everywhere, given equal pipe depth** (OWNED cold ≥ COPY hot).
+   This settles doc 32's caveat: its "OWNED 826 < COPY 1183" was a **harness
+   inflight-depth artifact** (3 vs 8), NOT the copy being faster. The COPY path also
+   carries a per-frame producer-side full-frame memcpy (`acquire_buf_ + insert`); at
+   equal depth the no-memcpy path matches or beats it (~1.1× on large frames, and it
+   spends none of the producer CPU the copy path burns — doc 32's "~halved backend
+   CPU").
 
-## Honest caveat — this is an UPPER BOUND, not delivered-to-browser fps
+## Honest caveat — even the COLD column is an UPPER BOUND, not delivered-to-browser fps
 
-Same-process, in-cache, raw-byte drain with no encode and no real client. It measures
-the **send path's** headroom, not what a browser sees. doc 32's *full-system* run
-(real drain + encode) sustained ~480 MB/s (timer-quantized) with writer ceilings of
-739–826 MB/s. So: the send path is NOT the bottleneck for any realistic raw-preview
-rate (5 MP@30, even 20 MP@8) — it has multiples of headroom, and the no-memcpy path
-widens that headroom (and, per doc 32, halves backend CPU at equal throughput). The
-practical limiter remains the encode chain + the real client's drain, not the socket
-write.
+Same-process, raw-byte drain, no encode, no real client. It measures the **send
+path's** headroom, not what a browser sees. doc 32's *full-system* run (real drain +
+encode) sustained ~480 MB/s (timer-quantized). So the send path is NOT the bottleneck
+for any realistic raw-preview rate (5 MP@30, even 20 MP@8) — it has multiples of
+headroom, and the no-memcpy path widens it (and halves backend CPU). The practical
+limiter is the encode chain + the real client's drain, not the socket write.
 
 ## Reproduce
 
