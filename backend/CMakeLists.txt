@@ -1070,6 +1070,19 @@ if(NOT MSVC)
 endif()
 _xinsp_perf_gate(perf_pack bench_pack pack.txt)
 
+# --- bench_ws_blast (experiment exp/ws-zerocopy-send): raw-frame WS egress
+# ceiling probe. Measures the zero-copy owned send path (send_binary_owned /
+# xi.emit@2) vs the copying send_binary path against a tight in-process raw drain,
+# answering "raw 5MP/20MP max fps". Manual experiment — BUILT but NOT perf-gated
+# and NOT added to ctest (it opens a loopback socket + spawns a drain client; it
+# is a bench, not a regression test). Reproduces the doc-32 blast probe whose
+# harness was scratch. Run by hand: ./bench_ws_blast
+add_executable(bench_ws_blast tests/bench_ws_blast.cpp)
+target_link_libraries(bench_ws_blast PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(bench_ws_blast PRIVATE pthread)
+endif()
+
 # --- proto/pack-c PROTOTYPE (design C, backend/tests/proto/xi_pack_c.hpp — an
 # experiment record kept OUT of include/; see docs/new_gen/29-pack-c-prototype-record.md)
 # Experiment-only additions: a correctness net in the regular suite, and a
