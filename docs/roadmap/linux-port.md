@@ -128,7 +128,7 @@ next round has a record:
 - **Per-thread dispatch affinity/scheduling** (`service_dispatch.cpp`) stays a
   no-op. Process-level priority (`setpriority`) is done; thread affinity
   (`pthread_setaffinity_np` / `cpu_set_t`) + per-worker scheduling are not.
-- **`examples/qa_*/driver.py` e2e drivers — 37 ported + passing on Linux.**
+- **`examples/qa_*/driver.py` e2e drivers — 39 ported + passing on Linux.**
   Recipe: `ports.backend_exe()`/`fe_exe()` + drop the `os.name != "nt"` skip +
   `LOCALAPPDATA/Temp` → `tempfile.gettempdir()` (env `TMPDIR`); Windows process
   tooling (`taskkill`/`tasklist`/PowerShell) → POSIX (`os.kill`/`/proc/<pid>/fd`).
@@ -145,9 +145,16 @@ next round has a record:
     - qa_cpu_affinity — per-thread CPU affinity is a no-op on Linux (deferred item above).
     - qa_local_auto — the local auto image source delivers no frames on Linux.
     - qa_export_bundle — `tools/export_bundle.py` is Windows-only (builds an MSVC `.dll` bundle).
-    - qa_func / qa_recover — FE-based + need the `expose` surface / an FE-path fix.
     - qa_lifecycle_teardown — opens fixture projects (`burst_pipeline`, `qa_sink_shared_doc`) absent from this branch.
     - qa_slow_consumer — the WS wedged-client-drop timing gap (deferred item below).
+  The two **FE-based** drivers (qa_func, qa_recover) now pass. qa_func FE-E9
+  surfaced a REAL port bug: `fe_main.cpp discover_sibling_exe()` located the
+  sibling backend via `fs::current_path()` (cwd), so an FE launched from a
+  foreign cwd (fe.json scratch dir) `execv`-failed and never spawned the backend
+  — fixed to read `/proc/self/exe` (commit *resolve sibling backend from FE exe
+  dir*). Both need a longer `--boot-timeout-ms` because each backend autostart
+  (and each recover respawn) cold-compiles the project plugin + script on this
+  slow ARM box, well over the FE's default 60 s boot window.
 - **Precise plugin-quarantine crash attribution** wants a real dump on the
   faulting thread; the terminate-path minidump unwinds the fault frame (module
   blame is preserved via `xi::last_fault_addr()`, but the culprit cross-check is
