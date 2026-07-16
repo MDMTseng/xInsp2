@@ -148,11 +148,15 @@ next round has a record:
       `.dll`→`.so` mapping, so even a built `.so` wouldn't resolve. This is the
       single highest-value next step — it unblocks the whole pack-* / multi-plugin
       driver set.
-    - **Image codec unavailable in the backend build** (qa_cap_imgcodec,
-      qa_cap_imgcodec_autoload, qa_jpeg_preview): the imgcodec capability factory
-      returns null (`opencv=no turbojpeg=no ipp=no` at toolchain-probe time),
-      so `xi.jpeg.encode` / `xi.image.decode` aren't offered. Needs the codec
-      (OpenCV imgcodecs or turbojpeg) linked + probed into the backend on Linux.
+    - **Image codec is in the imgcodec PLUGIN, default-built with stb**
+      (qa_cap_imgcodec, qa_cap_imgcodec_autoload, qa_jpeg_preview): after the
+      2026-07 contraction the `xi.jpeg.encode` / `xi.image.decode` capability lives
+      in the imgcodec plugin, which the default Linux build compiles with the stb
+      fallback (`turbojpeg=no`), so these drivers still skip. **RESOLVED path:**
+      `apt install libturbojpeg0-dev`, then build plugins with
+      `-DXINSP2_HAS_TURBOJPEG=ON` — CMake find_path/find_library resolve it on
+      Linux and the imgcodec plugin then offers the capability (measured 3.2x vs
+      stb — see the ARM encode-acceleration note under "ARM & macOS deltas").
     - Misc: `tools/export_bundle.py` is Windows-only (qa_export_bundle);
       qa_local_auto's local auto image source delivers no frames; qa_cpu_affinity
       needs per-thread affinity (separate deferred item above); qa_func/qa_recover
@@ -300,6 +304,25 @@ Python SDK are already portable (minus the PowerShell screenshot e2e bits in the
   change: **Intel IPP is x86/x64 only — drop it on ARM** (the `XINSP2_HAS_IPP`
   path) and lean on OpenCV's own NEON-accelerated ops. libjpeg-turbo has NEON, so
   the turbojpeg path is fine. Make sure the OpenCV you link/ship is an ARM build.
+- **ARM encode acceleration — measured (Raspberry Pi 5, Cortex-A76).** There is
+  **NO hardware video/JPEG *encoder* on the Pi 5**: VideoCore VII dropped the
+  encode block the Pi 4 had (`vcgencmd codec_enabled` → H264/H265/JPG all
+  `disabled`); the only V4L2 codec device is `rpi-hevc-dec` (a *decoder*), plus the
+  PiSP ISP (`pispbe-*`, camera debayer/denoise/HDR — not an encoder). So the encode
+  hot path (preview egress) is CPU-bound. This is why the upstream `doc 36`
+  hardware-video-encode investigation is DEFERRED. Two SOFTWARE levers, both
+  benchmarked on this Pi 5:
+  - **libjpeg-turbo (NEON):** ~3.2x vs stb (231 vs 74 MP/s @ 1080p q85), identical
+    size/quality — build the imgcodec plugin with `-DXINSP2_HAS_TURBOJPEG=ON`.
+  - **frame-level multithread:** turbojpeg is per-`tjhandle` thread-safe and scales
+    **perfectly linearly to 3 threads (3.0x)** — identical ratio at 1080p and 4K,
+    so it is NOT memory-bandwidth-bound; the 4th thread only reaches ~84% (it
+    contends with the OS/dispatch for the 4th core). Sweet spot: **3 encode threads
+    (~500 MP/s aggregate), leaving one core for dispatch/serving**.
+  - **Combined ~7–9x** aggregate vs stb-single-core — the software substitute for
+    the missing HW encoder, and turnkey (a V3D GPU shader encoder is the only other
+    avenue and is unexplored/high-effort). The dispatch multi-lane model already
+    gives frame-level parallelism, so this falls out naturally.
 - **macOS.** `dlopen` loads `.dylib` natively (the loader layer is nearly free).
   Default compiler is clang (friendlier for the compile-driver abstraction than
   juggling MSVC). The cost centres are (a) **crash handling via Mach exception
