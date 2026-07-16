@@ -83,6 +83,21 @@ competes with (which is what nudges 480 toward the 612 ceiling, marginally).
 Backend CPU roughly **HALVED** at equal throughput (3.75 → ~1.8 cores at 5 MP@60).
 Per-frame producer profiling: encode 11.5→5.2 ms, emit 5.0→0.9 ms.
 
+**20 MP (5120×3840×3 = 59 MB/frame), after:**
+
+| rate            | MB/s | backend CPU (cores) | note |
+|-----------------|------|---------------------|------|
+| 20 MP@6         | 352  | 1.56 | sustained clean |
+| 20 MP@8         | 443  | 1.88 | near the writer ceiling, sustained |
+| 20 MP@30        | —    | —    | byte-cap drops the client (correct slow-consumer protection at an unsustainable 1770 MB/s demand) |
+
+The brief's baseline had 20 MP "~4–5 fps marginal"; post-wave it sustains 6 fps
+clean and ~8 fps at the ceiling — here the producer-copy relief DOES lift
+sustainable throughput, because at 59 MB/frame the mint+encode copies (~4× the
+5 MP cost) were contending hard with the writer and pushing it into the marginal /
+byte-cap-drop regime. (20 MP "before" was not separately re-measured on this box;
+the 5 MP before/after is the controlled delta.)
+
 ## Mint-then-fill: the honest caveat
 
 `mint_image_blob` eliminates copy 1 ONLY for a producer whose pixels come from an
