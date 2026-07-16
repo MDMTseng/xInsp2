@@ -137,31 +137,37 @@ inline std::vector<uint8_t> encode_frame(
 // ---------------------------------------------------------------------------
 
 // One entry to dump. For a scalar/str/bin/mp entry, `value` is its ALREADY-
-// CANONICAL msgpack bytes (one complete value) — the small-plane bytes as they
-// live in the pack arena (host side: xi::Pack::raw_at) OR re-encoded from the
-// door's typed accessors (plugin side: a temp xi::mp::Writer). Either way they
-// are byte-identical, because the arena and the Writer speak the same canonical
-// profile. For an image entry (tag == XI_PACK_TAG_IMAGE) `value` is empty and
-// the pixels are inlined from {w,h,c,px} as a `bin` (doc 07 D2 export rule).
+// CANONICAL msgpack bytes (one complete value) — the canonical walk's emit
+// (host side: xi::Pack::canonical_value; since ④A the slab stores each inline
+// payload AS its canonical value, so this is a verbatim splice of raw_at) OR
+// re-encoded from the door's typed accessors (plugin side: a temp
+// xi::mp::Writer). Either way they are byte-identical, because the walk and the
+// Writer are one canonical-encode truth. For a BLOB entry (tag ==
+// XI_PACK_TAG_BLOB, spec 30) `value` is empty and `blob`/`blob_len` point at the
+// ENTIRE self-describing buffer (magic + desc_len + descriptor + pad + payload),
+// emitted verbatim as one `bin` — memory == wire extends to blobs by
+// construction (the wire arm IS the in-memory buffer).
 struct V3Entry {
     std::string          key;
     uint8_t              tag = XI_PACK_TAG_MP;
-    std::vector<uint8_t> value;              // canonical bytes (non-image entries)
-    int32_t              w = 0, h = 0, c = 0;   // image descriptor (IMAGE only)
-    const uint8_t*       px = nullptr;          // image pixels (IMAGE only)
-    size_t               px_len = 0;
+    std::vector<uint8_t> value;              // canonical bytes (scalar/str/bin/mp)
+    const uint8_t*       blob = nullptr;     // whole self-describing buffer (BLOB only)
+    size_t               blob_len = 0;
 
     // --- WS-wire preview substitution (E2) — expose's SEND path ONLY ----------
-    // When `preview` is set on an IMAGE entry, the descriptor keeps its frozen
-    // {w,h,c,px} shape and IMAGE tag, but the raw pixels leave the wire (px is
-    // emitted as an EMPTY bin) and a nested `preview` map
-    //   { "w","h","c", "enc":"jpeg", "q":<int>, "data":<jpeg bin> }
-    // rides BESIDE px carrying the full-resolution compressed image. record_save
-    // NEVER sets this (its walk is xex1_pack_dump.hpp::encode_pack_v3, which
-    // leaves `preview` default-false), so its disk bytes stay byte-identical and
-    // the memory ≈ disk identity is preserved. The preview dims come from the
-    // SOURCE image (w/h/c) — the encoder reply carries none (contract fact 1).
+    // When `preview` is set on an xi/image BLOB entry, the verbatim buffer leaves
+    // the wire and the entry becomes a preview map instead:
+    //   { "preview":{ "w","h","c", "enc":"jpeg", "q":<int>, "data":<jpeg bin> } }
+    // — the SAME nested preview map the old IMAGE-tag path emitted (behavior-
+    // equivalent), just under the BLOB tag. The FE reads dims + renders the JPEG
+    // from it. record_save NEVER sets this (its walk is
+    // xex1_pack_dump.hpp::encode_pack_v3, which leaves `preview` default-false),
+    // so its disk bytes stay the verbatim buffer and memory ≈ disk is preserved.
+    // TODO(preview-egress): the jpeg-compress/dedup/renderer-registry egress
+    // design (CT) is not yet spec'd — this is the behavior-equivalent minimal
+    // migration of the old IMAGE-tag preview.
     bool                 preview = false;
+    int32_t              pv_w = 0, pv_h = 0, pv_c = 0;   // source dims (from the descriptor)
     int32_t              pv_q = 0;              // JPEG quality used
     const uint8_t*       pv_jpeg = nullptr;     // compressed bytes (must outlive encode)
     size_t               pv_len = 0;
@@ -189,6 +195,12 @@ inline std::vector<uint8_t> encode_frame_v3(
         const std::vector<V3Entry>& entries,
         bool has_channel = true, bool has_seq = true) {
     xi::mp::Writer w;
+    // Seed the 'XEX1' magic INTO the Writer's buffer so the whole frame is built
+    // in ONE buffer and returned by move — instead of building the msgpack body
+    // then copying it into a fresh {'X','E','X','1'} + body vector (perf/ws-lean:
+    // for a blob-dominant frame that prepend was a full 15–60 MB copy, HALF the
+    // encode cost). The bytes are identical: magic followed by the same msgpack.
+    w.raw_canonical(reinterpret_cast<const uint8_t*>("XEX1"), 4);
     w.map(2 + (has_channel ? 1u : 0u) + (has_seq ? 1u : 0u));
     w.key("v");       w.int_(3);
     if (has_channel) { w.key("channel"); w.str(channel); }
@@ -198,31 +210,28 @@ inline std::vector<uint8_t> encode_frame_v3(
         w.key(e.key);
         w.array(2);
         w.uint_(e.tag);   // the entry's XI_PACK_TAG_* (canonical int64, like every scalar)
-        if (e.tag == XI_PACK_TAG_IMAGE) {
+        if (e.tag == XI_PACK_TAG_BLOB) {
             if (e.preview) {
-                // E2 WS-wire preview: the IMAGE tag + descriptor shape are
-                // UNTOUCHED, but the raw pixels leave the wire (px -> empty bin)
-                // and a nested `preview` map carries the full-resolution JPEG
-                // BESIDE them. record_save never reaches this branch.
-                w.map(5);
-                w.key("w");  w.int_(e.w);
-                w.key("h");  w.int_(e.h);
-                w.key("c");  w.int_(e.c);
-                w.key("px"); w.bin(nullptr, 0);   // raw pixels dropped from the wire
+                // E2 WS-wire preview (xi/image blobs): the verbatim buffer leaves
+                // the wire; the entry becomes { preview{w,h,c,enc,q,data} } — the
+                // SAME nested preview map the old IMAGE path emitted, so the FE
+                // and consumers read identical output. record_save never reaches
+                // this branch.
+                // TODO(preview-egress): deferred egress design hooks in here.
+                w.map(1);
                 w.key("preview");
                 w.map(6);
-                w.key("w");    w.int_(e.w);
-                w.key("h");    w.int_(e.h);
-                w.key("c");    w.int_(e.c);
+                w.key("w");    w.int_(e.pv_w);
+                w.key("h");    w.int_(e.pv_h);
+                w.key("c");    w.int_(e.pv_c);
                 w.key("enc");  w.str("jpeg");
                 w.key("q");    w.int_(e.pv_q);
                 w.key("data"); w.bin(e.pv_jpeg, e.pv_len);
             } else {
-                w.map(4);
-                w.key("w");  w.int_(e.w);
-                w.key("h");  w.int_(e.h);
-                w.key("c");  w.int_(e.c);
-                w.key("px"); w.bin(e.px, e.px_len);
+                // memory == wire: the ENTIRE self-describing buffer verbatim as
+                // one canonical `bin` (magic + desc + pad + payload). A loader
+                // validates the head (blob_head_validate) and rebuilds.
+                w.bin(e.blob, e.blob_len);
             }
         } else {
             // Splice the entry's canonical value bytes onto the wire unchanged —
@@ -230,10 +239,7 @@ inline std::vector<uint8_t> encode_frame_v3(
             w.raw_canonical(e.value.data(), e.value.size());
         }
     }
-    std::vector<uint8_t> out = {'X', 'E', 'X', '1'};
-    const xi::mp::Bytes& body = w.bytes();
-    out.insert(out.end(), body.begin(), body.end());
-    return out;
+    return w.take();   // whole frame (magic + body) in one buffer — no prepend copy
 }
 
 }  // namespace xex1

@@ -11,11 +11,12 @@
 //      SAME ScriptPack surface t.pack() yields, including the generic
 //      for_each walk in insertion order.
 //   3. CANONICAL BYTES — the load-bearing gate-P2 check. For each inline
-//      entry, the pack's stored arena bytes (Pack::raw_at, reachable here
-//      because the test is host-role and can dereference the registry) are
-//      compared BYTE-FOR-BYTE against xi::mp::Writer encoding the same
-//      logical value — ints 0xd3, floats 0xcb, str32/bin32 headers, canonical
-//      bool, nested map/array in max-width profile.
+//      entry, the pack's canonical wire bytes (Pack::canonical_value — since
+//      ④A a verbatim splice of raw_at, reachable here because the test is
+//      host-role and can dereference the registry) are compared BYTE-FOR-BYTE
+//      against xi::mp::Writer encoding the same logical value — ints 0xd3,
+//      floats 0xcb, str32/bin32 headers, canonical bool, nested map/array in
+//      max-width profile.
 //   4. Canonical-profile enforcement on nested values — non-canonical (but
 //      valid) msgpack given to add_mp is RE-ENCODED to the canonical profile;
 //      malformed bytes and ext-bearing values are REFUSED (add_mp false, no
@@ -65,15 +66,18 @@ void* g_trigger_leader_fn_  = nullptr;
 
 static int pool_live() { return xi::ImagePool::instance().cumulative().live_now; }
 
-// Byte-compare a pack entry's stored arena bytes against an expected canonical
-// encoding. Host-role: dereference the registry to reach Pack::raw_at.
+// Byte-compare a pack entry's CANONICAL wire bytes against an expected
+// canonical encoding. Host-role: dereference the registry and emit through the
+// slab pack's canonical walk (Pack::canonical_value) — since ④A the inline
+// payload IS the canonical value, so this splices raw_at verbatim.
 static bool raw_equals(const xi::ScriptPack& sp, size_t idx,
                        const uint8_t* want, size_t want_n) {
     xi::Pack* p = xi::PackRegistry::instance().pack(sp.handle());
     if (!p || idx >= p->size()) return false;
-    auto got = p->raw_at(idx);
-    return got.size() == want_n &&
-           (want_n == 0 || std::memcmp(got.data(), want, want_n) == 0);
+    xi::mp::Writer w;
+    if (!p->canonical_value(idx, w)) return false;
+    return w.size() == want_n &&
+           (want_n == 0 || std::memcmp(w.bytes().data(), want, want_n) == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +146,9 @@ static void test_build_read_canonical() {
         CHECK(img && img->width == 4 && img->height == 4 && img->channels == 1);
         CHECK(img && img->pixels.size() == 16 && img->pixels[6] == 210);
         CHECK(sp.tag_of("seq") == XI_PACK_TAG_I64);
-        CHECK(sp.tag_of("gray") == XI_PACK_TAG_IMAGE);
+        // add_image stores an "xi/image" self-describing blob (spec 30); get_image
+        // above reads it back through the @1 adapter, but the raw tag is BLOB.
+        CHECK(sp.tag_of("gray") == XI_PACK_TAG_BLOB);
         CHECK(sp.tag_of("pass") == XI_PACK_TAG_BOOL);   // native bool entry
 
         // Bool reads back through the typed accessor (native tail).
@@ -172,7 +178,7 @@ static void test_build_read_canonical() {
         CHECK(tags[0] == XI_PACK_TAG_I64  && tags[1] == XI_PACK_TAG_F64 &&
               tags[2] == XI_PACK_TAG_STR  && tags[3] == XI_PACK_TAG_BIN &&
               tags[4] == XI_PACK_TAG_BOOL && tags[5] == XI_PACK_TAG_MP &&
-              tags[6] == XI_PACK_TAG_IMAGE);
+              tags[6] == XI_PACK_TAG_BLOB);   // "gray" is an xi/image blob
 
         // ---- (3) canonical bytes: stored arena bytes == xi::mp::Writer ----
         { xi::mp::Writer w; w.int_(42);
@@ -256,6 +262,123 @@ static void test_canonical_enforcement() {
 }
 
 // ---------------------------------------------------------------------------
+// (4b) xi.pack@4 on the script SDK (self-describing blobs, spec 30): add_blob /
+//      add_image_blob through ScriptPackBuilder, read back through
+//      ScriptPack::get_blob (descriptor + payload) — same fail-closed discipline
+//      as every typed accessor.
+// ---------------------------------------------------------------------------
+static void test_script_pack_v4() {
+    SECTION("script SDK v4: self-describing blob round-trip");
+    size_t base_frames = xi::PackRegistry::instance().live_frames();
+    int    base_pool   = pool_live();
+    {
+        xi::ScriptPackBuilder b;
+        CHECK(b.valid());
+        // A custom-typed blob via a hand-built descriptor {"t":"acme/roi","n":3}.
+        xi::mp::Writer dw;
+        dw.map(2); dw.key("t"); dw.str("acme/roi"); dw.key("n"); dw.int_(3);
+        const xi::mp::Bytes desc(dw.bytes());
+        const uint8_t payload[3] = { 7, 8, 9 };
+        CHECK(b.add_i64("seq", 1));
+        CHECK(b.add_blob("roi", desc.data(), (int32_t)desc.size(), payload, 3));
+        // An invalid (non-map) descriptor is refused, nothing added.
+        xi::mp::Writer bad; bad.int_(7);
+        CHECK(!b.add_blob("bad", bad.bytes().data(), (int32_t)bad.bytes().size(), payload, 3));
+        // The xi/image convenience with an explicit dtype (u16, 2x2x1 = 8 bytes).
+        uint16_t u16[4] = { 100, 200, 300, 400 };
+        CHECK(b.add_image_blob("depth", 2, 2, 1, "u16", u16, 8));
+
+        xi::ScriptPack sp = b.seal();
+        CHECK(sp.valid());
+        CHECK(sp.count() == 3);                              // seq, roi, depth (bad refused)
+
+        auto bl = sp.get_blob("roi");
+        CHECK(bl.has_value());
+        if (bl) {
+            CHECK(bl->payload.size() == 3 && bl->payload[2] == 9);
+            // The descriptor is a canonical map; decode "t" back.
+            xi::mp::Reader r(bl->desc.data(), bl->desc.size());
+            xi::mp::Element m;
+            CHECK(r.next(m) == xi::mp::Status::Ok && m.kind == xi::mp::Kind::Map && m.len == 2);
+        }
+        CHECK(!sp.get_blob("seq"));                          // fail-closed: not a blob
+        CHECK(!sp.get_bin("roi"));                           // a blob is not a plain bin
+        CHECK(sp.tag_of("roi") == XI_PACK_TAG_BLOB);
+        CHECK(sp.tag_of("depth") == XI_PACK_TAG_BLOB);
+
+        // The u16 image blob's payload round-trips through get_blob (the u8
+        // get_image adapter is not meaningful for a non-u8 image).
+        auto d = sp.get_blob("depth");
+        CHECK(d.has_value());
+        if (d) CHECK(d->payload.size() == 8 && std::memcmp(d->payload.data(), u16, 8) == 0);
+    }
+    CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
+    CHECK(pool_live() == base_pool);                          // blob buffers freed
+}
+
+// ---------------------------------------------------------------------------
+// (4b) mint-then-fill (perf/ws-lean): mint the pool buffer + fill IN PLACE,
+// equivalent to add_image_blob's copy path but with no intermediate buffer.
+// Proves: the filled bytes round-trip byte-identical, the descriptor is a valid
+// xi/image, and the mint/adopt/release refcount dance leaks nothing (the pool +
+// frame oracles balance).
+// ---------------------------------------------------------------------------
+static void test_mint_image_blob() {
+    SECTION("script SDK: mint_image_blob fills in place, byte-identical + balanced");
+    size_t base_frames = xi::PackRegistry::instance().live_frames();
+    int    base_pool   = pool_live();
+    {
+        const int W = 4, H = 3, C = 2;
+        const int64_t N = (int64_t)W * H * C;   // u8: 24 bytes
+        // Reference pixels a copying add would carry.
+        std::vector<uint8_t> ref((size_t)N);
+        for (int64_t i = 0; i < N; ++i) ref[(size_t)i] = (uint8_t)(i * 7 + 1);
+
+        xi::ScriptPackBuilder b;
+        CHECK(b.valid());
+        bool filled = false;
+        CHECK(b.mint_image_blob("img", W, H, C, "u8", N,
+              [&](uint8_t* p, int64_t n) {
+                  CHECK(n == N);
+                  for (int64_t i = 0; i < n; ++i) p[i] = (uint8_t)(i * 7 + 1);
+                  filled = true;
+              }));
+        CHECK(filled);
+        // A reference copy-path blob with the SAME pixels, to compare against.
+        CHECK(b.add_image_blob("ref", W, H, C, "u8", ref.data(), N));
+
+        xi::ScriptPack sp = b.seal();
+        CHECK(sp.valid());
+        CHECK(sp.count() == 2);
+        CHECK(sp.tag_of("img") == XI_PACK_TAG_BLOB);
+
+        // The minted blob's payload equals the fill AND the copy-path reference.
+        auto mint = sp.get_blob("img");
+        auto copy = sp.get_blob("ref");
+        CHECK(mint.has_value() && copy.has_value());
+        if (mint && copy) {
+            CHECK((int64_t)mint->payload.size() == N);
+            CHECK(std::memcmp(mint->payload.data(), ref.data(), (size_t)N) == 0);
+            // Mint and copy paths produce byte-identical self-describing buffers.
+            CHECK(mint->payload.size() == copy->payload.size() &&
+                  std::memcmp(mint->payload.data(), copy->payload.data(),
+                              mint->payload.size()) == 0);
+            CHECK(mint->desc.size() == copy->desc.size() &&
+                  std::memcmp(mint->desc.data(), copy->desc.data(),
+                              mint->desc.size()) == 0);
+        }
+        // Descriptor decodes as a map (the xi/image {t,w,h,c,dt}).
+        if (mint) {
+            xi::mp::Reader r(mint->desc.data(), mint->desc.size());
+            xi::mp::Element m;
+            CHECK(r.next(m) == xi::mp::Status::Ok && m.kind == xi::mp::Kind::Map);
+        }
+    }
+    CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
+    CHECK(pool_live() == base_pool);   // mint ref + adopt ref both accounted, nothing leaked
+}
+
+// ---------------------------------------------------------------------------
 // (5) Lifecycle: seal-consumes, abandon, refcount balance.
 // ---------------------------------------------------------------------------
 static void test_lifecycle() {
@@ -326,6 +449,8 @@ int main() {
 
     test_build_read_canonical();
     test_canonical_enforcement();
+    test_script_pack_v4();
+    test_mint_image_blob();
     test_lifecycle();
 
     if (g_failures == 0) {

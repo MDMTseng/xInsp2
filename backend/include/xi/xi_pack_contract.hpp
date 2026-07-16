@@ -143,7 +143,7 @@ inline std::string prov_append(std::string parent, std::string_view hop) {
 //
 // Returns a fresh sealed handle (refcount 1, CALLER owns) or XI_PACK_NULL on
 // a host without the pack plane. Cheap by design: four small str entries +
-// one i64 in a fresh arena — no image/bin payload is carried (a poisoned
+// one i64 in a fresh slab — no image/bin payload is carried (a poisoned
 // frame's payload is exactly what downstream must NOT consume).
 inline xi_pack_handle propagate_fault(const xi_pack_v1* fi, xi_pack_handle in,
                                       const char* hop) {
@@ -177,6 +177,12 @@ inline xi_pack_handle propagate_fault(const xi_pack_v1* fi, xi_pack_handle in,
         int32_t eof = 0;
         if (fi->get_bool(in, kEof, &eof) == 1) fi->builder_add_bool(b, kEof, eof);
     }
+    // Carry "$channel" (round-1 doc 28): a fault must keep the UI/sink routing
+    // lane its frame belonged to, else a short-circuited fault loses its
+    // display/record channel and stops routing to the verdict — the same reason
+    // "$seq"/"$stream" are copied. Convention: copy forward when present (str).
+    if (auto v = str_entry(fi, in, kChannel))
+        fi->builder_add_str(b, kChannel, v->data(), (int32_t)v->size());
     std::string chain = prov_append(prov_parent(fi, in), hop_sv);
     fi->builder_add_str(b, kSrc, hop_sv.data(), (int32_t)hop_sv.size());
     fi->builder_add_str(b, kProv, chain.data(), (int32_t)chain.size());

@@ -144,12 +144,13 @@ if(XINSP2_SANITIZE)
     endforeach()
 endif()
 
-# OpenCV is mandatory (image operators); IPP / turbojpeg stay opt-in
-# accelerators for the JPEG-encode path only.
+# OpenCV is mandatory (image operators); IPP stays opt-in.
 option(XINSP2_HAS_IPP        "Link Intel IPP for JPEG encode acceleration" OFF)
-option(XINSP2_HAS_TURBOJPEG  "Link libjpeg-turbo for direct SIMD JPEG encode" OFF)
-# Default install root: C:\libjpeg-turbo64 (Windows) or /opt/libjpeg-turbo (Linux)
-set(TURBOJPEG_ROOT "C:/libjpeg-turbo64" CACHE PATH "libjpeg-turbo install root")
+# NOTE: libjpeg-turbo is NOT a backend concern. Post-CUT the JPEG encoder lives in
+# the imgcodec LIB PLUGIN, so turbojpeg detection/linking is owned entirely by
+# plugins/CMakeLists.txt (and the JPEG bench moved there too). The shared header
+# xi/xi_jpeg.hpp still has an #ifdef XINSP2_HAS_TURBOJPEG turbo path, but ONLY the
+# plugin ever defines it — the backend build never sets or looks for turbojpeg.
 
 # yyjson — the JSON DOM + serializer that replaces cJSON (v0.12.0, pinned).
 # Mutable doc for build, immutable doc for fast read; pool allocator for
@@ -181,7 +182,7 @@ target_include_directories(xi_fe INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../fe/inc
 enable_testing()
 
 # Resolve optional encoder libs ONCE so every target that needs them
-# (xinsp_backend, xinsp_runner, bench_jpeg) shares the same lookup.
+# (xinsp_backend, xinsp_runner) shares the same lookup.
 # OpenCV: mandatory. Auto-detect typical Windows install locations if
 # OpenCV_DIR isn't already set.
 if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
@@ -196,8 +197,17 @@ if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
     endforeach()
 endif()
 find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
-target_include_directories(xi_core INTERFACE ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(xi_core INTERFACE ${OpenCV_LIBS})
+# OpenCV is an OPT-IN dependency, NOT part of xi_core (completes OQ-9 for the
+# backend, matching plugins/CMakeLists.txt which already decoupled it). The core
+# runtime does NO image processing — the umbrella xi.hpp / xi_image.hpp / xi_jpeg.hpp
+# are OpenCV-free — so xinsp_backend/xinsp_runner must not link opencv_world.dll.
+# cv:: lives only behind the opt-in <xi/xi_cv.hpp>; the few targets that include it
+# (or otherwise call cv::) link the `xi_opencv` INTERFACE target below. (Runtime-
+# compiled user scripts/plugins get OpenCV via the toolchain's own compile flags —
+# opencv_dir — not via this target, so they are unaffected.)
+add_library(xi_opencv INTERFACE)
+target_include_directories(xi_opencv INTERFACE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(xi_opencv INTERFACE ${OpenCV_LIBS})
 if(XINSP2_HAS_IPP)
     # Default install layout: C:/Intel/ipp/<ver>/{include,lib,bin}
     # Override with -DIPP_ROOT=... or env IPP_ROOT.
@@ -220,15 +230,6 @@ if(XINSP2_HAS_IPP)
     find_library(IPP_CC_LIB   ippcc   HINTS ${IPP_ROOT}/lib)
     if(NOT (IPP_INCLUDE_DIR AND IPP_CORE_LIB))
         message(WARNING "XINSP2_HAS_IPP=ON but IPP not found at ${IPP_ROOT}; set -DIPP_ROOT=...")
-    endif()
-endif()
-if(XINSP2_HAS_TURBOJPEG)
-    find_path(TURBOJPEG_INCLUDE_DIR turbojpeg.h
-        HINTS ${TURBOJPEG_ROOT}/include /usr/include /usr/local/include)
-    find_library(TURBOJPEG_LIB NAMES turbojpeg
-        HINTS ${TURBOJPEG_ROOT}/lib /usr/lib /usr/local/lib)
-    if(NOT (TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB))
-        message(WARNING "XINSP2_HAS_TURBOJPEG=ON but libjpeg-turbo not found at ${TURBOJPEG_ROOT}")
     endif()
 endif()
 
@@ -643,6 +644,19 @@ if(NOT MSVC)
 endif()
 add_test(NAME xi_pack COMMAND test_xi_pack)
 
+# Package E — the xi/image blob CONSUMER sugar (spec 30): xi::read_image_blob
+# (CV-free descriptor reader) + the cv::Mat wrappers over it. Links xi_core for
+# the OpenCV INTERFACE (the cv:: mapping under test lives in <xi/xi_cv.hpp>).
+add_executable(test_image_blob tests/test_image_blob.cpp)
+# Uses the opt-in cv:: bridge (<xi/xi_cv.hpp>: as_cv_read/as_cv_write_blob), so it
+# links OpenCV explicitly via xi_opencv (xi_core is OpenCV-free).
+target_link_libraries(test_image_blob PRIVATE xi_core xi_opencv)
+target_compile_definitions(test_image_blob PRIVATE XINSP2_HAS_OPENCV=1)
+if(NOT MSVC)
+    target_link_libraries(test_image_blob PRIVATE pthread)
+endif()
+add_test(NAME image_blob COMMAND test_image_blob)
+
 # Ingress canonicalizer (xi_ingress.hpp) — the domain edge (task 1c). The ONLY
 # path from foreign/untrusted msgpack bytes to a Pack entry: structural
 # validation + profile normalization (NaN flatten, dup/non-string-key reject) +
@@ -688,6 +702,16 @@ add_test(NAME owner_cancel_stress COMMAND test_owner_cancel_stress)
 add_test(NAME owner_cancel_stress_heavy COMMAND test_owner_cancel_stress)
 set_tests_properties(owner_cancel_stress_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
+
+# pixpool size-class buffer recycler (perf/imagepool-sizeclass): magazine
+# hits on same-size churn, 64B alignment, zero-fill-on-recycle contract,
+# byte-budget eviction, cross-thread buffer migration, > 64 MiB direct lane.
+add_executable(test_image_pool_recycle tests/test_image_pool_recycle.cpp)
+target_link_libraries(test_image_pool_recycle PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_image_pool_recycle PRIVATE pthread)
+endif()
+add_test(NAME image_pool_recycle COMMAND test_image_pool_recycle)
 
 add_executable(test_image_pool_stress tests/test_image_pool_stress.cpp)
 target_link_libraries(test_image_pool_stress PRIVATE xi_core)
@@ -784,6 +808,17 @@ add_test(NAME hot_reload_swap COMMAND test_hot_reload_swap
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_hot_reload_swap>)
 add_test(NAME hot_reload_swap_heavy COMMAND test_hot_reload_swap
          WORKING_DIRECTORY $<TARGET_FILE_DIR:test_hot_reload_swap>)
+# SHARED RESOURCE: both run the SAME binary in the SAME working dir, and the
+# writer cycles FIXED-NAME on-disk copies (reload_probe_copy_<i>.dll) in
+# fs::current_path() there. Run concurrently under ctest -j they collide on those
+# files — on Windows one process's copy_file(overwrite_existing) hits a sharing
+# violation against a copy the other still has mapped (LoadLibrary), which
+# stalls/aborts the swap (observed hang under -j8, 2026-07-13 note). RESOURCE_LOCK
+# serialises the two against EACH OTHER while leaving both free to run in parallel
+# with unrelated tests — preferred over RUN_SERIAL, which would pin them against
+# the whole suite and cost more wall-time.
+set_tests_properties(hot_reload_swap hot_reload_swap_heavy PROPERTIES
+    RESOURCE_LOCK "reload_probe_copy_dir")
 set_tests_properties(hot_reload_swap_heavy PROPERTIES
     LABELS "stress" ENVIRONMENT "XINSP2_STRESS_SCALE=8" TIMEOUT 300)
 
@@ -843,8 +878,11 @@ function(_xinsp_perf_gate test_name bench_target baseline_name)
     # committed baseline's environment fingerprint does not match this machine
     # (different hardware / JPEG backend / build, or a pre-fingerprint baseline)
     # — surface that as a ctest SKIP, not a silent pass.
+    # RUN_SERIAL: a live baseline compare measures REAL latency — sharing the
+    # machine with parallel tests turns scheduler contention into false
+    # regressions (the 2us p50 metrics have one-quantum headroom).
     set_tests_properties(${test_name} PROPERTIES
-        LABELS "perf" TIMEOUT 300
+        LABELS "perf" TIMEOUT 300 RUN_SERIAL TRUE
         SKIP_REGULAR_EXPRESSION "perf_gate: SKIP")
 endfunction()
 
@@ -1010,25 +1048,9 @@ target_compile_definitions(xinsp_fe PRIVATE
 # line-safe case is handled by a comms plugin's own sidecar process, not the
 # core/FE. See docs/internals/comms-sidecar.md.)
 
-# JPEG-encoder benchmark — quantifies the IPP/OpenCV/stb dispatch.
-# Not run as a test (no pass/fail); invoke manually for numbers.
-add_executable(bench_jpeg tests/bench_jpeg.cpp src/stb_impl.cpp)
-target_link_libraries(bench_jpeg PRIVATE xi_core)
-target_compile_definitions(bench_jpeg PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
-if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
-    target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_IPP=1)
-    target_include_directories(bench_jpeg PRIVATE ${IPP_INCLUDE_DIR})
-    target_link_libraries(bench_jpeg PRIVATE
-        ${IPP_CORE_LIB} ${IPP_I_LIB} ${IPP_CV_LIB} ${IPP_CC_LIB})
-endif()
-target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_OPENCV=1)
-# OpenCV include + libs come via xi_core's INTERFACE.
-if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
-    target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_TURBOJPEG=1)
-    target_include_directories(bench_jpeg PRIVATE ${TURBOJPEG_INCLUDE_DIR})
-    target_link_libraries(bench_jpeg PRIVATE ${TURBOJPEG_LIB})
-endif()
-_xinsp_perf_gate(perf_jpeg bench_jpeg jpeg.txt)
+# bench_jpeg / perf_jpeg MOVED to plugins/CMakeLists.txt — the JPEG encoder (and its
+# turbojpeg dependency) lives in the imgcodec plugin post-CUT, so its benchmark lives
+# there too. The backend build no longer references turbojpeg at all.
 
 # [ABI v12 THE CUT: bench_record + the perf_record gate removed — the bench
 #  measured the Record in-process handoff (Record::share_out / adopt_shared,
@@ -1070,6 +1092,45 @@ if(NOT MSVC)
 endif()
 _xinsp_perf_gate(perf_pack bench_pack pack.txt)
 
+# --- bench_ws_blast (experiment exp/ws-zerocopy-send): raw-frame WS egress
+# ceiling probe. Measures the zero-copy owned send path (send_binary_owned /
+# xi.emit@2) vs the copying send_binary path against a tight in-process raw drain,
+# answering "raw 5MP/20MP max fps". Manual experiment — BUILT but NOT perf-gated
+# and NOT added to ctest (it opens a loopback socket + spawns a drain client; it
+# is a bench, not a regression test). Reproduces the doc-32 blast probe whose
+# harness was scratch. Run by hand: ./bench_ws_blast
+add_executable(bench_ws_blast tests/bench_ws_blast.cpp)
+target_link_libraries(bench_ws_blast PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(bench_ws_blast PRIVATE pthread)
+endif()
+
+# --- proto/pack-c PROTOTYPE (design C, backend/tests/proto/xi_pack_c.hpp — an
+# experiment record kept OUT of include/; see docs/new_gen/29-pack-c-prototype-record.md)
+# Experiment-only additions: a correctness net in the regular suite, and a
+# head-to-head bench (current Pack vs design C) that is runnable but NOT
+# perf-gated — no baseline, no _xinsp_perf_gate; its numbers feed the
+# migrate/don't-migrate judgment, not CI.
+add_executable(test_pack_c tests/test_pack_c.cpp)
+target_link_libraries(test_pack_c PRIVATE xi_core)
+if(NOT MSVC)
+    target_link_libraries(test_pack_c PRIVATE pthread)
+endif()
+add_test(NAME pack_c COMMAND test_pack_c)
+
+# bench_pack_c (removed, self-describing blob plane, package D): this microbench
+# was a HEAD-TO-HEAD of the real xi::Pack's image/tensor ops against the design-C
+# prototype (tests/proto/xi_pack_c.hpp) — it existed only to feed the
+# migrate/don't-migrate judgment for the slab container. That judgment is made
+# (the slab shipped; spec 30 supersedes it), the current-Pack side was written
+# entirely around now-deleted verbs (add_image/add_tensor/get_image/get_tensor/
+# typed blobs), and its opponent proto is retired to tests/proto/ as an inert
+# experiment record (its own unit test is `test_pack_c`/`pack_c` above). With one
+# side gone and the other re-cut required from scratch, the comparison is moot;
+# absolute build/read/hop/free numbers for the current pack live in bench_pack.
+# Deleted rather than re-cut (doc 28 finding ⑥ contraction). The proto header +
+# test_pack_c stay as the deliberate experiment record.
+
 if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_IPP=1)
     target_include_directories(xinsp_backend PRIVATE ${IPP_INCLUDE_DIR})
@@ -1077,8 +1138,10 @@ if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
         ${IPP_CORE_LIB} ${IPP_I_LIB} ${IPP_CV_LIB} ${IPP_CC_LIB})
 endif()
 
-target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_OPENCV=1)
-# OpenCV include + libs come via xi_core's INTERFACE.
+# xinsp_backend is OpenCV-FREE: the core runtime does no image processing, so it
+# does not link opencv_world.dll. (opencv_world.dll is still DEPLOYED next to the
+# exe by _xinsp_deploy_dlls — but for the runtime-compiled user vision scripts that
+# load into this process, NOT for the backend's own code.)
 
 # [v12 THE CUT — the xinsp_backend target no longer links libjpeg-turbo: the
 #  in-core JPEG encoder was evicted, encode is capability-only (xi.jpeg.encode).
@@ -1098,13 +1161,13 @@ function(_xinsp_deploy_dlls tgt)
             break()
         endif()
     endforeach()
-    if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_LIB)
-        get_filename_component(_tj_dir "${TURBOJPEG_LIB}" DIRECTORY)
-        get_filename_component(_tj_root "${_tj_dir}" DIRECTORY)
-        if(EXISTS "${_tj_root}/bin/turbojpeg.dll")
-            list(APPEND _dll_files "${_tj_root}/bin/turbojpeg.dll")
-        endif()
-    endif()
+    # turbojpeg.dll is NOT deployed here. Post-CUT (v12) the backend exe does not
+    # link libjpeg-turbo — only the imgcodec LIB PLUGIN does. The plugin owns and
+    # deploys its own turbojpeg.dll (next to xi-imgcodec.dll, see
+    # plugins/CMakeLists.txt), and the loader resolves it from there because
+    # load_plugin_dll_ loads with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (searches the
+    # plugin DLL's own directory for its dependencies). The backend build no longer
+    # references turbojpeg at all (the JPEG bench moved to the plugins tree too).
     if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR)
         get_filename_component(_ipp_root "${IPP_INCLUDE_DIR}" DIRECTORY)
         if(EXISTS "${_ipp_root}/bin")
@@ -1341,7 +1404,7 @@ endif()
 # builds it on demand, so normal builds aren't slowed but `ctest` catches the
 # regression (compile-only — no link, guards header self-sufficiency directly).
 add_library(script_selfcheck OBJECT EXCLUDE_FROM_ALL tests/script_selfcheck.cpp)
-target_link_libraries(script_selfcheck PRIVATE xi_core)   # SDK + vendor + OpenCV include dirs
+target_link_libraries(script_selfcheck PRIVATE xi_core xi_opencv)   # models user SDK code: pulls xi_cv.hpp via xi_script_support.hpp → needs OpenCV
 if(MSVC)
     target_compile_options(script_selfcheck PRIVATE /openmp)   # xi_script_support.hpp uses <omp.h>
 else()
@@ -1382,7 +1445,7 @@ foreach(_tier easy medium expert)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_in})
 endforeach()
 add_library(template_selfcheck OBJECT EXCLUDE_FROM_ALL ${_tpl_rendered})
-target_link_libraries(template_selfcheck PRIVATE xi_core)   # SDK + yyjson + OpenCV include dirs
+target_link_libraries(template_selfcheck PRIVATE xi_core xi_opencv)   # force-includes xi_plugin_support.hpp (→ xi_cv.hpp) — needs OpenCV
 if(MSVC)
     # Mirror the plugin compile path: /EHa (host runs plugins under SEH
     # translation) + force-include the plugin support umbrella (xinsp2_plugin.cmake).
@@ -1422,7 +1485,7 @@ list(FILTER _examples_scripts EXCLUDE REGEX "/demo_async\\.cpp$")
 #  demo tree; their filter + include lines are removed.]
 if(_examples_scripts)
     add_library(examples_gate OBJECT EXCLUDE_FROM_ALL ${_examples_scripts})
-    target_link_libraries(examples_gate PRIVATE xi_core)   # SDK + vendor + OpenCV include dirs
+    target_link_libraries(examples_gate PRIVATE xi_core xi_opencv)   # example scripts use cv:: (PCH <opencv2/opencv.hpp>) — needs OpenCV
     if(MSVC)
         # Mirror the JIT's script compile (xi_script_compiler.hpp): force-include
         # the OpenCV umbrella FIRST (via the PCH below, which CMake injects as a

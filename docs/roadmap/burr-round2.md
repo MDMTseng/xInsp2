@@ -79,3 +79,8 @@
   low urgency (not on the per-frame path).
 - **CLI-args ×3 + sink-holder ×4 consolidation** — cosmetic; batch with the
   next touch of those files.
+
+> Reconciled 2026-07-12 (round 3): all nine items above remain deferred —
+> none were in round 3's scope. See
+> [burr-round3.md](burr-round3.md) for that round's record + its own
+> deferred list.

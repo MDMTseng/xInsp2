@@ -409,8 +409,11 @@ void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter);
 // gate — see set_inst_state in service_dispatch.cpp); gating them would make an
 // on_fault=refuse quarantine unrecoverable through its own documented remedy.
 // get_def is also ungated: reading the faulted config is how an operator repairs
-// it. prepare() IS gated (its success does not set Active, so it can't lift a
-// quarantine — nothing is lost by refusing it).
+// it. prepare() is ALSO ungated (round-3 S1): it was briefly gated on the theory
+// that its success never sets Active so it "can't lift a quarantine", but for a
+// STAGED plugin the documented on_fault=refuse remedy is prepare_instance →
+// commit_group — gating prepare dead-ended that recovery at step 1. prepare is
+// config-plane staging, exactly the surface quarantine must leave open.
 //
 // The on-fault POLICY (apply_on_fault_policy_) runs unconditionally on a caught
 // crash/throw when the instance is a C-ABI adapter: every previously-complete
@@ -422,7 +425,7 @@ struct PluginCallResult {
     enum class Kind { Ok, Quarantined, Crashed, Threw };
     Kind        kind = Kind::Ok;
     unsigned    seh_code = 0;   // Kind::Crashed only
-    std::string what;           // e.what() text (Crashed / Threw; empty for catch(...))
+    std::string what;           // e.what() text (Crashed / Threw; "non-std exception" for catch(...))
     bool ok() const { return kind == Kind::Ok; }
 };
 
@@ -470,7 +473,50 @@ PluginCallResult guarded_plugin_call(const char* name,
         note_instance_crash_(name, why);
         if (adapter) apply_on_fault_policy_(name, adapter);
         r.kind = K::Threw;
+        // Round-3 S5: leave a real message — converted call sites append r.what
+        // to user-facing errors ("xxx error: " + r.what) and an empty tail read
+        // as a truncated reply.
+        r.what = "non-std exception";
         return r;
+    }
+}
+
+// ---- guarded_script_call: the script-DLL sibling of guarded_plugin_call -----
+// Root cause (round-3 W2 #6): the compile_and_load swap-time replay sites
+// (set_instance_def replay, kv migrate-restore, kv plain-restore) hand-copied
+// the same try{enter script DLL}catch(seh){stderr + recover_seh_stack_or_die}
+// catch(std){stderr} ritual three times, with the crash/threw log lines one
+// edit away from drifting. A script-DLL call has NO adapter, quarantine gate,
+// or on-fault policy — guarded_plugin_call's item-14 machinery genuinely does
+// not apply — so this is a deliberately smaller helper beside it, not a
+// parametrization of it.
+//   `label`       — the human stderr identity; may carry per-item detail
+//                   (e.g. "replay set_instance_def 'blobs'").
+//   `recover_ctx` — the recover_seh_stack_or_die context (the site class,
+//                   without per-item detail — matches the pre-helper strings).
+//   `fn`          — returns the thunk's int rc; nonzero maps to Refused. A
+//                   caller that ignores the rc (set_instance_def's
+//                   best-effort replay) just treats Refused like Ok.
+// Deliberately NO catch(...): the blocks this replaces let a non-std throw
+// propagate to the dispatch shell's top-level guard, and that stays true.
+enum class ScriptCallOutcome { Ok, Refused, Crashed, Threw };
+
+template <class Fn>
+inline ScriptCallOutcome guarded_script_call(const std::string& label,
+                                             const char* recover_ctx, Fn&& fn) {
+    try {
+        return fn() == 0 ? ScriptCallOutcome::Ok : ScriptCallOutcome::Refused;
+    } catch (const seh_exception& e) {
+        std::fprintf(stderr, "[xinsp2] %s crashed: 0x%08X (%s) — skipped\n",
+                     label.c_str(), e.code, e.what());
+        // Swallowed on a surviving thread — restore the stack guard page after
+        // an overflow (or hard-exit for respawn) BEFORE returning toward deep code.
+        xi::recover_seh_stack_or_die(e.code, recover_ctx);
+        return ScriptCallOutcome::Crashed;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[xinsp2] %s threw: %s — skipped\n",
+                     label.c_str(), e.what());
+        return ScriptCallOutcome::Threw;
     }
 }
 

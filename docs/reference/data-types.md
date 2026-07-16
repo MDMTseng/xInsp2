@@ -1,17 +1,28 @@
 # Data types at the boundary — Pack, Image, typed I/O
 
 What crosses between a script and a plugin: a **Pack** (a sealed, keyed, typed
-container — canonical msgpack) carrying **Images** (refcounted pixel handles).
+container) carrying **Images** (refcounted pixel handles).
 The mechanics live in [`../internals/pack-plane.md`](../internals/pack-plane.md)
 (how a pack crosses zero-copy); this is the contract you author against.
 
 ## The Pack (`xi.pack@1`)
 
 The universal container since THE CUT (ABI v12): a sealed, immutable set of
-`key → typed entry` pairs. One encoding everywhere — the same bytes in memory,
-on the WS wire (XEX1-v3) and on disk (`.xex1`). Entry types: `i64`, `f64`,
-`bool`, `str`, `bin`, `image`, and `mp` (one nested canonical-msgpack subtree
-for arrays/maps — nesting is msgpack's job, not flattened keys).
+`key → typed entry` pairs. One *external* encoding everywhere — the same
+canonical msgpack bytes on the WS wire (XEX1-v3) and on disk (`.xex1`). In
+memory (pack-v3 slab) an inline entry stores that same canonical value, so
+memory == wire and a serialization boundary is a copy, not a re-encode; a typed
+read skips the fixed-width header at a known offset
+([`../internals/pack-plane.md`](../internals/pack-plane.md)). Entry types:
+`i64`, `f64`, `bool`, `str`, `bin`, and `mp` (one nested canonical-msgpack
+subtree for arrays/maps — nesting is msgpack's job, not flattened keys), plus
+the one non-scalar kind — a self-describing **`blob`** (`'XBD1'` head + a
+canonical-msgpack descriptor + a 64B-aligned payload). An **`image`** is just a
+convention `xi/image` blob (descriptor `{"t":"xi/image","w","h","c","dt"}`),
+reached through the `image`-named convention helpers or the blob door. Blob door
+access is the `xi.pack@4` interface; the earlier per-type `tensor`/`type_id`
+surface (`xi.pack@3`) was **retired by the blob cut** (spec 30) and, like the
+never-existed `@2`, answers NULL forever.
 
 Each side of the boundary has its own facade over the same door:
 

@@ -1,15 +1,14 @@
-// test_xi_pack.cpp — unit tests for the v3 keyed-buffer Pack container
-// (xi_pack.hpp). Covers the pack lifecycle (produce -> seal -> borrow ->
-// drop), O(1) offset-index correctness at scale, immutability/seal semantics,
-// pooled-handle balance verified against ImagePool's own stats, mixed
-// small/large packs, and the drop-on-crash story (destruction == the release
-// path, with no double-release across a move).
-//
-// It also exercises the _keys.h-style typed accessor layer from doc 02 against
-// Pack, proving the contract layer carries over to the v3 representation
-// unchanged.
+// test_xi_pack.cpp — unit tests for the keyed-buffer Pack container
+// (xi_pack.hpp), SELF-DESCRIBING BLOB plane (spec 30). Covers the pack
+// lifecycle (produce -> seal -> borrow -> drop), O(1) offset-index correctness
+// at scale, immutability/seal semantics, pooled-handle balance verified against
+// ImagePool's own stats, mixed small/large packs, the drop-on-crash story, and
+// the blob surface: mint/adopt/get round-trip with 64B payload alignment, the
+// blob_head_validate rejection matrix, type_of, image-as-convention, the uint32
+// seal guard, and sort_idx recycle sanity.
 
 #include "xi/xi_pack.hpp"
+#include "xi/xi_image_blob_mint.hpp"   // xi::mint_image (convention-layer producer)
 #include "xi/xi_image_pool.hpp"
 
 #include <array>
@@ -27,24 +26,19 @@ static int g_fail = 0;
 using xi::Pack;
 using xi::PackBuilder;
 using xi::PackTag;
+using xi::BufRef;
+using xi::BlobView;
 
-// Live pool-handle count — the balance oracle. cumulative().live_now mirrors
-// stats().handle_count via a cheap atomic; we use it to assert every pooled
-// buffer a pack mints is released exactly once when the pack drops.
 static int pool_live() { return xi::ImagePool::instance().cumulative().live_now; }
 
 // ------------------------------------------------------------------
-// The _keys.h-style contract layer (doc 02), applied to Pack. Key names are
-// defined ONCE; a builder and an extractor compile from them. This is the same
-// discipline v2 uses over the Record — proving it carries over to the v3 pack
-// representation with only the underlying accessor calls changing.
+// The _keys.h-style contract layer (doc 02), applied to Pack.
 // ------------------------------------------------------------------
 namespace blob_keys {
 inline constexpr std::string_view kThreshold = "threshold";
 inline constexpr std::string_view kBlobCount = "blob_count";
 inline constexpr std::string_view kMeanArea  = "mean_area";
 inline constexpr std::string_view kLabel     = "label";
-inline constexpr std::string_view kMask       = "mask";      // image entry
 } // namespace blob_keys
 
 struct BlobResult {
@@ -54,20 +48,18 @@ struct BlobResult {
     std::string label;
 };
 
-// builder: BlobResult -> pack entries (compiles down to Pack add_*).
 static void build_blob(PackBuilder& b, const BlobResult& r) {
     b.add_i64(blob_keys::kThreshold, r.threshold);
     b.add_i64(blob_keys::kBlobCount, r.blob_count);
     b.add_f64(blob_keys::kMeanArea,  r.mean_area);
     b.add_str(blob_keys::kLabel,     r.label);
 }
-// extractor: pack -> BlobResult (fails loud on a missing required key).
 static bool extract_blob(const Pack& f, BlobResult& out) {
     auto th = f.get_i64(blob_keys::kThreshold);
     auto bc = f.get_i64(blob_keys::kBlobCount);
     auto ma = f.get_f64(blob_keys::kMeanArea);
     auto lb = f.get_str(blob_keys::kLabel);
-    if (!th || !bc || !ma || !lb) return false;   // required-key absence = fail-fast
+    if (!th || !bc || !ma || !lb) return false;
     out.threshold = *th; out.blob_count = *bc; out.mean_area = *ma;
     out.label = std::string(*lb);
     return true;
@@ -94,23 +86,15 @@ static void test_lifecycle_and_contract_layer() {
     CHECK(out.mean_area == 42.5, "mean_area round-trips");
     CHECK(out.label == "pass", "label round-trips");
 
-    // doc-flavored get<i64>/get<f64> template aliases
     CHECK(f.get<int64_t>(blob_keys::kThreshold).value() == 128, "get<i64>");
     CHECK(f.get<double>(blob_keys::kMeanArea).value() == 42.5, "get<f64>");
 
-    // Wrong-type read returns nullopt, never a garbage reinterpretation.
     CHECK(!f.get_str(blob_keys::kThreshold).has_value(), "type-mismatch read is nullopt");
     CHECK(!f.get_i64("missing").has_value(), "missing-key read is nullopt");
 }
 
 // ------------------------------------------------------------------
-// Bool entry (pack-plane hardening — the json_source bool-entry gap): builder ->
-// canonical 0xc2/0xc3 arena byte -> tagged walk -> typed reads on the dynamic
-// (string-keyed) path, fail-closed against i64 in both directions (an i64 0/1
-// is NOT a bool).
-// ------------------------------------------------------------------
 static void test_bool_entry() {
-    // Dynamic (string-keyed) path.
     PackBuilder b;
     b.add_bool("pass", true);
     b.add_bool("fail", false);
@@ -120,16 +104,16 @@ static void test_bool_entry() {
     CHECK(f.get_bool("pass").value() == true,  "get_bool true round-trips");
     CHECK(f.get_bool("fail").value() == false, "get_bool false round-trips");
     CHECK(f.get<bool>("pass").value() == true, "get<bool> alias");
-    // Fail-closed BOTH directions: no silent bool<->i64 coercion.
     CHECK(!f.get_i64("pass").has_value(), "bool entry refuses an i64 read");
     CHECK(!f.get_bool("one").has_value(), "i64 entry refuses a bool read");
-    // The stored small-plane bytes ARE the canonical msgpack bool — the single
-    // 0xc2/0xc3 byte a generic dumper splices to the wire verbatim (memory==wire).
-    CHECK(f.raw_at(0).size() == 1 && f.raw_at(0)[0] == 0xc3, "canonical true byte 0xc3");
-    CHECK(f.raw_at(1).size() == 1 && f.raw_at(1)[0] == 0xc2, "canonical false byte 0xc2");
-    int bools = 0;
-    f.for_each([&](std::string_view, PackTag t) { if (t == PackTag::Bool) ++bools; });
-    CHECK(bools == 2, "generic walk reports the Bool tag");
+    CHECK(f.raw_at(0).size() == 1 && f.raw_at(0)[0] == 0xc3, "raw true byte 0xc3");
+    CHECK(f.raw_at(1).size() == 1 && f.raw_at(1)[0] == 0xc2, "raw false byte 0xc2");
+    {
+        xi::mp::Writer w;
+        CHECK(f.canonical_value(0, w) && f.canonical_value(1, w), "canonical_value emits bools");
+        CHECK(w.size() == 2 && w.bytes()[0] == 0xc3 && w.bytes()[1] == 0xc2,
+              "canonical walk emits 0xc3/0xc2 (== raw_at, wire parity)");
+    }
 }
 
 // Insertion-ordered walk + O(1) index correctness at scale.
@@ -141,7 +125,6 @@ static void test_offset_index_at_scale() {
     Pack f = b.seal();
     CHECK(f.size() == size_t(N), "all N entries present");
 
-    // Random-ish access: every key resolves to its exact value in O(1).
     bool all = true;
     for (int i = N - 1; i >= 0; --i) {
         auto v = f.get_i64("k" + std::to_string(i));
@@ -149,7 +132,6 @@ static void test_offset_index_at_scale() {
     }
     CHECK(all, "every key resolves to its value after many inserts");
 
-    // Insertion order preserved by the walk.
     int seen = 0; bool ordered = true;
     f.for_each([&](std::string_view key, PackTag) {
         if (key != std::string("k" + std::to_string(seen))) ordered = false;
@@ -158,39 +140,243 @@ static void test_offset_index_at_scale() {
     CHECK(seen == N && ordered, "for_each visits every entry in insertion order");
 }
 
-// Seal / immutability semantics observable in a release build (asserts are
-// compiled out under NDEBUG, so we test the enforceable state, not the assert).
 static void test_seal_semantics() {
     PackBuilder b;
     b.add_i64("x", 1);
     CHECK(!b.sealed(), "not sealed before seal()");
     Pack f = b.seal();
     CHECK(b.sealed(), "sealed flag set — further add_* would assert");
-    // Pack exposes only const reads: there is no compile-time path to mutate a
-    // sealed pack (enforced by the type — no non-const accessors exist).
     CHECK(f.get_i64("x").value() == 1, "sealed pack still reads");
 }
 
-// Pooled-handle balance: images/large bins mint pool buffers that must be
-// released exactly once at pack drop. Verified against ImagePool's live count.
+// Duplicate-key behaviour: first-inserted wins on lookup; both entries survive
+// the walk (unchanged from the arena/slab container).
+static void test_duplicate_key() {
+    PackBuilder b;
+    b.add_i64("dup", 111);
+    b.add_str("dup", "second");
+    b.add_i64("other", 9);
+    Pack f = b.seal();
+    CHECK(f.size() == 3, "both duplicate entries present");
+    // find() returns the FIRST-inserted entry, so tag_of/get resolve to the i64.
+    CHECK(f.tag_of("dup") == PackTag::I64, "duplicate lookup resolves first-inserted (i64)");
+    CHECK(f.get_i64("dup").value() == 111, "first-inserted value wins");
+    CHECK(!f.get_str("dup").has_value(), "second-inserted (str) is shadowed on lookup");
+    // The walk still visits BOTH in insertion order.
+    int dups = 0;
+    f.for_each([&](std::string_view k, PackTag) { if (k == "dup") ++dups; });
+    CHECK(dups == 2, "insertion walk visits both duplicate entries");
+}
+
+// ------------------------------------------------------------------
+// Blob head round-trip: mint -> fill payload in place -> adopt -> get.
+// Verifies the descriptor view round-trips AND the payload is 64B-aligned.
+// ------------------------------------------------------------------
+static void test_blob_roundtrip() {
+    const int base = pool_live();
+    // A custom convention type with arbitrary keys the core never interprets.
+    xi::mp::Bytes desc = xi::BlobDesc("acme/profile3d")
+        .i64("rows", 3).i64("cols", 5).str("units", "mm").build();
+    const int64_t payload_len = 3 * 5 * sizeof(double);
+    {
+        BufRef ref = xi::mint_blob(desc.data(), int32_t(desc.size()), payload_len);
+        CHECK((bool)ref, "mint_blob succeeds for a canonical descriptor");
+        CHECK(ref.payload_len() == payload_len, "BufRef exposes the payload length");
+        CHECK((reinterpret_cast<uintptr_t>(ref.payload()) & 63u) == 0,
+              "minted payload region is 64B-aligned");
+        // Fill the payload in place (the zero-copy producer pattern).
+        auto* px = reinterpret_cast<double*>(ref.payload());
+        for (int i = 0; i < 15; ++i) px[i] = double(i) + 0.25;
+
+        PackBuilder b;
+        b.add_i64("seq", 1);
+        CHECK(b.adopt_blob("surf", ref), "adopt_blob succeeds");
+        Pack f = b.seal();
+        // The BufRef still holds its mint ref here; it drops at scope exit so the
+        // pack co-owns during its life. Handle count = 1 (the blob).
+        CHECK(f.handle_count() == 1, "pack owns 1 pool handle (the blob)");
+        CHECK(f.tag_of("surf") == PackTag::Blob, "blob entry stores the Blob tag");
+
+        auto bv = f.get_blob("surf");
+        CHECK(bv.has_value(), "get_blob returns a view");
+        CHECK(bv && bv->desc.size() == desc.size() &&
+              std::memcmp(bv->desc.data(), desc.data(), desc.size()) == 0,
+              "descriptor view round-trips byte-identically");
+        CHECK(bv && bv->payload_len == payload_len, "payload_len round-trips");
+        CHECK(bv && (reinterpret_cast<uintptr_t>(bv->payload.data()) & 63u) == 0,
+              "get_blob payload span is 64B-aligned");
+        bool px_ok = bv.has_value();
+        if (bv) {
+            auto* rp = reinterpret_cast<const double*>(bv->payload.data());
+            for (int i = 0; i < 15; ++i) px_ok = px_ok && (rp[i] == double(i) + 0.25);
+        }
+        CHECK(px_ok, "payload bytes round-trip through the pool buffer");
+
+        // Convention sugar: type_of reads "t"; the core never interprets others.
+        auto t = f.type_of("surf");
+        CHECK(t && *t == "acme/profile3d", "type_of reads the convention type string");
+        CHECK(!f.type_of("seq").has_value(), "type_of on a non-blob is nullopt");
+        // Descriptor field reads (the SDK accessor path).
+        CHECK(Pack::desc_find_i64(bv->desc, "rows").value_or(-1) == 3, "desc_find_i64 rows");
+        CHECK(Pack::desc_find_str(bv->desc, "units").value_or("") == "mm", "desc_find_str units");
+    }
+    // BufRef dropped + pack dropped -> pool balanced.
+    CHECK(pool_live() == base, "blob pool handle released when pack + BufRef drop");
+}
+
+// add_blob (mint + copy convenience): the caller has the payload in hand.
+static void test_add_blob_copy() {
+    const int base = pool_live();
+    xi::mp::Bytes desc = xi::BlobDesc("acme/scan").i64("n", 4).build();
+    uint32_t payload[4] = {10, 20, 30, 40};
+    {
+        PackBuilder b;
+        CHECK(b.add_blob("s", desc.data(), int32_t(desc.size()),
+                         payload, sizeof payload),
+              "add_blob copies payload into a fresh buffer");
+        Pack f = b.seal();
+        CHECK(f.handle_count() == 1, "add_blob pack owns 1 handle");
+        auto bv = f.get_blob("s");
+        CHECK(bv && bv->payload_len == int64_t(sizeof payload), "add_blob payload_len");
+        bool ok = bv.has_value();
+        if (bv) {
+            auto* p = reinterpret_cast<const uint32_t*>(bv->payload.data());
+            for (int i = 0; i < 4; ++i) ok = ok && (p[i] == payload[i]);
+        }
+        CHECK(ok, "add_blob payload bytes intact");
+    }
+    CHECK(pool_live() == base, "add_blob pack balances the pool on drop");
+}
+
+// image-as-convention: mint_image builds {"t":"xi/image","w","h","c","dt"} and
+// mints a blob; the descriptor carries the shape, the payload the pixels.
+static void test_image_as_convention() {
+    const int base = pool_live();
+    {
+        BufRef ref = xi::mint_image(8, 4, 3, "u8");
+        CHECK((bool)ref, "mint_image succeeds");
+        CHECK(ref.payload_len() == 8 * 4 * 3, "mint_image sizes payload w*h*c*elem");
+        std::memset(ref.payload(), 0x5A, size_t(ref.payload_len()));
+
+        PackBuilder b;
+        CHECK(b.adopt_blob("frame", ref), "adopt image blob");
+        Pack f = b.seal();
+        auto bv = f.get_blob("frame");
+        CHECK(bv.has_value(), "image blob reads back");
+        CHECK(f.type_of("frame").value_or("") == "xi/image", "image blob type is xi/image");
+        CHECK(bv && Pack::desc_find_i64(bv->desc, "w").value_or(-1) == 8, "w from descriptor");
+        CHECK(bv && Pack::desc_find_i64(bv->desc, "h").value_or(-1) == 4, "h from descriptor");
+        CHECK(bv && Pack::desc_find_i64(bv->desc, "c").value_or(-1) == 3, "c from descriptor");
+        CHECK(bv && Pack::desc_find_str(bv->desc, "dt").value_or("") == "u8", "dt from descriptor");
+        CHECK(bv && bv->payload.size() == 8u * 4u * 3u && bv->payload[0] == 0x5A,
+              "image pixels ride the blob payload");
+    }
+    CHECK(pool_live() == base, "image blob balances the pool on drop");
+    // Unknown dtype -> empty BufRef (fail-closed).
+    CHECK(!(bool)xi::mint_image(4, 4, 1, "float128"), "mint_image rejects unknown dtype");
+}
+
+// ------------------------------------------------------------------
+// blob_head_validate rejection matrix (spec 30 fail-loud seam).
+// ------------------------------------------------------------------
+static void test_blob_head_validate_matrix() {
+    // A known-good buffer: 'XBD1' + desc_len + canonical map + pad + payload.
+    xi::mp::Bytes desc = xi::BlobDesc("t/x").i64("a", 1).build();
+    const uint32_t dlen = uint32_t(desc.size());
+    const uint64_t poff = xi::blob_payload_off(dlen);
+    const size_t total = size_t(poff) + 16;
+    std::vector<uint8_t> good(total, 0);
+    xi::pack_mp_detail::put_u32_le(good.data() + 0, xi::kBlobMagic);
+    xi::pack_mp_detail::put_u32_le(good.data() + 4, dlen);
+    std::memcpy(good.data() + 8, desc.data(), dlen);
+    CHECK(xi::blob_head_validate(good.data(), good.size()), "valid blob head accepts");
+
+    // 1) bad magic.
+    {
+        std::vector<uint8_t> bad = good;
+        xi::pack_mp_detail::put_u32_le(bad.data() + 0, 0xDEADBEEFu);
+        CHECK(!xi::blob_head_validate(bad.data(), bad.size()), "bad magic rejected");
+    }
+    // 2) desc_len overrun (declares more descriptor than the buffer holds).
+    {
+        std::vector<uint8_t> bad = good;
+        xi::pack_mp_detail::put_u32_le(bad.data() + 4, uint32_t(bad.size()));  // 8+dlen > len
+        CHECK(!xi::blob_head_validate(bad.data(), bad.size()), "desc_len overrun rejected");
+    }
+    // 3) non-canonical descriptor (corrupt the map bytes so canonicalize fails /
+    //    the top element is no longer a well-formed map).
+    {
+        std::vector<uint8_t> bad = good;
+        bad[8] = 0xc1;  // 0xc1 is the msgpack never-used / reserved byte
+        CHECK(!xi::blob_head_validate(bad.data(), bad.size()), "non-canonical descriptor rejected");
+    }
+    // 3b) a descriptor that is a valid msgpack SCALAR, not a map, is rejected.
+    {
+        xi::mp::Writer w; w.int_(7);
+        xi::mp::Bytes sdesc = w.take();
+        const uint32_t sl = uint32_t(sdesc.size());
+        const size_t st = size_t(xi::blob_payload_off(sl)) + 8;
+        std::vector<uint8_t> bad(st, 0);
+        xi::pack_mp_detail::put_u32_le(bad.data() + 0, xi::kBlobMagic);
+        xi::pack_mp_detail::put_u32_le(bad.data() + 4, sl);
+        std::memcpy(bad.data() + 8, sdesc.data(), sl);
+        CHECK(!xi::blob_head_validate(bad.data(), bad.size()), "non-map descriptor rejected");
+    }
+    // 4) payload_off > len (buffer truncated below the aligned payload offset).
+    {
+        // Truncate to just past the descriptor but before payload_off.
+        size_t trunc = size_t(8 + dlen);
+        CHECK(trunc < poff, "descriptor ends before the aligned payload offset");
+        CHECK(!xi::blob_head_validate(good.data(), trunc), "payload_off > len rejected");
+    }
+    // 5) too short to even hold the head.
+    CHECK(!xi::blob_head_validate(good.data(), 4), "sub-head length rejected");
+    CHECK(!xi::blob_head_validate(nullptr, 0), "null base rejected");
+
+    // 6) B②: a non-zero byte in the pad [8+desc_len, payload_off) is a forged /
+    //    non-canonical buffer. memory==wire ships the pad VERBATIM, so admitting
+    //    it would break the byte-lossless round-trip claim for hostile input —
+    //    the seam must reject, not silently re-zero on rebuild.
+    {
+        CHECK(size_t(8 + dlen) < poff, "shape leaves a pad byte to poison");
+        std::vector<uint8_t> bad = good;
+        bad[8 + dlen] = 0x01;                       // first pad byte
+        CHECK(!xi::blob_head_validate(bad.data(), bad.size()), "non-zero pad rejected (B2)");
+        bad[8 + dlen] = 0x00;
+        bad[size_t(poff) - 1] = 0xFF;               // last pad byte
+        CHECK(!xi::blob_head_validate(bad.data(), bad.size()), "non-zero pad tail rejected (B2)");
+    }
+
+    // adopt_blob refuses a non-blob pooled buffer (fail-loud through the seam).
+    {
+        std::vector<uint8_t> junk(128, 0xAB);
+        xi_image_handle h = xi::pack_pool::alloc_bytes(junk.data(), junk.size());
+        CHECK(h != XI_IMAGE_NULL, "minted a junk (non-blob) pool buffer");
+        PackBuilder b;
+        CHECK(!b.adopt_blob("bad", h), "adopt_blob refuses a buffer with no valid head");
+        // b abandons -> nothing adopted; release our own mint ref.
+        xi::pack_pool::release(h);
+    }
+}
+
+// alloc_bytes null-src hard reject (zeroinit verdict).
+static void test_alloc_bytes_null_reject() {
+    CHECK(xi::pack_pool::alloc_bytes(nullptr, 128) == XI_IMAGE_NULL,
+          "alloc_bytes hard-rejects a null src (copy path with nothing to copy)");
+    CHECK(xi::pack_pool::alloc_bytes(nullptr, 0) == XI_IMAGE_NULL,
+          "alloc_bytes rejects zero length");
+}
+
 static void test_pooled_handle_balance() {
     const int base = pool_live();
-    std::vector<uint8_t> px(64 * 48 * 3, 0xAB);
     std::vector<uint8_t> big(8192, 0xCD);   // >= threshold -> pooled bin
     {
         PackBuilder b;
         b.add_i64("n", 1);
-        b.add_image("mask", 64, 48, 3, px.data());
         b.add_bin("payload", big.data(), big.size());
         Pack f = b.seal();
-        CHECK(f.handle_count() == 2, "pack owns 2 pool handles (image + big bin)");
-        CHECK(pool_live() == base + 2, "pool live count rose by 2 while pack alive");
-
-        auto iv = f.get_image("mask");
-        CHECK(iv && iv->width == 64 && iv->height == 48 && iv->channels == 3,
-              "image descriptor round-trips");
-        CHECK(iv && iv->pixels.size() == px.size() && iv->pixels[0] == 0xAB,
-              "image pixels are a zero-copy view of the pool buffer");
+        CHECK(f.handle_count() == 1, "pack owns 1 pool handle (big bin)");
+        CHECK(pool_live() == base + 1, "pool live count rose by 1 while pack alive");
         auto bin = f.get_bin("payload");
         CHECK(bin && bin->size() == big.size() && (*bin)[0] == 0xCD,
               "large bin resolves through the pool");
@@ -198,22 +384,21 @@ static void test_pooled_handle_balance() {
     CHECK(pool_live() == base, "all pooled handles released when pack dropped");
 }
 
-// Mixed small/large pack: every storage class in one pack, all readable,
-// handles balanced.
 static void test_mixed_frame() {
     const int base = pool_live();
-    std::vector<uint8_t> px(16 * 16, 7);
     uint8_t small_bin[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    xi::mp::Bytes desc = xi::BlobDesc("acme/x").i64("k", 2).build();
+    uint16_t blobpx[4] = {1, 2, 3, 4};
     {
         PackBuilder b;
         b.add_i64("i", -99);
         b.add_f64("f", 3.14159);
         b.add_str("s", "hello pack");
         b.add_bin("tiny", small_bin, sizeof small_bin);   // inline, no handle
-        b.add_image("img", 16, 16, 1, px.data());         // pooled
+        b.add_blob("blob", desc.data(), int32_t(desc.size()), blobpx, sizeof blobpx);
         Pack f = b.seal();
 
-        CHECK(f.handle_count() == 1, "only the image is pooled; tiny bin is inline");
+        CHECK(f.handle_count() == 1, "only the blob is pooled; tiny bin is inline");
         CHECK(pool_live() == base + 1, "one pool handle live");
         CHECK(f.get_i64("i").value() == -99, "negative i64 round-trips");
         CHECK(f.get_f64("f").value() == 3.14159, "f64 round-trips");
@@ -221,55 +406,134 @@ static void test_mixed_frame() {
         auto tb = f.get_bin("tiny");
         CHECK(tb && tb->size() == 8 && (*tb)[7] == 8, "inline tiny bin round-trips");
         CHECK(f.tag_of("tiny") == PackTag::Bin, "tiny bin tagged Bin regardless of storage");
-        auto iv = f.get_image("img");
-        CHECK(iv && iv->pixels.size() == 256 && iv->pixels[0] == 7, "image reads");
+        auto bv = f.get_blob("blob");
+        CHECK(bv && bv->payload.size() == sizeof blobpx, "blob payload reads");
     }
     CHECK(pool_live() == base, "mixed pack balances the pool on drop");
 }
 
-// Drop-on-crash story: destruction IS the release path. A move transfers sole
-// ownership; the moved-from pack releases nothing (no double-release), and
-// exactly one release happens when the live owner dies.
 static void test_crash_drop_no_double_release() {
     const int base = pool_live();
-    std::vector<uint8_t> px(32 * 32 * 3, 0x11);
+    xi::mp::Bytes desc = xi::BlobDesc("acme/x").build();
     {
         Pack moved_to;   // empty
         {
             PackBuilder b;
-            b.add_image("mask", 32, 32, 3, px.data());
+            b.add_blob("m", desc.data(), int32_t(desc.size()), nullptr, 0);
             Pack f = b.seal();
             CHECK(pool_live() == base + 1, "one handle live after seal");
             moved_to = std::move(f);
-            // f is now moved-from: its scope exit must NOT release the handle.
         }
         CHECK(pool_live() == base + 1, "moved-from pack drop released nothing");
         CHECK(moved_to.handle_count() == 1, "ownership transferred to the move target");
     }
     CHECK(pool_live() == base, "the single live owner released exactly once");
 
-    // A builder abandoned without seal() (a producer that faults mid-build)
-    // still releases the handles it minted — no leak on the error path.
+    // A builder abandoned without seal() still releases what it adopted.
     {
         const int b2 = pool_live();
         {
             PackBuilder b;
-            b.add_image("x", 8, 8, 3, nullptr);
-            CHECK(pool_live() == b2 + 1, "unsealed builder minted a handle");
-            // no seal() — builder destructs here
+            BufRef ref = xi::mint_blob(desc.data(), int32_t(desc.size()), 0);
+            b.adopt_blob("x", ref);       // pack co-owns (rc2)
+            CHECK(pool_live() == b2 + 1, "unsealed builder adopted a handle");
+            // ref drops (rc1); builder destructs without seal -> releases its ref.
         }
-        CHECK(pool_live() == b2, "unsealed builder released its handle on drop");
+        CHECK(pool_live() == b2, "unsealed builder + BufRef released the handle on drop");
     }
 }
 
-// F1 regression: a pooled-class bin (>= kPackLargeThreshold) added while the
-// ImagePool is EXHAUSTED must never resolve to a {nullptr, n>0} span. Pre-fix,
-// add_bin/set_bin stored {pooled=true, handle=0, inl_len=n} on a failed pool
-// alloc and get_bin did view(0).first(n) -> span{nullptr, n} (UB / OOB read).
-// The fix falls back to INLINE arena storage (producer honesty) and guards
-// get_bin's pooled branch (consumer safety). Covers the dynamic Pack path.
+// ------------------------------------------------------------------
+// Canonical-walk parity for inline scalar/str/bin/mp entries + Blob refusal.
+// ------------------------------------------------------------------
+static void test_canonical_walk_parity() {
+    const double nan_payload = []{
+        uint64_t bits = 0xfff800000000beefull;
+        double d; std::memcpy(&d, &bits, sizeof d); return d;
+    }();
+    uint8_t bin[3] = {9, 8, 7};
+    xi::mp::Writer nested;
+    nested.map(1); nested.key("x"); nested.int_(4);
+
+    PackBuilder b;
+    b.add_i64("i", -12345);
+    b.add_f64("f", 2.75);
+    b.add_f64("nan", nan_payload);
+    b.add_bool("t", true);
+    b.add_str("s", "walkme");
+    b.add_bin("bin", bin, sizeof bin);
+    b.add_mp("m", nested.bytes().data(), nested.bytes().size());
+    Pack f = b.seal();
+
+    xi::mp::Writer want;
+    want.int_(-12345);
+    want.float_(2.75);
+    want.float_(nan_payload);
+    want.boolean(true);
+    want.str("walkme");
+    want.bin(bin, sizeof bin);
+    want.raw_canonical(nested.bytes().data(), nested.bytes().size());
+
+    xi::mp::Writer got;
+    for (size_t i = 0; i < f.size(); ++i)
+        CHECK(f.canonical_value(i, got), "canonical_value succeeds for every inline tag");
+    CHECK(got.size() == want.size() &&
+          std::memcmp(got.bytes().data(), want.bytes().data(), want.size()) == 0,
+          "canonical walk is byte-identical to xi::mp::Writer (incl. NaN flatten)");
+
+    uint64_t bits; double d = f.get_f64("nan").value();
+    std::memcpy(&bits, &d, sizeof bits);
+    CHECK(bits == 0x7ff8000000000000ull, "stored NaN is the canonical quiet pattern");
+
+    // A Blob entry has no single canonical scalar value — the walk refuses it.
+    xi::mp::Bytes desc = xi::BlobDesc("acme/x").build();
+    PackBuilder b2;
+    b2.add_blob("blob", desc.data(), int32_t(desc.size()), nullptr, 0);
+    Pack f2 = b2.seal();
+    xi::mp::Writer w2;
+    CHECK(!f2.canonical_value(0, w2) && w2.size() == 0,
+          "canonical_value refuses a blob entry, writer untouched");
+}
+
+// ------------------------------------------------------------------
+// The entry-view walk: insertion order, typed detail, extern descriptor.
+// ------------------------------------------------------------------
+static void test_for_each_entry_walk() {
+    const int base = pool_live();
+    xi::mp::Bytes desc = xi::BlobDesc("acme/x").i64("n", 1).build();
+    uint8_t px[12] = {0};
+    {
+        PackBuilder b;
+        b.add_i64("first", 1);
+        b.add_blob("blob", desc.data(), int32_t(desc.size()), px, sizeof px);
+        b.add_str("last", "z");
+        Pack f = b.seal();
+        size_t seen = 0;
+        f.for_each_entry([&](const Pack::EntryView& e) {
+            if (e.ordinal == 0) {
+                CHECK(e.key == "first" && e.tag == PackTag::I64 && !e.external,
+                      "entry 0 is the inline i64");
+                CHECK(e.raw.size() == 9 && e.raw[0] == 0xd3,
+                      "raw i64 is the canonical int64 value (0xd3 + 8, ④A wire==memory)");
+            } else if (e.ordinal == 1) {
+                CHECK(e.key == "blob" && e.tag == PackTag::Blob && e.external,
+                      "entry 1 is the extern blob");
+                CHECK(e.ext_len == xi::blob_payload_off(uint32_t(desc.size())) + sizeof px,
+                      "extern len is the whole self-describing buffer");
+                CHECK(e.handle != XI_IMAGE_NULL, "extern view exposes the pool handle");
+            } else {
+                CHECK(e.key == "last" && e.tag == PackTag::Str, "entry 2 is the str");
+            }
+            ++seen;
+        });
+        CHECK(seen == 3, "for_each_entry visits every entry in insertion order");
+    }
+    CHECK(pool_live() == base, "walked pack balances the pool on drop");
+}
+
+// F1 regression: a pooled-class bin added while the ImagePool is EXHAUSTED must
+// never resolve to a {nullptr, n>0} span.
 static void test_bin_pool_exhaustion_no_null_span() {
-    // Drain the pool with minimal 1x1x1 handles so the next alloc_bytes fails.
     std::vector<xi_image_handle> hog;
     hog.reserve(70000);
     for (;;) {
@@ -281,42 +545,206 @@ static void test_bin_pool_exhaustion_no_null_span() {
     CHECK(xi::ImagePool::instance().create(1, 1, 1) == XI_IMAGE_NULL,
           "pool is genuinely exhausted");
 
-    const size_t N = 8192;   // >= kPackLargeThreshold (4096) -> pooled class
+    const size_t N = 8192;
     std::vector<uint8_t> payload(N);
     for (size_t i = 0; i < N; ++i) payload[i] = uint8_t(i * 7 + 3);
 
-    // --- Dynamic Pack::add_bin under exhaustion ---
     {
         PackBuilder b;
         b.add_bin("payload", payload.data(), N);
         Pack f = b.seal();
         auto v = f.get_bin("payload");
-        // Never a poisoned present-but-null span.
         bool poisoned = v.has_value() && v->data() == nullptr && v->size() > 0;
         CHECK(!poisoned, "Pack::get_bin never returns {nullptr, n>0} on pool exhaustion");
         if (v) {
             CHECK(v->data() != nullptr && v->size() == N,
-                  "add_bin fell back to inline; data rode intact (dynamic)");
+                  "add_bin fell back to inline; data rode intact");
             bool ok = v->data() != nullptr && v->size() == N;
             for (size_t i = 0; ok && i < N; ++i) ok = ((*v)[i] == uint8_t(i * 7 + 3));
-            CHECK(ok, "dynamic bin bytes intact under exhaustion");
+            CHECK(ok, "inline bin bytes intact under exhaustion");
         }
     }
 
-    // Restore the pool for subsequent tests.
     for (xi_image_handle h : hog) xi::ImagePool::instance().release(h);
+}
+
+// ------------------------------------------------------------------
+// sort_idx recycle sanity (③): a stream of builds on one thread reusing the
+// recycled scratch (incl. its sort_idx) must still produce correctly-sorted,
+// correctly-ordered packs. Build many packs back-to-back with varied key counts
+// and assert lookup + insertion order every time.
+// ------------------------------------------------------------------
+static void test_sort_idx_recycle() {
+    bool all_ok = true;
+    for (int round = 0; round < 200 && all_ok; ++round) {
+        const int n = 1 + (round % 37);   // varied entry counts exercise resize()
+        PackBuilder b;
+        for (int i = 0; i < n; ++i)
+            b.add_i64("key" + std::to_string((i * 7 + round) % n) + "_" + std::to_string(i),
+                      int64_t(round) * 1000 + i);
+        Pack f = b.seal();
+        if (f.size() != size_t(n)) { all_ok = false; break; }
+        // Insertion order preserved despite recycled sort_idx.
+        int seen = 0; bool ordered = true;
+        f.for_each([&](std::string_view key, PackTag) {
+            std::string want = "key" + std::to_string((seen * 7 + round) % n) +
+                               "_" + std::to_string(seen);
+            if (key != want) ordered = false;
+            ++seen;
+        });
+        if (!ordered || seen != n) { all_ok = false; break; }
+        // Every key still resolves (hash-sorted directory rebuilt correctly).
+        for (int i = 0; i < n; ++i) {
+            std::string k = "key" + std::to_string((i * 7 + round) % n) +
+                            "_" + std::to_string(i);
+            auto v = f.get_i64(k);
+            if (!v || *v != int64_t(round) * 1000 + i) { all_ok = false; break; }
+        }
+    }
+    CHECK(all_ok, "recycled scratch/sort_idx builds correct packs across 200 rounds");
+}
+
+// ------------------------------------------------------------------
+// Padded sub-layout inside a blob payload (xi_blob_head.hpp): the
+// [head][pad][bulk] convenience. Layout math + overflow rejects + a REAL minted
+// payload (bulk 64B-aligned, pad deterministically zero). Convention-neutral —
+// the helper writes no key; the caller records data_off in its own descriptor.
+// ------------------------------------------------------------------
+static void test_padded_layout() {
+    // ---- pure layout math ----
+    auto L0 = xi::padded_layout(0, 100);           // empty head
+    CHECK(L0 && L0->data_off == 0 && L0->total == 100, "head_len 0: bulk at offset 0");
+    auto L64 = xi::padded_layout(64, 100);         // head exactly one block
+    CHECK(L64 && L64->data_off == 64 && L64->total == 164, "head_len 64: bulk at 64");
+    auto L10 = xi::padded_layout(10, 100);         // non-multiple head
+    CHECK(L10 && L10->data_off == 64 && L10->total == 164, "head_len 10: padded up to 64");
+    auto L65 = xi::padded_layout(65, 8);           // just over one block
+    CHECK(L65 && L65->data_off == 128 && L65->total == 136, "head_len 65: padded up to 128");
+    auto La = xi::padded_layout(10, 4, 16);        // custom power-of-two align
+    CHECK(La && La->data_off == 16 && La->total == 20, "align=16: bulk at 16");
+
+    // ---- fail-loud rejection ----
+    CHECK(!xi::padded_layout(10, 10, 0).has_value(),  "align 0 rejected");
+    CHECK(!xi::padded_layout(10, 10, 24).has_value(), "non-power-of-two align rejected");
+    CHECK(!xi::padded_layout((size_t)0x100000000ull, 0).has_value(),
+          "head whose aligned offset overflows uint32_t rejected");
+    CHECK(!xi::padded_layout(1, SIZE_MAX - 10).has_value(),
+          "total that overflows size_t rejected");
+
+    // ---- a REAL minted payload: bulk 64B-aligned, pad deterministically zero ----
+    const int base = pool_live();
+    {
+        std::vector<uint8_t> head = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};   // 10-byte head
+        const size_t bulk_len = 200;
+        auto L = xi::padded_layout(head.size(), bulk_len);
+        CHECK(L && L->data_off == 64 && L->total == 64 + bulk_len, "layout for the minted case");
+        if (L) {
+            xi::mp::Bytes desc =
+                xi::BlobDesc("acme/scan").i64("data_off", L->data_off).build();
+            xi::BufRef ref = xi::mint_blob(desc.data(), int32_t(desc.size()), int64_t(L->total));
+            CHECK((bool)ref, "mint_blob for the padded payload");
+            if (ref) {
+                uint8_t* payload = ref.payload();
+                CHECK((reinterpret_cast<uintptr_t>(payload) % 64) == 0,
+                      "minted payload base is 64B-aligned");
+                uint8_t* bulk = xi::place_padded_head(payload, head, *L);
+                CHECK((reinterpret_cast<uintptr_t>(bulk) % 64) == 0, "bulk region is 64B-aligned");
+                CHECK(bulk == payload + 64, "bulk lands at data_off");
+                bool head_ok = true;
+                for (size_t i = 0; i < head.size(); ++i) head_ok = head_ok && payload[i] == head[i];
+                CHECK(head_ok, "head bytes copied verbatim");
+                bool pad_zero = true;
+                for (size_t i = head.size(); i < 64; ++i) pad_zero = pad_zero && payload[i] == 0;
+                CHECK(pad_zero, "pad gap is deterministically zero");
+                std::memset(bulk, 0xAB, bulk_len);
+                CHECK(bulk[0] == 0xAB && bulk[bulk_len - 1] == 0xAB, "bulk region is writable");
+            }
+        }
+    }
+    CHECK(pool_live() == base, "padded-layout mint released on BufRef drop");
+}
+
+// ------------------------------------------------------------------
+// The two KEPT zero regions survive a DIRTY recycle (CT ruling 2026-07: the pool
+// no longer zero-fills, so a recycled buffer carries stale bytes — but the blob
+// head pad and place_padded_head's pad gap are zeroed EXPLICITLY for wire
+// determinism, and must be zero even when the underlying buffer is dirty).
+// ------------------------------------------------------------------
+static void test_kept_zero_regions_over_dirty_recycle() {
+    const int base = pool_live();
+    const int N = 4096;   // a size class; the recycler is per-thread LIFO by class
+
+    // Dirty a buffer of size class N and release it back into the magazine. With
+    // zero-fill gone, a later same-size mint recycles these 0xFF bytes verbatim.
+    {
+        xi_image_handle dirty = xi::ImagePool::instance().create(N, 1, 1);
+        CHECK(dirty != XI_IMAGE_NULL, "dirty scratch minted");
+        if (dirty) {
+            std::memset(xi::ImagePool::instance().data(dirty), 0xFF, N);
+            xi::ImagePool::instance().release(dirty);   // -> magazine, still 0xFF
+        }
+    }
+
+    // (1) mint_blob's HEAD PAD [8+desc_len, payload_off) is zero over the recycle.
+    {
+        xi::mp::Bytes desc = xi::BlobDesc("acme/scan").i64("n", 1).build();
+        const uint32_t desc_len = uint32_t(desc.size());
+        const uint64_t payload_off = xi::blob_payload_off(desc_len);
+        CHECK(payload_off > uint64_t(8) + desc_len, "there is a real pad gap to check");
+        const int64_t payload_len = int64_t(N) - int64_t(payload_off);   // total == N (same class)
+        xi::BufRef ref = xi::mint_blob(desc.data(), int32_t(desc_len), payload_len);
+        CHECK((bool)ref, "mint_blob over a dirty recycled buffer");
+        if (ref) {
+            const uint8_t* buf_base = ref.payload() - payload_off;   // back to the buffer base
+            bool pad_zero = true;
+            for (uint64_t i = uint64_t(8) + desc_len; i < payload_off; ++i)
+                pad_zero = pad_zero && buf_base[i] == 0;
+            CHECK(pad_zero, "blob head pad is zero even over a dirty recycled buffer");
+        }
+    }
+
+    // (2) place_padded_head's pad gap is zero even when we deliberately dirty it.
+    {
+        auto L = xi::padded_layout(10, 100);            // head 10 -> data_off 64
+        xi::mp::Bytes desc = xi::BlobDesc("acme/scan").build();
+        xi::BufRef ref = xi::mint_blob(desc.data(), int32_t(desc.size()), int64_t(L->total));
+        CHECK(L && (bool)ref, "mint for the padded-layout dirty check");
+        if (L && ref) {
+            uint8_t* payload = ref.payload();
+            std::memset(payload, 0xAB, size_t(L->total));   // dirty the whole payload
+            std::vector<uint8_t> head = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+            uint8_t* bulk = xi::place_padded_head(payload, head, *L);
+            bool pad_zero = true;
+            for (size_t i = head.size(); i < L->data_off; ++i)
+                pad_zero = pad_zero && payload[i] == 0;
+            CHECK(pad_zero, "place_padded_head zeroes the pad gap over dirty bytes");
+            CHECK(bulk == payload + L->data_off, "bulk lands at data_off");
+        }
+    }
+    CHECK(pool_live() == base, "dirty-recycle KEEP-zero mints released on drop");
 }
 
 int main() {
     std::printf("test_xi_pack\n");
     test_lifecycle_and_contract_layer();
     test_bool_entry();
+    test_duplicate_key();
+    test_blob_roundtrip();
+    test_add_blob_copy();
+    test_image_as_convention();
+    test_blob_head_validate_matrix();
+    test_alloc_bytes_null_reject();
+    test_canonical_walk_parity();
+    test_for_each_entry_walk();
     test_offset_index_at_scale();
     test_seal_semantics();
     test_pooled_handle_balance();
     test_mixed_frame();
     test_crash_drop_no_double_release();
     test_bin_pool_exhaustion_no_null_span();
+    test_sort_idx_recycle();
+    test_padded_layout();
+    test_kept_zero_regions_over_dirty_recycle();
     if (g_fail == 0) { std::printf("  OK (all checks passed)\n"); return 0; }
     std::printf("  %d check(s) FAILED\n", g_fail);
     return 1;

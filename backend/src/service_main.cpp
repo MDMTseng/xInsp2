@@ -681,6 +681,30 @@ int main(int argc, char** argv) {
         if (auto* s = g_eng.srv_for_bp.load(std::memory_order_acquire))
             s->send_binary(static_cast<const uint8_t*>(data), static_cast<size_t>(len));
     };
+    // xi.emit@2 (perf/ws-lean): the ZERO-COPY owned-emit path. The producer hands
+    // us borrowed segments + an ownership token; the WS server sends them without
+    // copying the payload and releases the token (in the producer's TU) after the
+    // send/drop/teardown. send_binary_owned ALWAYS consumes the token (enqueues it,
+    // or releases it on no-client / byte-cap); if there is no server at all we
+    // release it here so a producer never leaks.
+    xi::binary_owned_sink() = [](const xi_bin_span* spans, int n,
+                                 void* owner, void (*release)(void*)) {
+        auto* s = g_eng.srv_for_bp.load(std::memory_order_acquire);
+        if (!s || n <= 0) { if (owner && release) release(owner); return; }
+        // Translate the ABI spans into the WS server's ABI-free BinSpan vocabulary.
+        // n is tiny (expose emits 1); a small stack array keeps this allocation-free
+        // on the hot path, with a heap fallback for an absurd count.
+        constexpr int kInline = 8;
+        xi::ws::BinSpan inl[kInline];
+        std::vector<xi::ws::BinSpan> heap;
+        xi::ws::BinSpan* segs = inl;
+        if (n > kInline) { heap.resize((size_t)n); segs = heap.data(); }
+        for (int i = 0; i < n; ++i) {
+            segs[i].data = static_cast<const uint8_t*>(spans[i].data);
+            segs[i].len  = (size_t)(spans[i].len > 0 ? spans[i].len : 0);
+        }
+        s->send_binary_owned(segs, n, owner, release);
+    };
     // ABI v9: a generic JPEG-encode host service — process-global N-rotate cache
     // keyed by a content hash of the pixels, so the SAME image compressed by
     // several plugins (or repeatedly) is encoded ONCE globally. Plugin-agnostic

@@ -41,33 +41,39 @@ public:
     // time the inspection script does:
     //     auto out = xi::use("{{NAME}}").process(in_pack);
     //
-    // Image ops example (replace with your actual logic):
+    // Image ops example — read + produce self-describing xi/image BLOBs (spec 30)
+    // with the <xi/xi_cv.hpp> sugar (dt-typed cv::Mat views, zero-copy):
     //
-    //   auto src = in.image("src");                  // read-only INPUT view
+    //   auto src = in.image_blob("src");             // {w,h,c,dt,payload}, fail-loud
     //   if (!src) { out.fault("missing_input", "src"); return; }
-    //   xi::Image dst = pool_image(src->width, src->height, 1);  // writable OUTPUT
-    //   xi::Image srcView = xi::Image::view(src->width, src->height,
-    //                                       src->channels,
-    //                                       static_cast<const uint8_t*>(src->pixels));
-    //   cv::threshold(xi::as_cv_read(srcView), xi::as_cv_write(dst), 128, 255,
-    //                 cv::THRESH_BINARY);
-    //   out.adopt_image("binary", dst.width, dst.height, dst.channels,
-    //                   dst.pool_handle());          // zero-copy handoff
+    //   const int w = src->width, h = src->height;
+    //   cv::Mat srcMat = xi::as_cv_read(*src);       // typed by the descriptor's dt
+    //   // {"t":"xi/image","w","h","c","dt"} — the convention descriptor.
+    //   xi::mp::Writer dw;                            // <xi/xi_mp.hpp>
+    //   dw.map(5);
+    //   dw.key("t"); dw.str("xi/image"); dw.key("w"); dw.int_(w);
+    //   dw.key("h"); dw.int_(h); dw.key("c"); dw.int_(1); dw.key("dt"); dw.str("u8");
+    //   void* pp = nullptr;
+    //   xi_image_handle bh = out.blob_mint(dw.bytes().data(),
+    //                          (int32_t)dw.bytes().size(), (int64_t)w * h, &pp);
+    //   if (!bh) { out.fault("no_blob_plane", "binary"); return; }
+    //   cv::Mat binMat = xi::as_cv_write_blob(pp, w, h, 1, "u8");  // writable payload
+    //   cv::threshold(srcMat, binMat, 128, 255, cv::THRESH_BINARY); // writes IN PLACE
+    //   out.adopt_blob("binary", bh);                // pack co-owns (addref)
+    //   host_->image_release(bh);                    // drop our mint ref
     //   out.i64("threshold_used", 128);              // scalars: i64/f64/str/boolean
     //
-    // Read the INPUT via in.image() (its pixels are a zero-copy pool span
+    // Read the INPUT via in.image_blob() (its payload is a zero-copy pool span
     // shared with other consumers — read it, never mutate it) and produce a
-    // SEPARATE OUTPUT via pool_image + as_cv_write. NEVER write through the
-    // input's pixel pointer — that corrupts every other consumer's view of
-    // the same pool slot. The discipline is enforced: an input view is not
-    // writable, so as_cv_write on it yields an empty Mat instead of silent
-    // corruption.
+    // SEPARATE OUTPUT by minting a headed blob buffer and writing straight into
+    // its 64B-aligned payload. NEVER write through the input's payload pointer —
+    // that corrupts every other consumer's view of the same pool slot.
     //
-    // `pool_image` (inherited from xi::Plugin) allocates a fresh slot in the
-    // host's ImagePool — cv:: writes into it land there directly, and
-    // out.adopt_image(..., dst.pool_handle()) hands the slot to the pack by
-    // refcount (no memcpy across the plugin ABI). out.image(key, w, h, c, px)
-    // is the copying variant for pixels that don't live in the pool.
+    // The zero-copy producer path is blob_mint -> fill payload in place ->
+    // adopt_blob (the pack addrefs the pool buffer; you drop your mint ref). The
+    // frozen @1 out.image(key, w, h, c, px) / out.adopt_image(...) door still
+    // works but COPIES the pixels into a headed xi/image blob (a raw pool buffer
+    // has no self-describing head), so an in-tree producer mints the blob itself.
     //
     // Leaving `out` untouched seals an EMPTY pack — the door's "no output"
     // sentinel. A contract failure is a NORMAL sealed pack stamped with

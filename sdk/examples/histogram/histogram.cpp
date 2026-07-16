@@ -24,15 +24,17 @@ public:
 
     // The xi.pack@1 door: image "src" in → stats + nested counts out.
     void process(xi::PackIn& in, xi::PackOut& out) override {
-        auto img = in.image("src");
-        if (!img || !img->pixels) {
-            out.fault("missing_input", "src", "histogram: no 'src' image");
+        // Read the input as an xi/image self-describing blob (spec 30): one
+        // fail-loud call with the real dtype + the zero-copy payload span.
+        auto img = in.image_blob("src");
+        if (!img || img->dt != "u8") {
+            out.fault("missing_input", "src", "histogram: no u8 'src' xi/image");
             return;
         }
 
         // Build 256-bin histogram. For multi-channel input, average channels.
         int counts[256] = {0};
-        const uint8_t* p = static_cast<const uint8_t*>(img->pixels);
+        const uint8_t* p = img->payload.data();
         const int pixels = img->width * img->height;
         const int ch = img->channels;
         if (ch == 1) {

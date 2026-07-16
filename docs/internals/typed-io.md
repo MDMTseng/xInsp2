@@ -53,7 +53,9 @@ moved from typed Record views to the sealed pack:
   `out.image(keys::kDst, …)`), and a script through `xi::ScriptPack`
   (`f.get_i64(...)`) — no string literals at call sites, no schema in the core.
   Every typed read returns `std::optional`, so absence is explicit rather than a
-  silent default.
+  silent default. (Since ④A the inline payload is the canonical msgpack value —
+  memory == wire — so a typed read skips the fixed-width header at a known offset
+  and serialization is a verbatim splice; see [`pack-plane.md`](./pack-plane.md).)
 - **By declared keyset (compile-checked slots).** `xi::ScriptTypedPack<Schema>`
   (`xi_use.hpp`) wraps a `ScriptPack` with a schema of key **slots**:
   `get_i64<Schema::kSeq>()` resolves the slot to its key constant at compile time,

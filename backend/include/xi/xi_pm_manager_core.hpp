@@ -443,6 +443,11 @@ public:
         std::vector<xi::script::Diagnostic> diagnostics;
         std::vector<std::string> reattached_instances;
         std::string              error;
+        // Round-3 S2: non-fatal condition on an ok=true result (e.g. the OLD
+        // module is still mapped after a successful versioned-path recompile —
+        // new code is live, but a lingering worker may pin the old mapping).
+        // Surfaced by the WS handler as a "warning" field + a warn-level log.
+        std::string              warning;
     };
     // DESTRUCTIVE: resets each instance adapter then FreeLibrary's the old DLL
     // (P0-AB-4).

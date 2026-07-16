@@ -133,6 +133,9 @@ public:
     }
 
     // --- script component ----------------------------------------------------
+    // Swap-only: the component is replaced on the next compile_and_load; never
+    // removed (close_project deliberately keeps it — round-3 W2 #8 deleted the
+    // never-called clear_script() that suggested otherwise).
 
     // Record the script component's health (ok on a good compile+load, failed +
     // compile_error otherwise). Re-derives running/degraded when applicable.
@@ -149,18 +152,6 @@ public:
         recompute_locked_();
         Comp c{ kKindScript, script_name_, script_health_, script_reason_, script_since_ };
         emit_(lk, &c);
-    }
-
-    // The script was unloaded — drop it from the component set.
-    void clear_script() {
-        std::unique_lock<std::mutex> lk(mu_);
-        if (!script_present_) return;
-        script_present_ = false;
-        script_health_  = CompHealth::Ok;
-        script_reason_.clear();
-        script_name_.clear();
-        recompute_locked_();
-        emit_(lk, nullptr);
     }
 
     // Read the script component for a get_health snapshot. Returns false when no

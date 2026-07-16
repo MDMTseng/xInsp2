@@ -184,8 +184,20 @@ public:
 
 private:
     static std::string to_str(T v) {
-        if constexpr (std::is_same_v<T, bool>) return v ? "true" : "false";
-        else return std::to_string(v);
+        if constexpr (std::is_same_v<T, bool>) {
+            return v ? "true" : "false";
+        } else if constexpr (std::is_floating_point_v<T>) {
+            // Round-3 W2 #9: std::to_string is fixed 6-decimal — a tuned 1e-7
+            // param listed as "0.000000", and the UI's list_params → set_param
+            // round-trip then destroyed the value. %.17g is round-trip exact
+            // for double (and a superset for float) and still a valid JSON
+            // number ("1e-07" parses everywhere, incl. set_from_json's stod).
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.17g", (double)v);
+            return buf;
+        } else {
+            return std::to_string(v);
+        }
     }
 
     std::string                name_;

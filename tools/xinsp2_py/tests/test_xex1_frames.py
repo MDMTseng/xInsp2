@@ -70,17 +70,31 @@ def test_golden_frame_decodes_to_manifest(frame: dict) -> None:
 
 def _check_v3(frame: dict, data: bytes) -> None:
     """The canonical frame dump: v:3 with [tag, value] entries -> values and
-    image descriptors -> images (raw pixels, lossless)."""
+    self-describing blobs -> blobs (the entire buffer, lossless; spec 30)."""
     dec = decode_xex1(data)
     assert dec["v"] == 3
     assert dec["channel"] == frame["channel"]
     assert dec["seq"] == frame["seq"]
     for fld in frame["fields"]:
         key, kind = fld["key"], fld["kind"]
-        if kind == "image":
-            im = dec["images"][key]
-            assert (im["w"], im["h"], im["c"]) == (fld["w"], fld["h"], fld["c"])
-            assert im["pixels"] == base64.b64decode(fld["b64"])
+        if kind == "blob":
+            b = dec["blobs"][key]
+            # Head-validated + split: the descriptor + payload byte-compare, and
+            # the descriptor's "t" decodes to the expected type string.
+            assert b["desc_bytes"] == base64.b64decode(fld["desc_b64"])
+            assert b["payload"] == base64.b64decode(fld["payload_b64"])
+            assert b["t"] == fld["t"]
+            if fld["t"] == "xi/image":
+                im = dec["images"][key]
+                assert (im["w"], im["h"], im["c"], im["dt"]) == \
+                       (fld["w"], fld["h"], fld["c"], fld["dt"])
+                assert im["pixels"] == base64.b64decode(fld["payload_b64"])
+        elif kind == "preview":
+            # WS-preview arm: images[key]["preview"] = {w,h,c,enc,q,data}.
+            pv = dec["images"][key]["preview"]
+            assert (pv["w"], pv["h"], pv["c"]) == (fld["w"], fld["h"], fld["c"])
+            assert pv["enc"] == fld["enc"] and pv["q"] == fld["q"]
+            assert pv["data"] == base64.b64decode(fld["data_b64"])
         elif kind == "bin":
             assert bytes(dec["values"][key]) == base64.b64decode(fld["b64"])
         else:

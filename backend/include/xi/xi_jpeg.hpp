@@ -10,27 +10,19 @@
 // reference it. It is NOT deleted; it is simply no longer wired into the
 // backend target. Do not add new backend callers.
 //
-// Backends, fastest first:
-//   - XINSP2_HAS_TURBOJPEG: libjpeg-turbo (the fast SIMD path)
-//   - XINSP2_HAS_OPENCV:    OpenCV imencode
+// This header is OpenCV-FREE (core-sheds-OpenCV, 2026-07). The OpenCV imencode
+// path (and the CPU-vendor probe that only existed to choose between it and
+// turbo) was removed: image processing / OpenCV belongs to plugins & scripts via
+// the opt-in <xi/xi_cv.hpp>, not to a header the core links. Encoders, fastest
+// first:
+//   - XINSP2_HAS_TURBOJPEG: libjpeg-turbo (the fast SIMD path; direct RGB)
 //   - Fallback:             stb_image_write (no deps, slowest)
 //
 
 #include <cstdint>
-#include <string_view>
 #include <vector>
 
-#if (defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__))
-#include <cpuid.h>   // GCC/Clang __cpuid(level, a,b,c,d) — x86 only
-#endif
-
 #include "xi_image.hpp"
-
-#ifdef XINSP2_HAS_OPENCV
-  #include <opencv2/imgcodecs.hpp>
-  #include <opencv2/imgproc.hpp>
-  #include <opencv2/core/mat.hpp>
-#endif
 
 #ifdef XINSP2_HAS_TURBOJPEG
   #include <turbojpeg.h>
@@ -43,69 +35,6 @@ extern "C" int stbi_write_jpg_to_func(
     int x, int y, int comp, const void* data, int quality);
 
 namespace xi {
-
-// ---------- CPU vendor detection via CPUID ----------
-
-enum class CpuVendor { Intel, AMD, Other };
-
-inline CpuVendor detect_cpu_vendor() {
-    static CpuVendor cached = [] {
-#if defined(_MSC_VER)
-        int info[4];
-        __cpuid(info, 0);
-        char vendor[13] = {};
-        *reinterpret_cast<int*>(vendor + 0) = info[1]; // EBX
-        *reinterpret_cast<int*>(vendor + 4) = info[3]; // EDX
-        *reinterpret_cast<int*>(vendor + 8) = info[2]; // ECX
-#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__))
-        // TODO(linux/arm): x86-only CPUID; on ARM this whole vendor probe is moot
-        // (no Intel/AMD distinction) — guarded by arch; <cpuid.h> pulled at top.
-        unsigned int eax, ebx, ecx, edx;
-        __cpuid(0, eax, ebx, ecx, edx);
-        char vendor[13] = {};
-        *reinterpret_cast<unsigned int*>(vendor + 0) = ebx;
-        *reinterpret_cast<unsigned int*>(vendor + 4) = edx;
-        *reinterpret_cast<unsigned int*>(vendor + 8) = ecx;
-#else
-        char vendor[13] = "Unknown";
-#endif
-        if (std::string_view(vendor, 12) == "GenuineIntel") return CpuVendor::Intel;
-        if (std::string_view(vendor, 12) == "AuthenticAMD") return CpuVendor::AMD;
-        return CpuVendor::Other;
-    }();
-    return cached;
-}
-
-// ---------- OpenCV backend ----------
-
-#ifdef XINSP2_HAS_OPENCV
-inline bool encode_jpeg_opencv(const Image& img, int quality, std::vector<uint8_t>& out) {
-    if (img.empty() || !img.data()) return false;
-
-    int cv_type = 0;
-    switch (img.channels) {
-        case 1: cv_type = CV_8UC1; break;
-        case 3: cv_type = CV_8UC3; break;
-        case 4: cv_type = CV_8UC4; break;
-        default: return false;
-    }
-
-    // Wrap without copy — xi::Image is row-major interleaved, same as cv::Mat.
-    cv::Mat mat(img.height, img.width, cv_type,
-                const_cast<uint8_t*>(img.data()), img.stride());
-
-    // OpenCV imencode expects BGR(A); xi::Image is RGB(A). Swap for BOTH 3- and
-    // 4-channel (the 4-channel case used to skip the swap → red/blue swapped in
-    // the encoded image).
-    cv::Mat bgr;
-    if (img.channels == 3)      cv::cvtColor(mat, bgr, cv::COLOR_RGB2BGR);
-    else if (img.channels == 4) cv::cvtColor(mat, bgr, cv::COLOR_RGBA2BGRA);
-    else                        bgr = mat;
-
-    std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, quality};
-    return cv::imencode(".jpg", bgr, out, params);
-}
-#endif
 
 // ---------- stb fallback ----------
 
@@ -158,23 +87,12 @@ inline bool encode_jpeg_turbo(const Image& img, int quality, std::vector<uint8_t
 inline bool encode_jpeg(const Image& img, int quality, std::vector<uint8_t>& out) {
     if (img.empty()) return false;
 
-    auto vendor = detect_cpu_vendor();
-    (void)vendor;
-
 #ifdef XINSP2_HAS_TURBOJPEG
-    // Best general-purpose path: SIMD JPEG with native RGB pixel format,
-    // no extra color-convert pass. Try first regardless of CPU vendor.
+    // Best path: SIMD JPEG with native RGB pixel format, no extra color-convert.
     if (encode_jpeg_turbo(img, quality, out)) return true;
 #endif
 
-#ifdef XINSP2_HAS_OPENCV
-    if (vendor != CpuVendor::Intel) {
-        // Non-Intel: prefer OpenCV (libjpeg-turbo with AVX2)
-        if (encode_jpeg_opencv(img, quality, out)) return true;
-    }
-#endif
-
-    // Fallback for any CPU / any build config
+    // Fallback for any build config with no libjpeg-turbo (OpenCV-free core).
     return encode_jpeg_stb(img, quality, out);
 }
 

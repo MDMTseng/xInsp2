@@ -19,7 +19,10 @@ void xi_inspect_entry(int /*frame*/) {
     if (!t.is_active()) return;
 
     // A little work so the thread is actually scheduled on a core for a while.
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // 40 ms (not a token few) widens the window in which the group's two lanes
+    // are concurrently in-flight, so the scheduler reliably places them on two
+    // different masked cores — the multi-core-spread signal the driver checks.
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
     int core = -1;
 #ifdef _WIN32
     core = (int)GetCurrentProcessorNumber();

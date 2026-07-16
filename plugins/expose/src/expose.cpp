@@ -17,6 +17,7 @@
 //   key order); each image is JPEG (lossy, 8-bit). msgpack is hand-rolled below
 //   (fixed shape, no dependency) but is valid msgpack wire format.
 #include <xi/xi_abi.hpp>
+#include <xi/xi_b64.hpp>            // the shared base64 leaf (pull-path frame_b64)
 #include <xi/xi_json.hpp>
 #include <xi/xi_pack_contract.hpp>  // reserved keys: xi::pack_contract::kChannel/kSeq
 
@@ -31,23 +32,14 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <memory>
 #include <vector>
 
 namespace {
 
-std::string b64(const uint8_t* p, size_t n) {
-    static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string o; o.reserve((n + 2) / 3 * 4);
-    for (size_t i = 0; i < n; i += 3) {
-        uint32_t b = p[i] << 16;
-        if (i + 1 < n) b |= p[i + 1] << 8;
-        if (i + 2 < n) b |= p[i + 2];
-        o.push_back(T[(b >> 18) & 63]); o.push_back(T[(b >> 12) & 63]);
-        o.push_back(i + 1 < n ? T[(b >> 6) & 63] : '=');
-        o.push_back(i + 2 < n ? T[b & 63] : '=');
-    }
-    return o;
-}
+// One-line forwarder to the shared SDK base64 leaf (xi/xi_b64.hpp) — the
+// local name is kept for the frame_b64 call site.
+inline std::string b64(const uint8_t* p, size_t n) { return xi::b64_encode(p, n); }
 
 }  // namespace
 
@@ -60,8 +52,19 @@ public:
     // raw, never to nothing).
     ExposeSink(const xi_host_api* host, const std::string& name)
         : xi::Plugin(host, name) {
-        if (host && host->get_interface)
+        if (host && host->get_interface) {
             cap_ = static_cast<const xi_cap_v1*>(host->get_interface("xi.cap", 1));
+            provider_ = static_cast<const xi_cap_provider_v1*>(
+                host->get_interface("xi.cap.provider", 1));
+        }
+        if (provider_)   // spec 31: the live-UI transport ingestion (byte-blind)
+            ui_sink_registered_ =
+                (provider_->register_capability("xi.ui.sink", &h_ui_sink, this) == XI_CAP_REG_OK);
+    }
+
+    ~ExposeSink() override {
+        if (provider_ && ui_sink_registered_)
+            provider_->unregister_capability("xi.ui.sink", this);
     }
 
     // polaris2 wave-2 (docs/new_gen/08 Wave 2 step 3): the xi.pack@1 pack-in/
@@ -79,6 +82,10 @@ public:
     // flipped to v3 (the durable tagged-msgpack wire). XEX1-v1 encode stays
     // selectable via frame_wire_v3:false for ONE release, then is deleted —
     // doc 06 §6.2, app-team accepted.]
+    // TODO(dated 2026-07-12, one-release death row): delete build_v1_from_pack_
+    // + the frame_wire_v3:false escape (and the v1 legs of xex1_encode.hpp's
+    // consumers) in the FIRST release after v12 ships. If this line is older
+    // than the current release, the grace window is over — cut it.
     void process(xi::PackIn& in, xi::PackOut& out) override {
         const std::string channel(in.str(xi::pack_contract::kChannel).value_or("default"));
         const uint64_t    seq = (uint64_t)in.i64_or(xi::pack_contract::kSeq, 0);
@@ -94,18 +101,72 @@ public:
         std::vector<uint8_t> frame = v3 ? build_wire_v3_from_pack_(in, channel, seq)
                                         : build_v1_from_pack_(in, channel, seq);
 
+        // MOVE the frame into a shared retained buffer: store + broadcast use the
+        // SAME bytes (a raw 5MP/20MP preview is 15-60 MB — the old store-copy was
+        // a full extra memcpy per frame on the hot path, bench5mp). The shared_ptr
+        // lets the broadcast run OUTSIDE the lock while eviction stays safe.
+        auto shared = std::make_shared<const std::vector<uint8_t>>(std::move(frame));
         long long seen; bool subscribed;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            Channel& ch = channels_[channel];
+            Channel& ch = store_channel_(channel);
             ch.seq         = seq;
-            ch.frame_bytes = frame;    // keep the latest encoded frame for pull
+            ch.frame_bytes = shared;   // keep the latest encoded frame for pull
             seen = ++ch.seen;
             subscribed = subscribed_.count(channel) != 0;
         }
-        if (subscribed) emit_binary(frame);
+        // Zero-copy broadcast (xi.emit@2 / perf/ws-lean): hand the host a SHARE of
+        // the encoded frame instead of a copy — the host sends straight from these
+        // bytes and drops its share after. The store above holds its own share for
+        // pull, so both survive. (Falls back to a copy on a host without xi.emit@2.)
+        if (subscribed) emit_binary_owned(shared);
 
         out.str("channel", channel).i64("seen", (int64_t)seen);
+    }
+
+    // xi.ui.sink@1 (spec 31): egress hands us a pre-encoded UI frame. We are a
+    // byte-BLIND store-and-broadcast — no encode/policy here.
+    //   pack in : str "$channel" (required), optional bin "frame" (pre-encoded
+    //             XEX1 wire bytes). Frame absent = a cheap subscription PROBE.
+    //   pack out: i64 "subscribed" (1/0), i64 "seen".
+    // With a frame + a subscriber -> emit_binary (broadcast; client filters by
+    // channel), drop-not-queue at the host WS pipe (the slow-consumer machinery).
+    xi_pack_handle ui_sink_(xi_pack_handle in) {
+        const xi_pack_v1* pk = pack_iface();
+        if (!pk || in == XI_PACK_NULL) return XI_PACK_NULL;
+        int32_t probe = 0;
+        if (pk->get_bool && pk->get_bool(in, "$probe", &probe) && probe) {
+            xi_pack_builder b = pk->builder_new();
+            pk->builder_add_str(b, "$versions", "1", 1);
+            return pk->builder_seal(b);
+        }
+        const char* cp = nullptr; int32_t cn = 0;
+        std::string channel = (pk->get_str(in, xi::pack_contract::kChannel, &cp, &cn) && cp)
+                              ? std::string(cp, cn > 0 ? (size_t)cn : 0) : std::string("default");
+        const void* fp = nullptr; int32_t fn = 0;
+        const bool has_frame = pk->get_bin(in, "frame", &fp, &fn) && fp && fn > 0;
+
+        long long seen = 0; bool subscribed;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            subscribed = subscribed_.count(channel) != 0;
+            if (has_frame) {
+                Channel& ch = store_channel_(channel);
+                ch.frame_bytes = std::make_shared<const std::vector<uint8_t>>(
+                    (const uint8_t*)fp, (const uint8_t*)fp + fn);
+                seen = ++ch.seen;
+            }
+        }
+        if (has_frame && subscribed) emit_binary(fp, (int)fn);   // byte-blind broadcast
+
+        xi_pack_builder b = pk->builder_new();
+        pk->builder_add_i64(b, "subscribed", subscribed ? 1 : 0);
+        pk->builder_add_i64(b, "seen", (int64_t)seen);
+        return pk->builder_seal(b);
+    }
+    static xi_pack_handle h_ui_sink(void* self, xi_pack_handle in) {
+        try { return static_cast<ExposeSink*>(self)->ui_sink_(in); }
+        catch (...) { return XI_PACK_NULL; }
     }
 
     std::string exchange(const std::string& cmd) override {
@@ -140,10 +201,12 @@ public:
                 return xi::Json::object().set("found", false).set("channel", channel).dump();
             // A channel fed through the pack door holds its encoded XEX1 frame
             // bytes — the sole data plane in v12 (the Record rebuild is gone).
-            const std::vector<uint8_t>& frame = it->second.frame_bytes;
+            const auto& fb = it->second.frame_bytes;
+            if (!fb)
+                return xi::Json::object().set("found", false).set("channel", channel).dump();
             return xi::Json::object().set("found", true).set("channel", channel)
                 .set("seq", (int64_t)it->second.seq)
-                .set("frame_b64", b64(frame.data(), frame.size())).dump();
+                .set("frame_b64", b64(fb->data(), fb->size())).dump();
         }
         if (c == "clear") channels_.clear();
         return xi::Json::object().set("count", (int)channels_.size()).dump();
@@ -186,8 +249,31 @@ private:
     struct Channel {
         uint64_t                          seq  = 0;
         long long                         seen = 0;
-        std::vector<uint8_t>              frame_bytes;  // latest encoded frame (pack-door path)
+        uint64_t                          touched = 0;   // monotonic last-write order (bounded eviction)
+        // Latest encoded frame, SHARED between the store (pull) and the in-flight
+        // broadcast: store+send are one buffer, no per-frame copy (bench5mp).
+        std::shared_ptr<const std::vector<uint8_t>> frame_bytes;
     };
+
+    // Bounded latest-wins store (caller holds mu_): stamp the channel's write
+    // order and, when a NEW channel pushes the map over the cap, evict the
+    // least-recently-touched OTHER channel — so a producer churning distinct
+    // $channel names (or a UI channel set) can't grow channels_ (and its retained
+    // MB frames) without bound (doc 28/31 finding F-B). std::map nodes are stable,
+    // so erasing a different node keeps the returned reference valid.
+    Channel& store_channel_(const std::string& channel) {
+        Channel& ch = channels_[channel];
+        ch.touched = ++touch_ctr_;
+        if (channels_.size() > kMaxChannels) {
+            auto victim = channels_.end();
+            for (auto it = channels_.begin(); it != channels_.end(); ++it)
+                if (it->first != channel &&
+                    (victim == channels_.end() || it->second.touched < victim->second.touched))
+                    victim = it;
+            if (victim != channels_.end()) channels_.erase(victim);
+        }
+        return ch;
+    }
 
     // --- pack-door encoders (the generic walk; docs/new_gen/08 Wave 2) --------
 
@@ -352,7 +438,10 @@ private:
                     vals.set(key.c_str(), in.boolean(key.c_str()).value_or(false)); break;
                 case XI_PACK_TAG_STR:
                     vals.set(key.c_str(), std::string(in.str(key.c_str()).value_or(""))); break;
-                case XI_PACK_TAG_IMAGE: {
+                case XI_PACK_TAG_BLOB: {
+                    // xi/image blobs (spec 30) get the legacy v1 JPEG treatment;
+                    // in.image() parses an xi/image blob via the @1 adapter and
+                    // returns nullopt for any other blob type (no v1 display form).
                     auto im = in.image(key.c_str());
                     if (!im || !im->pixels) break;
                     std::vector<uint8_t> jpeg = compress_px_(
@@ -360,7 +449,7 @@ private:
                     if (!jpeg.empty()) images.push_back({key, std::move(jpeg)});
                     break;
                 }
-                default: break;  // bin/mp: no v1 display form
+                default: break;  // non-image blobs / bin / mp: no v1 display form
             }
         }
         return xi::xex1::encode_frame(channel, seq, vals.dump(), images);
@@ -389,8 +478,19 @@ private:
 
     mutable std::mutex              mu_;
     std::map<std::string, Channel>  channels_;
+    uint64_t                        touch_ctr_ = 0;      // monotonic write order for bounded eviction
+    static constexpr size_t         kMaxChannels = 256;  // cap on retained channels (F-B)
     std::set<std::string>           subscribed_;
     bool                            wire_v3_ = true;    // v12 default: XEX1-v3 (v1 opt-out for one release)
+
+    // --- xi.ui.sink@1 provider (spec 31): the egress -> transport ingestion ---
+    // A data-plane plugin may ALSO provide a cap (cap-plane-consistent). This
+    // makes expose a byte-BLIND store-and-broadcast for the live-UI plane: the
+    // xi.ui.egress plugin owns ALL policy (encode/dedup/dispatch) and hands us
+    // pre-encoded frame bytes we never inspect. One provider per process; a
+    // second expose instance just runs as a normal sink (ETAKEN tolerated).
+    const xi_cap_provider_v1* provider_ = nullptr;
+    bool                      ui_sink_registered_ = false;
 
     // --- E2 preview state (all guarded by mu_) --------------------------------
     const xi_cap_v1*  cap_ = nullptr;      // xi.jpeg.encode funnel (resolved in ctor)

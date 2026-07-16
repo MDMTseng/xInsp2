@@ -25,18 +25,37 @@ and (goldens) `ui-components/test/xex1-golden.mjs` / `tools/xinsp2_py/tests/`.
   and record_save's on-disk `.xex1` file are BYTE-IDENTICAL for the same pack
   (the memory ≈ wire ≈ disk surface).
 
+## Pull semantics (F-C ruling, 2026-07-15)
+
+**A pull ("get") serves the same wire artifact the channel shipped** — expose
+retains what was pushed at it, byte-blind, so a pull is lossy exactly where the
+wire is lossy (an egress-pushed `ui/*` channel stores the encoded preview; the
+product-plane v3 store is the raw shared dump). This is deliberate, not a gap:
+a puller is a UI consumer like any subscriber. Lossless homes are elsewhere —
+the record plane (`record_save`) for the product, and the egress
+`encode:false` raw-passthrough knob (docs/internals/ui-egress.md) for a live
+channel that must walk raw.
+
 ## E2 — full-resolution compressed preview (`xi.jpeg.encode`)
 
 On the **v3 WS-SEND path only**, expose can substitute a compressed preview for
 raw pixels so a live client gets a full-resolution image at a fraction of the
 bandwidth, while disk stays raw.
 
+> **Scope note (doc 31).** This substitution serves the PRODUCT-plane preview
+> (packs expose receives as a wired sink) and deliberately still lives inside
+> expose — moving it behind the egress policy layer is the deferred
+> `TODO(preview-egress)` item. The PUSHED live-UI plane is separate machinery:
+> `xi.ui.egress` (policy) → expose's byte-blind `xi.ui.sink` (transport) — see
+> `docs/internals/ui-egress.md`.
+
 - expose resolves `xi.jpeg.encode` through `get_interface("xi.cap",1)`
   (per-instance, cached, re-resolve tolerant). When the capability is live and
-  the `preview_compress` knob is set, each v3 image entry keeps its frozen
-  `[IMAGE, {w,h,c,px}]` shape but the raw `px` leaves the wire (empty bin) and a
-  nested `preview` map `{w,h,c,enc:"jpeg",q,data:<jpeg>}` rides beside it. Source
-  dims are carried from the image (the encode reply has none).
+  the `preview_compress` knob is set, each v3 `xi/image` u8 blob entry ships as
+  `[BLOB, {preview:{w,h,c,enc:"jpeg",q,data:<jpeg>}}]` — the verbatim blob bytes
+  leave the wire and the nested `preview` map rides instead. Source dims come
+  from the blob descriptor (the encode reply has none). (The pre-blob `IMAGE`
+  tag is retired — docs/new_gen/30.)
 - **Fail-OPEN, never to nothing.** No provider / knob off / a per-image contract
   `$fault` / a zero-length jpeg → that image ships RAW. A codec-wide funnel
   failure (imgcodec ships `on_fault:"refuse"`, so one hard fault quarantines it

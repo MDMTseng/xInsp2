@@ -96,11 +96,14 @@ static void expect_entries_identical(const xi::Pack& orig, const xi::Pack& loade
                       std::vector<uint8_t>(b.begin(), b.end()));
                 break;
             }
-            case xi::PackTag::Image: {
-                auto a = *orig.get_image(key); auto b = *loaded.get_image(key);
-                CHECK(a.width == b.width && a.height == b.height && a.channels == b.channels);
-                CHECK(std::vector<uint8_t>(a.pixels.begin(), a.pixels.end()) ==
-                      std::vector<uint8_t>(b.pixels.begin(), b.pixels.end()));
+            case xi::PackTag::Blob: {
+                // Self-describing blob (spec 30): the descriptor + payload must
+                // round-trip byte-identical (memory == wire == disk).
+                auto a = *orig.get_blob(key); auto b = *loaded.get_blob(key);
+                CHECK(std::vector<uint8_t>(a.desc.begin(), a.desc.end()) ==
+                      std::vector<uint8_t>(b.desc.begin(), b.desc.end()));
+                CHECK(std::vector<uint8_t>(a.payload.begin(), a.payload.end()) ==
+                      std::vector<uint8_t>(b.payload.begin(), b.payload.end()));
                 break;
             }
             default: break;
@@ -179,8 +182,9 @@ int main() {
     {
         xi_pack_handle in = build_input();
 
-        // The golden oracle: the SAME shared walk+encoder, in-process over the same pack.
-        xi::PackIn view(fi, in);
+        // The golden oracle: the SAME shared walk+encoder, in-process over the same
+        // pack. Pass the @4 blob door so PackIn::blob() resolves (a blob dump needs it).
+        xi::PackIn view(fi, in, xi::pack_v4_iface());
         std::vector<uint8_t> expected = xi::xex1::encode_pack_v3(view, "cam0", 7);
 
         xi_pack_handle ack = rec->run_pack_door(in);

@@ -4,7 +4,6 @@
 | key | constant | type | notes |
 |---|---|---|---|
 | `fps` | `kFps` | int | int (settable) |
-| `pack_mode` | `kPackMode` | bool | bool (default false) — gather left+right+seq into ONE sealed xi.pack@1 Pack per trigger instead of a Record (wave-2 Pack migration) |
 | `running` | `kRunning` | bool | bool (get_def only, read-only) |
 | `ticks` | `kTicks` | int | int (get_def only, read-only) |
 | `command` | `kCommand` | string | string (command selector) |

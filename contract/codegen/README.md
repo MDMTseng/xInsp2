@@ -198,8 +198,9 @@ Idiom notes from the swap (compile+behavior equivalence proven by
 no-param commands always route through the private `cmd_` helper, `.set` chains
 are single-line, hand-written column alignment is not reproduced, commands
 follow decl order, and a decl'd settable config key always gets a setter
-(synced_stereo's typed `Config.pack_mode(bool)` is generated although the
-hand-written view omitted it — additive, no call-site impact).
+(historical example: synced_stereo's typed `Config.pack_mode(bool)` was
+generated although the hand-written view omitted it — additive, no call-site
+impact; both that knob and the typed `_io` views have since been retired).
 
 `"handwritten_io": true` remains supported as the escape hatch for a future
 plugin whose surface genuinely exceeds the subset; nothing in-tree uses it.

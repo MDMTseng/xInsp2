@@ -28,5 +28,14 @@
 # --- rebuilt 2026-07-02 on polaris_master (two strict runs; P4's example ports
 # --- cleared the 12 dead-API quarantines - 21/25 now pass strict) ---
 qa_reentrancy: flaky on master base (pass->fail across identical runs, review 07 #8 class); deterministic-failing on polaris_master so far - reclassify to strict once it proves stable
-qa_cpu_affinity: flaky - the multi-core-SPREAD assertion (bound group must touch >1 of its 4 masked cores {2,3,4,5}) is OS-scheduler-timing dependent. The affinity-correctness invariants (mask reported as [[2,3,4,5]], every bound run stays WITHIN the mask, per-group isolation vs the free group) ALL pass; only the spread check flakes when a light/serialized bound workload happens to stay on one core. Passes standalone, fails under full-suite load; pre-existing (fails on the pre-rebuild backend too); NOT a port issue (port-only sweep diff, backend binds cleanly, zero bind warnings). Proper fix = relax/rework assertion #3 (driver.py:99) or lengthen/overlap the bound workload so the scheduler exercises the mask.
-qa_lifecycle_teardown: flaky - "#6 open/close cycle under source load" is load-sensitive. Bisected 2026-07-04: fails 3/3 at commits 4012211 (pre-V1), 8bafe5a (pre-V3), and current tip in a LOADED environment (serve-live dev backend running concurrently), but PASSED in the quiet CI-style gate box (bo1j59hy8 @ 4012211). NOT a V1/V3/Stage-A regression - the open/close-under-source-load timing loses under concurrent machine load. Unquarantining it on a single green pass (5f9024d) was premature. Requarantined flaky; proper fix = make step #6 tolerant of scheduler/load jitter (lengthen waits or assert on eventual-consistency, not a tight window). Zero Record; orthogonal to THE CUT.
+#
+# UN-QUARANTINED 2026-07-15 on qa/flaky-trio (root-caused + fixed, kept SERIAL):
+#   * qa_cpu_affinity: the multi-core-SPREAD check was a fixed 4s window that
+#     sometimes captured too few runs under load. Fixed to poll UNTIL the bound
+#     group spreads across >1 masked core (generous deadline) + a 40ms inspect so
+#     the two lanes reliably overlap. A real single-pin regression still fails at
+#     the deadline, so coverage is intact.
+#   * qa_lifecycle_teardown: NOT actually a timing flake on this branch - THE CUT
+#     (commit 0042385) deleted both fixtures it borrowed (qa_sink_shared_doc,
+#     burst_pipeline), so it hard-failed at open_project. Repointed to a
+#     self-contained burst_source fixture under the test's own dir.

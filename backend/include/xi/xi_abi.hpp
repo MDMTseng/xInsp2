@@ -33,6 +33,7 @@
 
 #include "xi_abi.h"
 #include "xi_image.hpp"
+#include "xi_image_blob.hpp"     // xi::ImageBlobView + read_image_blob (xi/image consumer)
 #include "xi_json_escape.hpp"    // the ONE JSON string-escape primitive (std-only leaf)
 #include "xi_pack_contract.hpp"  // reserved $-keys + fault/provenance helpers (U1, doc 15)
 
@@ -40,6 +41,7 @@
 #include <cstring>
 #include <exception>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -171,7 +173,12 @@ private:
 class PackOut {
 public:
     PackOut() = default;
-    explicit PackOut(const xi_pack_v1* fi) : fi_(fi) {
+    // fi4 (the xi.pack@4 blob supplement, spec 30) is OPTIONAL: null on a host
+    // with no blob plane — the v1 adders (incl. the image() convenience over the
+    // @1 blob-adapter slots) work regardless; the blob adders then fail closed
+    // (return false, nothing added).
+    explicit PackOut(const xi_pack_v1* fi, const xi_pack_v4* fi4 = nullptr)
+        : fi_(fi), fi4_(fi4) {
         if (fi_) b_ = fi_->builder_new();
     }
     ~PackOut() { if (fi_ && b_ && !sealed_) fi_->builder_abandon(b_); }
@@ -205,6 +212,11 @@ public:
         if (valid()) { touched_ = true; fi_->builder_add_bin(b_, k, d, (int32_t)n); }
         return *this;
     }
+    // image()/adopt_image() ride the frozen @1 slots, which are now DOOR
+    // ADAPTERS over the blob plane (spec 30): the entry is stored as an
+    // "xi/image" self-describing blob, read back by PackIn::image(). adopt_image
+    // COPIES the raw pixel handle into a headed blob (a raw buffer has no head —
+    // zero-copy image hand-off is now blob_mint + DMA + adopt_blob).
     PackOut& image(const char* k, int32_t w, int32_t h, int32_t c, const void* px) {
         if (valid()) { touched_ = true; fi_->builder_add_image(b_, k, w, h, c, px); }
         return *this;
@@ -217,6 +229,43 @@ public:
     PackOut& mp(const char* k, const void* d, size_t n) {
         if (valid()) { touched_ = true; fi_->builder_add_mp(b_, k, d, (int32_t)n); }
         return *this;
+    }
+
+    // ---- xi.pack@4 adders (self-describing blobs, spec 30). Unlike the
+    // chainable v1 adders these return bool — the blob verbs are refusable
+    // (invalid descriptor, pool exhausted, no @4 on this host), and a payload
+    // silently missing from the output would poison the consumer's contract.
+    // false = nothing was added.
+    //
+    // Self-describing blob: `desc` is a canonical msgpack map (build it with
+    // xi::BlobDesc / xi::make_image_desc, or reuse a PackIn::Blob's desc bytes);
+    // `payload` is copied into the minted buffer's 64B-aligned payload region.
+    bool blob(const char* k, const void* desc, int32_t desc_len,
+              const void* payload, int64_t payload_len) {
+        if (!valid() || !fi4_ || !fi4_->builder_add_blob) return false;
+        if (fi4_->builder_add_blob(b_, k, desc, desc_len, payload, payload_len) != 1)
+            return false;
+        touched_ = true;
+        return true;
+    }
+    // Zero-copy adoption of an already-minted self-describing buffer (e.g. one
+    // from blob_mint() filled in place, or the handle a PackIn::blob() view
+    // carries) — validates the head, the pack addrefs it.
+    bool adopt_blob(const char* k, xi_image_handle handle) {
+        if (!valid() || !fi4_ || !fi4_->builder_adopt_blob) return false;
+        if (fi4_->builder_adopt_blob(b_, k, handle) != 1) return false;
+        touched_ = true;
+        return true;
+    }
+    // Mint a self-describing buffer and expose its 64B-aligned payload region for
+    // IN-PLACE fill (camera DMA / SIMD write). Returns the pool handle + writes
+    // *payload_out; XI_IMAGE_NULL on a bad descriptor / no @4. The caller fills
+    // the payload, then adopt_blob(k, h), then releases its own ref (image
+    // release) — the adopt addref'd. This is the zero-copy producer path.
+    xi_image_handle blob_mint(const void* desc, int32_t desc_len,
+                              int64_t payload_len, void** payload_out) {
+        if (!fi4_ || !fi4_->blob_mint) { if (payload_out) *payload_out = nullptr; return XI_IMAGE_NULL; }
+        return fi4_->blob_mint(desc, desc_len, payload_len, payload_out);
     }
     // Pack-shaped fail-loud: stamp the reason codes and return. The pack is
     // still a valid, sealed pack the caller routes to a verdict.
@@ -260,16 +309,19 @@ public:
     }
 
     const xi_pack_v1* iface() const { return fi_; }
+    const xi_pack_v4* iface4() const { return fi4_; }
 
 private:
     void reset_() { if (fi_ && b_ && !sealed_) fi_->builder_abandon(b_); }
     void move_from(PackOut&& o) noexcept {
-        fi_ = o.fi_; b_ = o.b_; sealed_ = o.sealed_;
+        fi_ = o.fi_; fi4_ = o.fi4_; b_ = o.b_; sealed_ = o.sealed_;
         src_stamped_ = o.src_stamped_; prov_stamped_ = o.prov_stamped_;
         touched_ = o.touched_;
-        o.fi_ = nullptr; o.b_ = XI_PACK_BUILDER_NULL; o.sealed_ = true;
+        o.fi_ = nullptr; o.fi4_ = nullptr;
+        o.b_ = XI_PACK_BUILDER_NULL; o.sealed_ = true;
     }
-    const xi_pack_v1* fi_ = nullptr;
+    const xi_pack_v1* fi_  = nullptr;
+    const xi_pack_v4* fi4_ = nullptr;   // xi.pack@4 blob supplement; null with no blob plane
     xi_pack_builder   b_  = XI_PACK_BUILDER_NULL;
     bool               sealed_ = false;
     bool               src_stamped_  = false;   // plugin called src() explicitly
@@ -281,7 +333,11 @@ private:
 // NOT own the handle (the host does); borrowed spans are valid for the call.
 class PackIn {
 public:
-    PackIn(const xi_pack_v1* fi, xi_pack_handle h) : fi_(fi), h_(h) {}
+    // fi4 (the xi.pack@4 blob supplement, spec 30) is OPTIONAL: null on a host
+    // with no blob plane — every v1 reader (incl. image() over the @1 blob-
+    // adapter slot) works regardless; the blob readers then report absence.
+    PackIn(const xi_pack_v1* fi, xi_pack_handle h, const xi_pack_v4* fi4 = nullptr)
+        : fi_(fi), h_(h), fi4_(fi4) {}
 
     bool valid() const { return fi_ && h_ != XI_PACK_NULL; }
     xi_pack_handle handle() const { return h_; }
@@ -292,7 +348,7 @@ public:
     // Generic index walk — the count()+key_at()+tag_at() primitives a SINK
     // (expose, record_save) enumerates a sealed pack with WITHOUT any producer
     // knowledge (doc 07 §2 self-description). key_at returns a borrowed,
-    // NON-nul-terminated view into the pack arena, valid until the host releases
+    // NON-nul-terminated view into the pack slab, valid until the host releases
     // the handle. tag_at is an XI_PACK_TAG_* value (-1 if out of range).
     std::optional<std::string_view> key_at(int i) const {
         if (!valid()) return std::nullopt;
@@ -304,7 +360,7 @@ public:
     int tag_at(int i) const { return valid() ? fi_->tag_at(h_, i) : -1; }
 
     // Walk every entry in insertion order as (key, XI_PACK_TAG_* tag) — the
-    // generic producer-agnostic path. The key is a borrowed arena view.
+    // generic producer-agnostic path. The key is a borrowed slab view.
     template <class Fn>
     void for_each(Fn&& fn) const {
         int n = count();
@@ -347,7 +403,7 @@ public:
         if (valid() && fi_->get_image(h_, k, &img)) return img;
         return std::nullopt;
     }
-    // Raw binary entry bytes — the host resolves inline-arena vs pool-buffer
+    // Raw binary entry bytes — the host resolves inline-slab vs pool-buffer
     // storage to one borrowed span (D1 storage duality). Valid for the call.
     std::optional<std::pair<const uint8_t*, int32_t>> bin(const char* k) const {
         const void* p; int32_t n;
@@ -363,6 +419,54 @@ public:
         return std::nullopt;
     }
 
+    // ---- xi.pack@4 readers (self-describing blobs, spec 30). nullopt on
+    // absence, tag mismatch, or a host without the @4 supplement.
+    //
+    // Self-describing blob view: the descriptor map bytes + the 64B-aligned
+    // payload span, both borrowed into the pool buffer (valid for the call).
+    // Decode the descriptor with xi::mp::Reader (or the convention helpers
+    // xi::Pack::desc_find_str/desc_find_i64) — "t" is the type string. `handle`
+    // is the backing buffer, BORROWED — adopt it via PackOut::adopt_blob for a
+    // zero-copy chain (or image_addref it to hold it past the pack).
+    struct Blob {
+        const uint8_t* desc        = nullptr;
+        int32_t        desc_len    = 0;
+        const uint8_t* payload     = nullptr;
+        int64_t        payload_len = 0;
+    };
+    std::optional<Blob> blob(const char* k) const {
+        if (!valid() || !fi4_ || !fi4_->get_blob) return std::nullopt;
+        Blob b;
+        const void* d = nullptr; const void* p = nullptr;
+        if (fi4_->get_blob(h_, k, &d, &b.desc_len, &p, &b.payload_len) != 1)
+            return std::nullopt;
+        b.desc    = reinterpret_cast<const uint8_t*>(d);
+        b.payload = reinterpret_cast<const uint8_t*>(p);
+        return b;
+    }
+    // Convenience consumer accessor for an `xi/image` self-describing blob
+    // (spec 30): parse the descriptor's {w,h,c,dt} + payload into an
+    // ImageBlobView in ONE fail-loud call (nullopt on absent key, a non-blob
+    // entry, "t" != "xi/image", or a malformed/undersized descriptor). Unlike
+    // image() (which rides the @1 xi/image adapter and hands back a u8-assuming
+    // xi_pack_image) this carries the real dtype and needs no @1 door. Wrap it as
+    // a cv::Mat with xi::as_cv_read(ImageBlobView) from <xi/xi_cv.hpp>.
+    std::optional<ImageBlobView> image_blob(const char* k) const {
+        auto b = blob(k);
+        if (!b) return std::nullopt;
+        return read_image_blob(
+            std::span<const uint8_t>(b->desc, b->desc_len > 0 ? (size_t)b->desc_len : 0),
+            std::span<const uint8_t>(b->payload, b->payload_len > 0 ? (size_t)b->payload_len : 0));
+    }
+    // The whole i-th directory row in ONE call (key + tag + storage) — the walk
+    // primitive; insertion order, exactly like key_at/tag_at.
+    std::optional<xi_pack_entry> entry_at(int i) const {
+        xi_pack_entry e{};
+        if (valid() && fi4_ && fi4_->entry_at && fi4_->entry_at(h_, i, &e))
+            return e;
+        return std::nullopt;
+    }
+
     // Fail-loud helpers (the PackOut::fault convention, doc 15).
     bool is_fault() const { return has(pack_contract::kFault); }
     std::optional<std::string_view> fault_code() const { return str(pack_contract::kFault); }
@@ -373,10 +477,12 @@ public:
     std::optional<std::string_view> prov() const { return str(pack_contract::kProv); }
 
     const xi_pack_v1* iface() const { return fi_; }
+    const xi_pack_v4* iface4() const { return fi4_; }
 
 private:
     const xi_pack_v1* fi_;
     xi_pack_handle    h_;
+    const xi_pack_v4* fi4_ = nullptr;   // xi.pack@4 blob supplement; null with no blob plane
 };
 
 // --- Plugin base class ---
@@ -410,6 +516,32 @@ public:
     }
     void emit_binary(const std::vector<uint8_t>& frame) const {
         emit_binary(frame.data(), (int)frame.size());
+    }
+
+    // ZERO-COPY emit of an owned frame buffer (xi.emit@2 / perf/ws-lean). Hands the
+    // host the shared buffer's bytes WITHOUT copying: the host holds a share (via
+    // the ownership token below) until the send completes — or the frame is dropped
+    // / the connection tears down — then releases it here in THIS (the producer's)
+    // TU. A raw 5–20 MP preview is 15–60 MB, so this eliminates a full per-frame
+    // memcpy the copying emit_binary would pay. Falls back to the copying path on a
+    // host without xi.emit@2. Returns false only for an empty/absent buffer.
+    //
+    // The token is a heap-allocated COPY of the shared_ptr; owned_shared_release_
+    // deletes it (dropping one ref). The host borrows buf->data() until then, so
+    // the bytes stay valid and immutable across the async send.
+    bool emit_binary_owned(std::shared_ptr<const std::vector<uint8_t>> buf) const {
+        if (!buf || buf->empty()) return false;
+        if (const xi_emit_v2* ev2 = emit2_iface()) {
+            if (ev2->emit_binary_owned) {
+                auto* owner =
+                    new std::shared_ptr<const std::vector<uint8_t>>(std::move(buf));
+                xi_bin_span span{ (*owner)->data(), (int64_t)(*owner)->size() };
+                ev2->emit_binary_owned(&span, 1, owner, &owned_shared_release_);
+                return true;
+            }
+        }
+        emit_binary(buf->data(), (int)buf->size());   // fallback: copy
+        return true;
     }
 
     // On-disk folder for THIS instance: project/instances/<name>/
@@ -502,8 +634,23 @@ public:
         }
         return pack_iface_;
     }
-    // Start building an output/emit pack (invalid if the host has no pack plane).
-    PackOut new_pack() const { return PackOut(pack_iface()); }
+    // Resolve the xi.pack@4 blob supplement ONCE (cached) — self-describing
+    // blob mint/adopt/add/get + ordinal entry_at (spec 30). Null on a host with
+    // no blob plane; the v1 surface (incl. image() over the @1 blob-adapter
+    // slots) keeps working either way (PackIn/PackOut blob verbs fail closed).
+    const xi_pack_v4* pack4_iface() const {
+        if (!pack4_resolved_) {
+            pack4_resolved_ = true;
+            if (host_ && host_->get_interface)
+                pack4_iface_ = static_cast<const xi_pack_v4*>(
+                    host_->get_interface("xi.pack", 4));
+        }
+        return pack4_iface_;
+    }
+    // Start building an output/emit pack (invalid if the host has no pack
+    // plane). Carries the @4 blob supplement when the host publishes it, so
+    // out.blob()/adopt_blob()/blob_mint() work out of the box.
+    PackOut new_pack() const { return PackOut(pack_iface(), pack4_iface()); }
 
     // Source side: seal + emit a pack to host dispatch. Consumes `out`. The host
     // takes its own ref for the async event, so we drop ours right after. No-op
@@ -536,8 +683,8 @@ public:
     xi_pack_handle pack_door_abi(xi_pack_handle in) {
         const xi_pack_v1* fi = pack_iface();
         if (!fi) return XI_PACK_NULL;
-        PackIn  view(fi, in);
-        PackOut out(fi);
+        PackIn  view(fi, in, pack4_iface());
+        PackOut out(fi, pack4_iface());
         process(view, out);
         // U1 provenance (doc 15): every NON-EMPTY door output — result or
         // plugin-minted $fault pack alike — carries producer identity ($src =
@@ -678,6 +825,21 @@ private:
         }
         return emit_;
     }
+    const xi_emit_v2* emit2_iface() const {
+        if (!emit2_resolved_) {
+            emit2_resolved_ = true;
+            if (host_ && host_->get_interface)
+                emit2_ = static_cast<const xi_emit_v2*>(
+                    host_->get_interface("xi.emit", 2));
+        }
+        return emit2_;
+    }
+    // The xi.emit@2 ownership token: a heap-allocated shared_ptr copy. Deleting it
+    // (here, in the producer's TU) drops one ref of the frame buffer. Non-capturing
+    // → a plain fn pointer the host can call.
+    static void owned_shared_release_(void* p) {
+        delete static_cast<std::shared_ptr<const std::vector<uint8_t>>*>(p);
+    }
     const xi_log_v1* log_iface() const {
         if (!log_resolved_) {
             log_resolved_ = true;
@@ -693,10 +855,14 @@ private:
     mutable const xi_imaging_rw_v1* imaging_rw_          = nullptr;
     mutable bool                 emit_resolved_    = false;
     mutable const xi_emit_v1*    emit_             = nullptr;
+    mutable bool                 emit2_resolved_   = false;
+    mutable const xi_emit_v2*    emit2_            = nullptr;   // xi.emit@2 (zero-copy owned)
     mutable bool                 log_resolved_     = false;
     mutable const xi_log_v1*     log_              = nullptr;
     mutable bool                 pack_resolved_   = false;
     mutable const xi_pack_v1*   pack_iface_            = nullptr;   // xi.pack@1 (wave-2)
+    mutable bool                 pack4_resolved_  = false;
+    mutable const xi_pack_v4*   pack4_iface_           = nullptr;   // xi.pack@4 (blob plane, spec 30)
 };
 
 

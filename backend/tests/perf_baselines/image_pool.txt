@@ -1,4 +1,12 @@
 # perf baseline for bench_image_pool.exe
 # captured by perf_gate.cmake UPDATE_BASELINE=ON — slower-is-worse integer metrics
-image_pool_ns_per_create_16x16x1 97
-image_pool_ns_per_create_320x240x3 6495
+#fp schema xi.perf-baseline/1
+#fp cpu 14 core 2400 MHz GenuineIntel Pentium III (0.18 micron) With 1 Or 2 MB On-Die L2 Cache
+#fp logical_cores 20
+#fp os Windows
+#fp build_type release
+#fp opencv none
+#fp jpeg_backend stb
+#fp xinsp_commit e779bf5
+image_pool_ns_per_create_16x16x1 88
+image_pool_ns_per_create_320x240x3 3231

@@ -8,8 +8,7 @@
 | `height` | `kHeight` | int | int |
 | `fps` | `kFps` | int | int |
 | `streaming` | `kStreaming` | bool | bool (get_def only, read-only) |
-| `pack_mode` | `kPackMode` | bool | bool (default false) — emit via the xi.pack@1 door instead of Record (wave-2 pilot) |
-| `gain` | `kGain` | double | double (default 1.0; clamped [0.05, 8.0]) — PACK-MODE brightness multiplier applied to emitted pixels (saturating at 255); the Record path is never scaled |
+| `gain` | `kGain` | double | double (default 1.0; clamped [0.05, 8.0]) — brightness multiplier applied to emitted pixels (saturating at 255) |
 | `command` | `kCommand` | string | string (command selector) |
 | `value` | `kValue` | double | int (command payload value) |
 | `start` | `kStart` | string (command name) |  |

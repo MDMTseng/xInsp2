@@ -620,6 +620,16 @@ public:
         // reinit() is unreachable for them; do not rely on this gate to cover them.
         {
             std::unique_lock<std::shared_mutex> gate(cap_gate_);
+            // Finding ②: attribute the old instance's dtor releases (image
+            // handles AND pack refs) to THIS instance's owner, exactly like the
+            // adapter dtor path (~:314). Without it the old plugin's pack-ref
+            // release runs off-guard as release_as(pack, 0): the creator tag is
+            // cleared only on owner match, so it stays live and lies — a later
+            // owner sweep then over-releases the creator's seal ref while a
+            // consumer still holds the pack → UAF. reinit() is the one
+            // adapter-mutating path that runs without lane quiesce, so this is
+            // where the unguarded destroy bites.
+            ImagePool::OwnerGuard g(owner_id_);
             if (destroy_fn_ && old) { try { destroy_fn_(old); } catch (...) {} }
         }
         // Restore the last committed config onto the fresh instance. (We do NOT

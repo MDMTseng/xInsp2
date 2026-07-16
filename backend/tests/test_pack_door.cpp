@@ -15,6 +15,12 @@
 //   4. Dispatch — TriggerBus::emit_pack carries a Pack (the sole dispatch
 //      currency after THE CUT; the image + metadata ride inside the pack).
 //      The pack + its pooled image refs balance to baseline once dropped.
+//   5.-8. Creator-tag owner sweep, H1 pack source identity, F1 pool-exhaustion
+//      honesty, cross-plane owner-sweep co-ownership (see each section).
+//   9. The xi.pack@4 self-describing blob door end-to-end (blob_mint -> fill ->
+//      adopt_blob zero-copy path / add_blob copy / get_blob / the @1 get_image
+//      adapter over an xi/image blob / ordinal entry walk), driven plugin-style
+//      through host.get_interface("xi.pack", 4).
 //
 // The plugin-side door (blob_analysis's pack-in/pack-out) + the real end-to-end
 // mock_camera->blob_analysis flow are exercised in the PLUGIN test
@@ -53,6 +59,75 @@ static int g_failures = 0;
 
 static int pool_live() { return xi::ImagePool::instance().cumulative().live_now; }
 
+// ---- stderr capture (fd dup/dup2) — for the @1-image-adapter warn-once pin ----
+#ifdef _WIN32
+#  include <io.h>
+#  define XI_DUP _dup
+#  define XI_DUP2 _dup2
+#  define XI_FILENO _fileno
+#  define XI_CLOSE _close
+#else
+#  include <unistd.h>
+#  define XI_DUP dup
+#  define XI_DUP2 dup2
+#  define XI_FILENO fileno
+#  define XI_CLOSE close
+#endif
+template <class Fn>
+static std::string capture_stderr_(Fn&& fn) {
+    std::fflush(stderr);
+    int saved = XI_DUP(XI_FILENO(stderr));
+    std::FILE* tmp = std::tmpfile();
+    XI_DUP2(XI_FILENO(tmp), XI_FILENO(stderr));
+    fn();
+    std::fflush(stderr);
+    XI_DUP2(saved, XI_FILENO(stderr));           // restore the real stderr
+    XI_CLOSE(saved);
+    std::rewind(tmp);
+    std::string out; char buf[512]; size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, tmp)) > 0) out.append(buf, n);
+    std::fclose(tmp);
+    return out;
+}
+static size_t count_substr_(const std::string& hay, const char* needle) {
+    size_t c = 0, p = 0, nl = std::strlen(needle);
+    while ((p = hay.find(needle, p)) != std::string::npos) { ++c; p += nl; }
+    return c;
+}
+
+// ---------------------------------------------------------------------------
+// (0) @1 image adapter SOFT-RETIREMENT pin. The four @1 image slots are
+// deprecated but keep working; each warns ONCE per process per slot (CT ruling
+// 2026-07). This test deliberately drives the adapter (the compatibility pin —
+// it must NOT migrate away from the thing it tests) and captures stderr to
+// assert the warn-once fires exactly once per slot. Runs FIRST so it observes
+// the process's first adapter use (the warn-once static is process-global).
+// ---------------------------------------------------------------------------
+static void test_image_adapter_warn_once() {
+    SECTION("(0) @1 image adapter deprecation: each slot warns exactly once");
+    xi::install_pack_abi();
+    const xi_pack_v1* fi = xi::pack_v1_iface();
+    std::vector<uint8_t> gray(16, 7);
+    std::string err = capture_stderr_([&] {
+        // Drive each slot TWICE; the warn must fire only on the first.
+        for (int i = 0; i < 2; ++i) {
+            xi_pack_builder b = fi->builder_new();
+            fi->builder_add_image(b, "img", 4, 4, 1, gray.data());
+            xi_image_handle h = xi::pack_pool::alloc_bytes(gray.data(), gray.size());
+            fi->builder_adopt_image(b, "adopted", 4, 4, 1, h);
+            xi::pack_pool::release(h);            // adopt COPIES; drop our raw ref
+            xi_pack_handle f = fi->builder_seal(b);
+            xi_pack_image iv{};
+            fi->get_image(f, "img", &iv);
+            fi->release(f);
+        }
+    });
+    CHECK(count_substr_(err, "builder_add_image") == 1);
+    CHECK(count_substr_(err, "builder_adopt_image") == 1);
+    CHECK(count_substr_(err, "get_image") == 1);
+    CHECK(count_substr_(err, "LEGACY image adapter") == 3);   // one line per slot
+}
+
 // ---------------------------------------------------------------------------
 // (1) Door probe.
 // ---------------------------------------------------------------------------
@@ -65,13 +140,25 @@ static void test_door_probe() {
     const void* v1 = host.get_interface("xi.pack", 1);
     CHECK(v1 != nullptr);
     CHECK(v1 == xi::pack_v1_iface());               // the process-stable singleton
-    CHECK(host.get_interface("xi.pack", 2) == nullptr);  // only @1 published
+    CHECK(host.get_interface("xi.pack", 2) == nullptr);  // @2 never existed
     CHECK(host.get_interface("xi.pack", 0) == nullptr);
     CHECK(host.get_interface("xi.packX", 1) == nullptr);
 
     // A pack-capable plugin caches this pointer once (Plugin::pack_iface()).
     const auto* fi = static_cast<const xi_pack_v1*>(v1);
     CHECK(fi->builder_new && fi->builder_seal && fi->get_i64 && fi->emit_pack);
+
+    // blob plane (spec 30): the xi.pack@4 supplement resolves alongside @1
+    // (Plugin::pack4_iface()) — same id, version 4, its own frozen vtable. The
+    // retired @3 answers NULL forever.
+    CHECK(host.get_interface("xi.pack", 3) == nullptr);
+    const void* v4 = host.get_interface("xi.pack", 4);
+    CHECK(v4 != nullptr);
+    CHECK(v4 == xi::pack_v4_iface());
+    CHECK(v4 != v1);
+    const auto* fi4 = static_cast<const xi_pack_v4*>(v4);
+    CHECK(fi4->blob_mint && fi4->builder_adopt_blob && fi4->builder_add_blob &&
+          fi4->get_blob && fi4->entry_at);
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +232,9 @@ static void test_build_read_roundtrip() {
     CHECK(fi->get_i64(f, "label", &junk) == 0);       // wrong tag -> 0, no coercion
     CHECK(fi->tag_of(f, "nope") == -1);
     CHECK(fi->tag_of(f, "threshold") == XI_PACK_TAG_I64);
-    CHECK(fi->tag_of(f, "gray") == XI_PACK_TAG_IMAGE);
+    // The image entry is a self-describing "xi/image" BLOB now (the frozen @1
+    // get_image slot is a door adapter that parses it); tag_of reports BLOB.
+    CHECK(fi->tag_of(f, "gray") == XI_PACK_TAG_BLOB);
 
     // Generic enumeration (the expose/record_save walk): count + key_at/tag_at.
     CHECK(fi->count(f) == 7);
@@ -154,7 +243,7 @@ static void test_build_read_roundtrip() {
     CHECK(k0 && klen == 9 && std::string(k0, (size_t)klen) == "threshold");
     CHECK(fi->tag_at(f, 0) == XI_PACK_TAG_I64);
     CHECK(fi->tag_at(f, 2) == XI_PACK_TAG_BOOL);   // "pass" (insertion order)
-    CHECK(fi->tag_at(f, 5) == XI_PACK_TAG_IMAGE);
+    CHECK(fi->tag_at(f, 5) == XI_PACK_TAG_BLOB);   // "gray" is an xi/image blob
     CHECK(fi->key_at(f, 99, &klen) == nullptr && klen == 0);   // OOB
     CHECK(fi->tag_at(f, 99) == -1);
 
@@ -560,8 +649,298 @@ static void test_cross_plane_owner_sweep_keeps_coowned_pack_buffers() {
     CHECK(fi->get_image(f, "frame", &iv) == 0);         // the handle is dead now
 }
 
+// ---------------------------------------------------------------------------
+// (9) The xi.pack@4 self-describing blob door end-to-end, plugin-style: BOTH
+//     vtables resolved via host.get_interface (exactly what a pack-capable
+//     plugin does at create), building/reading through the SAME builder/handle
+//     ids as v1. Covers: blob_mint -> fill payload in place -> adopt_blob (the
+//     zero-copy producer path, 64B-aligned payload), add_blob copy convenience,
+//     get_blob (descriptor + payload), the @1 get_image adapter over an
+//     "xi/image" blob (+ fail-closed on a non-image blob and on get_bin), and
+//     ordinal entry_at parity with v1 key_at/tag_at.
+// ---------------------------------------------------------------------------
+static void test_pack_v4_door() {
+    SECTION("xi.pack@4: blob mint/adopt/add/get + image adapter + ordinal walk");
+    xi::install_pack_abi();
+    xi_host_api host = xi::ImagePool::make_host_api();
+    const auto* fi  = static_cast<const xi_pack_v1*>(host.get_interface("xi.pack", 1));
+    const auto* fi4 = static_cast<const xi_pack_v4*>(host.get_interface("xi.pack", 4));
+    CHECK(fi != nullptr && fi4 != nullptr);
+    size_t base_frames = xi::PackRegistry::instance().live_frames();
+    int    base_live   = pool_live();
+
+    // An xi/image descriptor for a 3x2x1 u8 blob:
+    //   {"t":"xi/image","w":3,"h":2,"c":1,"dt":"u8"}
+    xi::mp::Writer dw;
+    dw.map(5);
+    dw.key("t");  dw.str("xi/image");
+    dw.key("w");  dw.int_(3);
+    dw.key("h");  dw.int_(2);
+    dw.key("c");  dw.int_(1);
+    dw.key("dt"); dw.str("u8");
+    const xi::mp::Bytes desc(dw.bytes());
+    const int64_t payload_len = 3 * 2 * 1;
+
+    xi_pack_builder b = fi->builder_new();
+    fi->builder_add_i64(b, "seq", 3);
+
+    // (a) blob_mint -> fill the 64B-aligned payload IN PLACE -> adopt_blob.
+    void* pptr = nullptr;
+    xi_image_handle h = fi4->blob_mint(desc.data(), (int32_t)desc.size(),
+                                       payload_len, &pptr);
+    CHECK(h != XI_IMAGE_NULL && pptr != nullptr);
+    CHECK((reinterpret_cast<uintptr_t>(pptr) & 63u) == 0);   // payload 64B-aligned
+    uint8_t* px = static_cast<uint8_t*>(pptr);
+    for (int i = 0; i < 6; ++i) px[i] = uint8_t(0x10 + i);
+    CHECK(fi4->builder_adopt_blob(b, "img", h) == 1);        // pack co-owns (addref)
+    host.image_release(h);                                   // caller drops its mint ref
+    CHECK(pool_live() == base_live + 1);                     // one pooled blob buffer
+
+    // (b) add_blob copy convenience, a custom convention type.
+    xi::mp::Writer dw2;
+    dw2.map(2); dw2.key("t"); dw2.str("acme/roi"); dw2.key("n"); dw2.int_(4);
+    const xi::mp::Bytes desc2(dw2.bytes());
+    const uint8_t roi[4] = { 9, 8, 7, 6 };
+    CHECK(fi4->builder_add_blob(b, "roi", desc2.data(), (int32_t)desc2.size(), roi, 4) == 1);
+    // An invalid (non-map) descriptor is refused, nothing added.
+    xi::mp::Writer bad; bad.int_(7);
+    CHECK(fi4->builder_add_blob(b, "bad", bad.bytes().data(),
+                                (int32_t)bad.bytes().size(), roi, 4) == 0);
+    CHECK(pool_live() == base_live + 2);
+
+    xi_pack_handle A = fi->builder_seal(b);
+    CHECK(A != XI_PACK_NULL);
+
+    // A blob's tag is XI_PACK_TAG_BLOB. v1 get_bin fails closed on it; the @1
+    // get_image adapter parses an "xi/image" blob and rejects a non-image one.
+    CHECK(fi->tag_of(A, "img") == XI_PACK_TAG_BLOB);
+    CHECK(fi->tag_of(A, "roi") == XI_PACK_TAG_BLOB);
+    const void* jp = nullptr; int32_t jl = 0;
+    CHECK(fi->get_bin(A, "img", &jp, &jl) == 0);             // a blob is not a plain bin
+    xi_pack_image iv{};
+    CHECK(fi->get_image(A, "img", &iv) == 1);                // xi/image adapter parses it
+    CHECK(iv.width == 3 && iv.height == 2 && iv.channels == 1 && iv.length == 6);
+    CHECK(iv.pixels && static_cast<const uint8_t*>(iv.pixels)[5] == 0x15);
+    CHECK(fi->get_image(A, "roi", &iv) == 0);                // not an xi/image blob
+
+    // @4 get_blob: descriptor + payload, both zero-copy.
+    const void* dptr = nullptr; int32_t dlen = 0;
+    const void* yptr = nullptr; int64_t ylen = 0;
+    CHECK(fi4->get_blob(A, "img", &dptr, &dlen, &yptr, &ylen) == 1);
+    CHECK(dptr && dlen == (int32_t)desc.size() &&
+          std::memcmp(dptr, desc.data(), desc.size()) == 0);
+    CHECK(yptr && ylen == payload_len &&
+          static_cast<const uint8_t*>(yptr)[0] == 0x10);
+    CHECK(fi4->get_blob(A, "seq",  &dptr, &dlen, &yptr, &ylen) == 0);  // i64 is not a blob
+    CHECK(fi4->get_blob(A, "nope", &dptr, &dlen, &yptr, &ylen) == 0);
+    CHECK(fi4->get_blob(A, "roi",  &dptr, &dlen, &yptr, &ylen) == 1);
+    CHECK(ylen == 4 && static_cast<const uint8_t*>(yptr)[0] == 9);
+
+    // ---- finding A①: the @1 get_image adapter must NOT lie about an xi/image
+    // blob it cannot faithfully present. A u16 image, or one whose payload does
+    // not match w*h*c (u8), fails CLOSED rather than reporting a bogus length.
+    {
+        auto img_desc = [](const char* dt, int w, int h, int c) {
+            xi::mp::Writer d; d.map(5);
+            d.key("t"); d.str("xi/image"); d.key("w"); d.int_(w);
+            d.key("h"); d.int_(h); d.key("c"); d.int_(c); d.key("dt"); d.str(dt);
+            return xi::mp::Bytes(d.bytes());
+        };
+        xi_pack_builder b2 = fi->builder_new();
+        const xi::mp::Bytes du16 = img_desc("u16", 2, 2, 1);           // 2*2*1*2 = 8 bytes
+        const uint8_t u16px[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        CHECK(fi4->builder_add_blob(b2, "u16img", du16.data(), (int32_t)du16.size(),
+                                    u16px, 8) == 1);
+        const xi::mp::Bytes dmis = img_desc("u8", 3, 3, 1);            // claims 9, payload 4
+        const uint8_t four[4] = { 1, 2, 3, 4 };
+        CHECK(fi4->builder_add_blob(b2, "mis", dmis.data(), (int32_t)dmis.size(),
+                                    four, 4) == 1);
+        xi_pack_handle B2 = fi->builder_seal(b2);
+        xi_pack_image iv2{};
+        CHECK(fi->get_image(B2, "u16img", &iv2) == 0);   // non-u8: door won't lie
+        CHECK(fi->get_image(B2, "mis",    &iv2) == 0);   // payload != w*h*c: fail closed
+        CHECK(fi4->get_blob(B2, "u16img", &dptr, &dlen, &yptr, &ylen) == 1);  // @4 still serves it
+        fi->release(B2);
+    }
+    // finding B①: add_image refuses a non-positive dim rather than dropping it via
+    // a wrapped length (void slot, so we assert the entry never appears).
+    {
+        xi_pack_builder b3 = fi->builder_new();
+        fi->builder_add_image(b3, "bad_w", 0, 4, 1, nullptr);   // w<=0 → refused
+        fi->builder_add_image(b3, "bad_c", 4, 4, -1, nullptr);  // c<=0 → refused
+        xi_pack_handle B3 = fi->builder_seal(b3);
+        CHECK(fi->count(B3) == 0);                              // neither entry added
+        fi->release(B3);
+    }
+
+    // ---- ordinal walk: entry_at parity with v1 key_at/tag_at (no type_id) ----
+    CHECK(fi->count(A) == 3);                                // seq, img, roi (bad refused)
+    for (int32_t i = 0; i < 3; ++i) {
+        int32_t kl = 0;
+        const char* k = fi->key_at(A, i, &kl);
+        xi_pack_entry e{};
+        CHECK(fi4->entry_at(A, i, &e) == 1);
+        CHECK(e.key && k && e.key_len == kl &&
+              std::memcmp(e.key, k, (size_t)kl) == 0);       // same insertion order
+        CHECK(e.tag == fi->tag_at(A, i));
+    }
+    xi_pack_entry e0{};
+    CHECK(fi4->entry_at(A, 0, &e0) == 1 && e0.external == 0 &&
+          e0.tag == XI_PACK_TAG_I64);                        // "seq": inline
+    xi_pack_entry e1{};
+    CHECK(fi4->entry_at(A, 1, &e1) == 1 && e1.external == 1 &&
+          e1.tag == XI_PACK_TAG_BLOB);                       // "img": pooled blob
+    CHECK(fi4->entry_at(A, 99, &e0) == 0);                   // OOB
+
+    // blob_mint refuses a non-canonical / non-map descriptor (nothing minted).
+    void* pp = reinterpret_cast<void*>(0x1);
+    CHECK(fi4->blob_mint(bad.bytes().data(), (int32_t)bad.bytes().size(), 4, &pp)
+          == XI_IMAGE_NULL);
+    CHECK(pp == nullptr);
+
+    fi->release(A);
+    CHECK(pool_live() == base_live);                         // exactly-once release, no leak
+    CHECK(xi::PackRegistry::instance().live_frames() == base_frames);
+}
+
+// ---------------------------------------------------------------------------
+// (10) Finding ⑦ regression: foreign msgpack is canonicalized AT THE C-ABI SEAM
+//      (builder_add_mp), turning "ingress is the only path" from a convention
+//      into structure. Well-formed canonical bytes round-trip byte-identical
+//      (canonicalize is idempotent, so wire/golden bytes are unaffected);
+//      malformed / ext-bearing (incl. handle-shaped) bytes are REFUSED — nothing
+//      is stored, matching ScriptPack::add_mp's fail-closed drop. Pre-fix this
+//      trampoline copied caller bytes verbatim into the slab, so hostile msgpack
+//      could ride the wire / a replay file.
+// ---------------------------------------------------------------------------
+static void test_add_mp_seam_canonicalize() {
+    SECTION("⑦: builder_add_mp canonicalizes foreign msgpack at the C-ABI seam");
+    xi::install_pack_abi();
+    const xi_pack_v1* fi = xi::pack_v1_iface();
+
+    // Well-formed canonical value (an xi::mp::Writer value is canonical by
+    // construction — max-width tags, string keys).
+    xi::mp::Writer mw;
+    mw.array(2); mw.int_(1); mw.str("hi");
+    const xi::mp::Bytes canon(mw.bytes());   // copy: seal recycles the writer's buffer path
+
+    xi_pack_builder b = fi->builder_new();
+    fi->builder_add_mp(b, "good", canon.data(), (int32_t)canon.size());
+
+    // Malformed: a fixarray header claiming 4 elements with no payload — the
+    // classic truncation the interior must never trust.
+    const uint8_t truncated[1] = { 0x94 };
+    fi->builder_add_mp(b, "trunc", truncated, (int32_t)sizeof truncated);
+
+    // Handle-shaped ext (fixext1, type 0x70 = kPoolHandleExtType): a forged pool
+    // ref. reject-all ext policy refuses it (ingress never imports a pool handle).
+    const uint8_t handle_ext[3] = { 0xd4, 0x70, 0x00 };
+    fi->builder_add_mp(b, "forged", handle_ext, (int32_t)sizeof handle_ext);
+
+    // Any other foreign ext is likewise refused by the reject-all policy.
+    const uint8_t any_ext[3] = { 0xd4, 0x01, 0x2a };
+    fi->builder_add_mp(b, "ext", any_ext, (int32_t)sizeof any_ext);
+
+    xi_pack_handle f = fi->builder_seal(b);
+    CHECK(f != XI_PACK_NULL);
+
+    // Only the well-formed entry survived; the three hostile ones were dropped.
+    CHECK(fi->count(f) == 1);
+    CHECK(fi->tag_of(f, "good") == XI_PACK_TAG_MP);
+    CHECK(fi->tag_of(f, "trunc")  == -1);
+    CHECK(fi->tag_of(f, "forged") == -1);
+    CHECK(fi->tag_of(f, "ext")    == -1);
+
+    // Byte-identical: canonical input re-emitted verbatim (idempotent) — wire
+    // and golden bytes are unaffected by the seam gate.
+    const void* mp = nullptr; int32_t ml = 0;
+    CHECK(fi->get_mp(f, "good", &mp, &ml) == 1);
+    CHECK(ml == (int32_t)canon.size());
+    CHECK(mp && std::memcmp(mp, canon.data(), canon.size()) == 0);
+
+    fi->release(f);
+}
+
+// ---------------------------------------------------------------------------
+// (11) Finding ② regression (mechanism-level): the single-creator-tag invariant
+//      requires the creator's seal ref to be retired UNDER OwnerGuard(creator).
+//      reinit() destroys the OLD plugin instance, whose dtor releases the pack
+//      refs it created; the fix wraps that destroy in OwnerGuard(owner_id_) so
+//      those releases match the creator tag and clear it (exactly like the
+//      adapter dtor path). This pins the invariant both ways: a GUARDED creator
+//      release (what fixed reinit now does) clears the tag, so a later owner
+//      sweep reclaims nothing and a consumer's co-held ref survives; an
+//      UNGUARDED release (the pre-fix reinit path — destroy ran off-guard, so
+//      release_as(pack, 0)) STRANDS the tag, and the same sweep then
+//      over-releases the consumer's live ref — the UAF finding ② describes.
+//
+//      NOTE: this drives the PackRegistry mechanism directly rather than a real
+//      reinit() through a DLL. A faithful reinit-driven test needs a plugin
+//      whose dtor releases a pack ref it created (a cache/ring plugin); no such
+//      test plugin exists and building one was out of scope ("no huge new
+//      harness"). The fix itself (xi_cabi_adapter.hpp reinit) is a one-line
+//      OwnerGuard mirroring the already-tested dtor path.
+// ---------------------------------------------------------------------------
+static void test_reinit_creator_tag_ownerguard() {
+    SECTION("②: the creator seal ref must be retired under OwnerGuard(creator)");
+    xi::install_pack_abi();
+    const xi_pack_v1* fi = xi::pack_v1_iface();
+    auto& reg = xi::PackRegistry::instance();
+    size_t base_frames = reg.live_frames();
+
+    xi::ImagePoolOwnerId X = xi::ImagePool::alloc_owner_id();   // the OLD instance (creator)
+    xi::ImagePoolOwnerId Q = xi::ImagePool::alloc_owner_id();   // a consumer co-holding the pack
+
+    // --- THE FIX: the old instance's dtor releases its seal ref UNDER
+    //     OwnerGuard(owner_id_) (fixed reinit). The tag clears; the sweep is safe.
+    {
+        xi_pack_handle P = XI_PACK_NULL;
+        { xi::ImagePool::OwnerGuard g(X);            // old instance seals under its guard
+          xi_pack_builder b = fi->builder_new();
+          fi->builder_add_i64(b, "seq", 7);
+          P = fi->builder_seal(b); }
+        CHECK(P != XI_PACK_NULL);
+        CHECK(reg.owner_refs(X) == 1);               // creator tag live (rc 1)
+        { xi::ImagePool::OwnerGuard g(Q); fi->retain(P); }   // consumer co-holds (rc 2, untracked)
+
+        { xi::ImagePool::OwnerGuard g(X); fi->release(P); }  // GUARDED release → tag cleared, rc 1
+        CHECK(reg.owner_refs(X) == 0);               // NOT stranded
+        CHECK(xi::ImagePool::sweep_packs_for(X) == 0);       // later teardown sweep reclaims nothing
+        int64_t v = 0;
+        CHECK(fi->get_i64(P, "seq", &v) == 1 && v == 7);     // consumer's ref still valid — no UAF
+        { xi::ImagePool::OwnerGuard g(Q); fi->release(P); }  // consumer done → freed exactly once
+        CHECK(reg.live_frames() == base_frames);
+    }
+
+    // --- THE BUG the fix removes: an UNGUARDED creator release (pre-fix reinit's
+    //     destroy ran with current_owner()==0 → release_as(pack, 0)). The tag
+    //     clears only on owner match, so it STAYS live and lies; the owner sweep
+    //     then over-releases the consumer's surviving ref → the pack is freed
+    //     while Q still holds it. Reproduced here to prove the mechanism (and to
+    //     document precisely what the OwnerGuard prevents).
+    {
+        xi_pack_handle P = XI_PACK_NULL;
+        { xi::ImagePool::OwnerGuard g(X);
+          xi_pack_builder b = fi->builder_new();
+          fi->builder_add_i64(b, "seq", 9);
+          P = fi->builder_seal(b); }
+        CHECK(P != XI_PACK_NULL);
+        { xi::ImagePool::OwnerGuard g(Q); fi->retain(P); }   // consumer co-holds (rc 2)
+
+        reg.release_as(P, 0);                        // UNGUARDED release (owner 0 != creator X): rc 1
+        CHECK(reg.owner_refs(X) == 1);               // STRANDED tag — the defect
+        CHECK(xi::ImagePool::sweep_packs_for(X) == 1);       // sweep over-releases Q's live ref
+        int64_t v = 0;
+        CHECK(fi->get_i64(P, "seq", &v) == 0);       // P freed under Q — the finding-② UAF
+        // Q's ref is now dangling by construction; the over-release already drove
+        // rc to 0, so nothing more to release — the table is back to baseline.
+        CHECK(reg.live_frames() == base_frames);
+    }
+}
+
 int main() {
     std::printf("[test] xi.pack@1 carved data-plane door + dispatch dual-carry\n");
+    test_image_adapter_warn_once();   // FIRST: observe the process's first adapter use
     test_door_probe();
     test_build_read_roundtrip();
     test_refcount_lifecycle();
@@ -570,6 +949,9 @@ int main() {
     test_has_source_pack_identity();
     test_bin_pool_exhaustion_no_null_span();
     test_cross_plane_owner_sweep_keeps_coowned_pack_buffers();
+    test_pack_v4_door();
+    test_add_mp_seam_canonicalize();
+    test_reinit_creator_tag_ownerguard();
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
         return 0;

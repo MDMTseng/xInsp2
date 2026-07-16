@@ -1,5 +1,7 @@
 # xInsp3 Data Plane — Uniform Keyed Binary Buffers, msgpack by Default
 
+> [2026-07-14] **Storage: the v3 slab (packv3 branch) with memory == wire restored (④A, doc 28 finding ④):** entries live in one contiguous slab, and each INLINE entry stores its canonical msgpack value verbatim — so `raw_at(i)` IS the wire bytes and `canonical_value` splices them (the "memory ≈ wire" identity below holds structurally, not as a walker convention). EXTERN Image/Tensor/large-bin pixels stay raw in pool buffers behind a handle. See docs/internals/pack-plane.md.
+
 > **Naming:** the container is **Pack** (`xi::Pack`, the `xi.pack@1` door). It
 > was called **Frame** in the wave-2 pilots; the type/door/SDK surface was
 > renamed Frame → Pack (zero image connotation) — the `"frame"` *image key* and

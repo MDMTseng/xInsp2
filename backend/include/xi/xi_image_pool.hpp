@@ -48,7 +48,251 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+#include <malloc.h>     // _aligned_malloc / _aligned_free
+#else
+#include <cstdlib>      // posix_memalign
+#endif
+
 namespace xi {
+
+// =====================================================================
+// pixpool — size-class pixel-buffer recycling (perf/imagepool-sizeclass).
+//
+// Backported from the design-C prototype (tests/proto/xi_pack_c.hpp raw_class_alloc):
+// the production create()/release() cycle used to pay `new PoolEntry` +
+// `vector::resize` (heap alloc + zero-fill + first-touch page faults) per
+// create and a full heap free per release — ~508 us for a 1920x1200 frame.
+// This layer changes ONLY where the pixel bytes come from and where they go
+// on free; every other ImagePool semantic (handles, generations, refcounts,
+// owner sweep, WalkGuard) is untouched.
+//
+//   * 2^n size classes, 4 KiB .. 64 MiB, every buffer 64-byte aligned
+//     (_aligned_malloc). A request over 64 MiB (ImagePool allows up to its
+//     documented 1 GiB per-buffer cap) takes the DIRECT lane: exact-size
+//     aligned heap alloc/free, never cached (kClassDirect).
+//   * Free path: per-thread LIFO magazine (hottest-in-cache) -> mutexed
+//     global overflow shelf -> _aligned_free. Alloc path: magazine ->
+//     shelf -> fresh _aligned_malloc.
+//   * BYTE BUDGETS (production requirement the prototype deferred) — all
+//     constexpr-tunable below:
+//       - magazine: at most kMagazineCap (4) buffers per class per thread,
+//         additionally capped so one class holds at most kMagazineByteBudget
+//         (64 MiB) per thread => the 64 MiB class keeps only 1 per thread.
+//       - shelf: per class, at most kShelfMaxCount (32) buffers AND at most
+//         kShelfByteBudget (128 MiB) => the 64 MiB class can never hoard
+//         more than 2 buffers; the 4 KiB..4 MiB classes are count-capped.
+//     An over-budget free goes straight to _aligned_free (evicted_frees).
+//   * Teardown ordering: the shelf is INTENTIONALLY LEAKED (same doctrine as
+//     ImagePool::instance() — process-lifetime, reclaimed by the OS), so a
+//     per-thread magazine destructor that runs at ANY point during thread /
+//     static teardown can always drain its survivors to the shelf — there is
+//     no destroyed-shelf window. The magazine itself lives behind a
+//     trivially-destructible thread_local POINTER slot: after the owning
+//     thread_local's destructor runs (nulling the slot), a late pixel_free
+//     on that thread (e.g. from another thread_local's dtor releasing a
+//     handle) safely bypasses the dead magazine and uses the shelf / heap.
+// =====================================================================
+namespace pixpool {
+
+inline constexpr int      kMinClassLog        = 12;              // 4 KiB
+inline constexpr int      kMaxClassLog        = 26;              // 64 MiB
+inline constexpr int      kNumClasses         = kMaxClassLog - kMinClassLog + 1;
+inline constexpr uint8_t  kClassDirect        = 0xFF;            // > 64 MiB lane
+// Budgets (see the header block above for the rationale + resulting counts).
+inline constexpr int      kMagazineCap        = 4;               // bufs/class/thread
+inline constexpr uint64_t kMagazineByteBudget = 64ull << 20;     // per class per thread
+inline constexpr int      kShelfMaxCount      = 32;              // bufs/class global
+inline constexpr uint64_t kShelfByteBudget    = 128ull << 20;    // per class global
+
+inline void* aligned_alloc64(size_t n) {
+#ifdef _WIN32
+    return _aligned_malloc(n, 64);
+#else
+    void* p = nullptr;
+    if (posix_memalign(&p, 64, n) != 0) return nullptr;
+    return p;
+#endif
+}
+inline void aligned_free64(void* p) {
+#ifdef _WIN32
+    _aligned_free(p);
+#else
+    free(p);
+#endif
+}
+
+inline uint64_t class_bytes(uint8_t cls) {
+    return uint64_t(1) << (kMinClassLog + cls);
+}
+inline uint8_t class_for(uint64_t bytes) {
+    if (bytes == 0) bytes = 1;
+    for (int c = kMinClassLog; c <= kMaxClassLog; ++c)
+        if (bytes <= (uint64_t(1) << c)) return uint8_t(c - kMinClassLog);
+    return kClassDirect;
+}
+// Effective per-class caps under the byte budgets.
+inline int magazine_slots(uint8_t cls) {
+    uint64_t by_budget = kMagazineByteBudget / class_bytes(cls);
+    int n = by_budget < uint64_t(kMagazineCap) ? int(by_budget) : kMagazineCap;
+    return n < 1 ? 1 : n;    // every class may keep at least one
+}
+inline int shelf_slots(uint8_t cls) {
+    uint64_t by_budget = kShelfByteBudget / class_bytes(cls);
+    return by_budget < uint64_t(kShelfMaxCount) ? int(by_budget) : kShelfMaxCount;
+}
+
+// Cumulative counters (relaxed; diagnostic only). The tests' oracle for
+// "the magazine actually recycled" — mirrored by ImagePool::pixel_alloc_stats().
+struct Stats {
+    std::atomic<uint64_t> magazine_hits{0};   // alloc served from the magazine
+    std::atomic<uint64_t> shelf_hits{0};      // alloc served from the shelf
+    std::atomic<uint64_t> fresh_allocs{0};    // alloc fell through to the heap
+    std::atomic<uint64_t> direct_allocs{0};   // > 64 MiB direct-lane alloc
+    std::atomic<uint64_t> magazine_puts{0};   // free cached in the magazine
+    std::atomic<uint64_t> shelf_puts{0};      // free cached on the shelf
+    std::atomic<uint64_t> evicted_frees{0};   // free over budget -> heap
+    std::atomic<uint64_t> direct_frees{0};    // direct-lane free
+};
+inline Stats& stats() {
+    static Stats s;
+    return s;
+}
+
+// One pooled pixel buffer. cap is the usable capacity (class size, or the
+// exact request on the direct lane); the logical image size lives on the
+// PoolEntry.
+struct PixBuf {
+    uint8_t* mem = nullptr;
+    uint64_t cap = 0;
+    uint8_t  cls = 0;
+};
+
+namespace detail {
+
+// Global overflow shelf — cold path (magazine over/underflow, thread exit).
+// INTENTIONALLY LEAKED, same doctrine as ImagePool::instance(): magazine
+// destructors may run arbitrarily late in thread/static teardown and must
+// always find a live shelf.
+class Shelf {
+public:
+    static Shelf& instance() {
+        static Shelf* s = new Shelf();
+        return *s;
+    }
+    void* pop(uint8_t cls) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto& v = free_[cls];
+        if (v.empty()) return nullptr;
+        void* p = v.back();
+        v.pop_back();
+        return p;
+    }
+    // False when the class is at its budget (caller frees outright).
+    bool push(uint8_t cls, void* p) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto& v = free_[cls];
+        if (int(v.size()) >= shelf_slots(cls)) return false;
+        v.push_back(p);
+        return true;
+    }
+    // Diagnostic (tests): current cached count for a class.
+    int count(uint8_t cls) {
+        std::lock_guard<std::mutex> lk(mu_);
+        return int(free_[cls].size());
+    }
+
+private:
+    std::mutex mu_;
+    std::vector<void*> free_[kNumClasses];
+};
+
+// Per-thread magazines. The destructor drains survivors to the (leaked,
+// hence always-alive) shelf, or to the heap when the shelf is at budget —
+// a dying thread never leaks its cached buffers.
+struct Magazine {
+    void* items[kNumClasses][kMagazineCap];
+    int   count[kNumClasses];
+    Magazine() { std::memset(count, 0, sizeof count); }
+    ~Magazine() {
+        for (int c = 0; c < kNumClasses; ++c)
+            for (int i = 0; i < count[c]; ++i)
+                if (!Shelf::instance().push(uint8_t(c), items[c][i]))
+                    aligned_free64(items[c][i]);
+    }
+    Magazine(const Magazine&) = delete;
+    Magazine& operator=(const Magazine&) = delete;
+};
+
+// The magazine hides behind a trivially-destructible thread_local POINTER:
+// the pointer slot itself has no destructor, so it stays readable (as null)
+// even after the owning Owner thread_local has been destroyed — a release()
+// running inside a LATER thread_local destructor on the same thread cannot
+// touch a dead magazine; it falls through to the shelf / heap instead.
+inline Magazine* tls_magazine() {
+    thread_local Magazine* slot = nullptr;
+    struct Owner {
+        Magazine** s;
+        explicit Owner(Magazine** slot_) : s(slot_) { *s = new Magazine(); }
+        ~Owner() { delete *s; *s = nullptr; }
+    };
+    thread_local Owner owner{&slot};
+    return slot;
+}
+
+} // namespace detail
+
+// Alloc: magazine -> shelf -> fresh heap; > 64 MiB takes the direct lane.
+// Returned bytes are UNSPECIFIED (recycled buffers carry stale pixels).
+// ImagePool::create() hands them back as-is — no zero-fill (CT ruling 2026-07).
+inline PixBuf pixel_alloc(uint64_t bytes) {
+    PixBuf b;
+    b.cls = class_for(bytes);
+    if (b.cls == kClassDirect) {
+        b.mem = static_cast<uint8_t*>(aligned_alloc64(size_t(bytes)));
+        b.cap = b.mem ? bytes : 0;
+        if (b.mem) stats().direct_allocs.fetch_add(1, std::memory_order_relaxed);
+        return b;
+    }
+    b.cap = class_bytes(b.cls);
+    if (detail::Magazine* m = detail::tls_magazine(); m && m->count[b.cls] > 0) {
+        b.mem = static_cast<uint8_t*>(m->items[b.cls][--m->count[b.cls]]);   // hot
+        stats().magazine_hits.fetch_add(1, std::memory_order_relaxed);
+        return b;
+    }
+    if (void* p = detail::Shelf::instance().pop(b.cls)) {
+        b.mem = static_cast<uint8_t*>(p);
+        stats().shelf_hits.fetch_add(1, std::memory_order_relaxed);
+        return b;
+    }
+    b.mem = static_cast<uint8_t*>(aligned_alloc64(size_t(b.cap)));
+    if (b.mem) stats().fresh_allocs.fetch_add(1, std::memory_order_relaxed);
+    else       b.cap = 0;
+    return b;
+}
+
+// Free: magazine (releasing thread's — a buffer created on thread A and
+// released on thread B migrates to B's magazine) -> shelf -> heap.
+inline void pixel_free(PixBuf& b) {
+    if (!b.mem) return;
+    if (b.cls == kClassDirect) {
+        aligned_free64(b.mem);
+        stats().direct_frees.fetch_add(1, std::memory_order_relaxed);
+    } else if (detail::Magazine* m = detail::tls_magazine();
+               m && m->count[b.cls] < magazine_slots(b.cls)) {
+        m->items[b.cls][m->count[b.cls]++] = b.mem;
+        stats().magazine_puts.fetch_add(1, std::memory_order_relaxed);
+    } else if (detail::Shelf::instance().push(b.cls, b.mem)) {
+        stats().shelf_puts.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        aligned_free64(b.mem);
+        stats().evicted_frees.fetch_add(1, std::memory_order_relaxed);
+    }
+    b.mem = nullptr;
+    b.cap = 0;
+}
+
+} // namespace pixpool
 
 // Per-creator identity. Lets the pool sweep all handles allocated on
 // behalf of a given plugin instance / script when that owner dies
@@ -58,7 +302,13 @@ namespace xi {
 using ImagePoolOwnerId = uint32_t;
 
 struct PoolEntry {
-    std::vector<uint8_t> pixels;
+    // Pooled pixel storage (perf/imagepool-sizeclass): a 64-byte-aligned
+    // buffer from the pixpool size-class recycler; `size` is the logical
+    // byte count (w*h*ch, <= buf.cap). The destructor returns the buffer to
+    // the recycler, so EVERY existing delete path (reclaim_entry_,
+    // drain_retired_, the failed-create unique_ptr) recycles for free.
+    pixpool::PixBuf buf;
+    uint64_t size = 0;
     int32_t  width = 0;
     int32_t  height = 0;
     int32_t  channels = 0;
@@ -70,6 +320,8 @@ struct PoolEntry {
     // be a formal data race (external review 08 finding 1). Relaxed everywhere:
     // stats only needs a coherent-enough snapshot, not ordering against pixels.
     std::atomic<ImagePoolOwnerId> owner{0};
+
+    ~PoolEntry() { pixpool::pixel_free(buf); }
 };
 
 class ImagePool {
@@ -79,7 +331,6 @@ public:
     static constexpr uint64_t SLOT_MASK  = SLOT_COUNT - 1;
     // Max generation that fits in (64 - 8 - SLOT_BITS) = 40 bits.
     static constexpr uint64_t GEN_MAX    = (1ull << 40) - 1;
-
     // INTENTIONALLY LEAKED: the pool is process-lifetime state, so it is never
     // destroyed — heap-allocated once, reclaimed by the OS at exit. This makes
     // every late-teardown path (a static-destruction adapter dtor's owner
@@ -93,21 +344,23 @@ public:
 
     // ---- core lookup -------------------------------------------------
 
-    PoolEntry* lookup(xi_image_handle h) const {
-        uint32_t idx = (uint32_t)(h & SLOT_MASK);
-        if (idx >= SLOT_COUNT) return nullptr;
-        PoolEntry* e = slots_[idx].entry.load(std::memory_order_acquire);
-        if (!e) return nullptr;
-        // Reject stale handles whose generation no longer matches the
-        // slot's current occupant. Without this a careless plugin that
-        // holds a handle past release would land on the next allocation.
-        if (e->generation != ((h >> SLOT_BITS) & GEN_MAX)) return nullptr;
-        return e;
-    }
+    PoolEntry* lookup(xi_image_handle h) const { return lookup_(h, nullptr); }
 
     // ---- create / release -------------------------------------------
 
+    // create() returns UNINITIALISED pixels (CT ruling, 2026-07: canvas
+    // zero-fill removed — the info-leak from a recycled buffer's stale bytes is
+    // accepted). A producer MUST fully overwrite every byte it exposes; a
+    // partial-paint producer must clear the regions it does not write, or stale
+    // pixels ride onto the wire / into a record. A recycled magazine buffer
+    // carries the PREVIOUS image's bytes. (The prior create()/create_uninit()
+    // split collapsed here: both were the same mint once zero-fill went away.)
     xi_image_handle create(int32_t w, int32_t h, int32_t ch) {
+        return create_(w, h, ch);
+    }
+
+private:
+    xi_image_handle create_(int32_t w, int32_t h, int32_t ch) {
         // D-P1-7: validate dimensions BEFORE entering counter / slot
         // bookkeeping. The original `(size_t)w * h * ch` cast applies
         // only to the first multiplicand; `h * ch` is int32 mul first,
@@ -125,12 +378,16 @@ public:
         if (pixels <= 0 || pixels > (int64_t(1) << 30)) return 0;
 
         std::unique_ptr<PoolEntry> entry(new PoolEntry());
-        try {
-            entry->pixels.resize((size_t)pixels);
-        } catch (const std::bad_alloc&) {
+        entry->buf = pixpool::pixel_alloc((uint64_t)pixels);
+        if (!entry->buf.mem) {
             // entry deletes via unique_ptr; counters untouched.
             return 0;
         }
+        entry->size = (uint64_t)pixels;
+        // NO ZERO-FILL (CT ruling, 2026-07): the buffer is handed back with
+        // whatever bytes it carries (a recycled magazine buffer holds the
+        // previous image's pixels). The producer overwrites what it exposes; the
+        // pool spends no per-create memset. See create()'s contract note above.
         entry->width    = w;
         entry->height   = h;
         entry->channels = ch;
@@ -164,6 +421,7 @@ public:
         return ((uint64_t)gen << SLOT_BITS) | (uint64_t)idx;
     }
 
+public:
     void addref(xi_image_handle h) {
         if (auto* e = lookup(h)) {
             e->refcount.fetch_add(1, std::memory_order_relaxed);
@@ -171,11 +429,9 @@ public:
     }
 
     void release(xi_image_handle h) {
-        uint32_t idx = (uint32_t)(h & SLOT_MASK);
-        if (idx >= SLOT_COUNT) return;
-        PoolEntry* e = slots_[idx].entry.load(std::memory_order_acquire);
+        uint32_t idx = 0;
+        PoolEntry* e = lookup_(h, &idx);
         if (!e) return;
-        if (e->generation != ((h >> SLOT_BITS) & GEN_MAX)) return;
         if (e->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             // Last ref — clear slot, return to free list, reclaim entry.
             // The slot-null store is seq_cst (not merely release) so it is
@@ -194,7 +450,7 @@ public:
 
     uint8_t* data(xi_image_handle h) {
         auto* e = lookup(h);
-        return e ? e->pixels.data() : nullptr;
+        return e ? e->buf.mem : nullptr;
     }
 
     // Read-only pixel pointer — the blessed accessor for ANY handle (input or
@@ -202,7 +458,7 @@ public:
     // mutation path. Backs xi.imaging_rw@1.image_read. Null on a bad handle.
     const uint8_t* read_data(xi_image_handle h) {
         auto* e = lookup(h);
-        return e ? e->pixels.data() : nullptr;
+        return e ? e->buf.mem : nullptr;
     }
 
     // Writable pixel pointer VALID ONLY for a uniquely-owned handle (refcount ==
@@ -220,7 +476,7 @@ public:
         auto* e = lookup(h);
         if (!e) return nullptr;
         if (e->refcount.load(std::memory_order_acquire) != 1) return nullptr;
-        return e->pixels.data();
+        return e->buf.mem;
     }
     int32_t width(xi_image_handle h) {
         auto* e = lookup(h);  return e ? e->width  : 0;
@@ -245,7 +501,7 @@ public:
     Image to_image(xi_image_handle h) {
         auto* e = lookup(h);
         if (!e) return {};
-        return Image(e->width, e->height, e->channels, e->pixels.data());
+        return Image(e->width, e->height, e->channels, e->buf.mem);
     }
 
     // ---- Owner ledger ------------------------------------------------
@@ -352,6 +608,28 @@ public:
         return g;
     }
 
+    // Snapshot of the pixel-buffer recycler's counters (pixpool). Diagnostic
+    // only (relaxed); the recycle tests' oracle for magazine/shelf behaviour.
+    struct PixAllocStats {
+        uint64_t magazine_hits = 0, shelf_hits = 0, fresh_allocs = 0,
+                 direct_allocs = 0;
+        uint64_t magazine_puts = 0, shelf_puts = 0, evicted_frees = 0,
+                 direct_frees = 0;
+    };
+    static PixAllocStats pixel_alloc_stats() {
+        auto& s = pixpool::stats();
+        PixAllocStats out;
+        out.magazine_hits = s.magazine_hits.load(std::memory_order_relaxed);
+        out.shelf_hits    = s.shelf_hits.load(std::memory_order_relaxed);
+        out.fresh_allocs  = s.fresh_allocs.load(std::memory_order_relaxed);
+        out.direct_allocs = s.direct_allocs.load(std::memory_order_relaxed);
+        out.magazine_puts = s.magazine_puts.load(std::memory_order_relaxed);
+        out.shelf_puts    = s.shelf_puts.load(std::memory_order_relaxed);
+        out.evicted_frees = s.evicted_frees.load(std::memory_order_relaxed);
+        out.direct_frees  = s.direct_frees.load(std::memory_order_relaxed);
+        return out;
+    }
+
     struct OwnerStats {
         int      handle_count = 0;
         uint64_t total_bytes  = 0;
@@ -360,7 +638,7 @@ public:
         // WalkGuard makes this read-only slot walk memory-safe against a
         // concurrent release(): while any walker is live, a last-ref release
         // defers its `delete` to the retire list instead of freeing under our
-        // pointer, so `e->pixels.size()` here can never touch a freed entry
+        // pointer, so `e->size` here can never touch a freed entry
         // (external review 08 finding 1). Zero cost when no walk is in flight.
         WalkGuard wg(*this);
         OwnerStats s{};
@@ -372,7 +650,7 @@ public:
             if (!e) continue;
             if (owner != 0 && e->owner.load(std::memory_order_relaxed) != owner) continue;
             ++s.handle_count;
-            s.total_bytes += e->pixels.size();
+            s.total_bytes += e->size;
         }
         return s;
     }
@@ -394,7 +672,7 @@ public:
             auto& s = agg[ow];
             s.owner = ow;
             ++s.handle_count;
-            s.total_bytes += e->pixels.size();
+            s.total_bytes += e->size;
         }
         std::vector<PerOwnerStat> out;
         out.reserve(agg.size());
@@ -582,6 +860,18 @@ public:
     static void publish_pack_iface(const void* iface) {
         pack_iface_slot().store(iface, std::memory_order_release);
     }
+    // blob plane (spec 30): the xi.pack@4 self-describing-blob door (const
+    // xi_pack_v4* — blob_mint/adopt_blob/add_blob/get_blob + ordinal entry_at),
+    // published by the same install_pack_abi through the same layering bridge.
+    // Replaces the retired @3 slot. Null until installed / on a host with no
+    // blob plane.
+    static std::atomic<const void*>& pack4_iface_slot() {
+        static std::atomic<const void*> slot{nullptr};
+        return slot;
+    }
+    static void publish_pack4_iface(const void* iface) {
+        pack4_iface_slot().store(iface, std::memory_order_release);
+    }
 
     // Pack-plane hardening: the PackRegistry OWNER-SWEEP bridge — the pack
     // analogue of release_all_for's leak sweep. Published by install_pack_abi
@@ -684,6 +974,45 @@ public:
         }();
         return &iface;
     }
+    // xi.emit@2 (perf/ws-lean) — the zero-copy owned-emit door. Unlike the v1
+    // fields this verb is NOT a host_api struct field (the v12 layout is frozen);
+    // it forwards to the installed BinaryOwnedSinkFn (service_main wires it to the
+    // WS server's send_binary_owned). With no sink installed (headless) it MUST
+    // still consume the ownership token — release it — so a producer never leaks.
+    static const xi_emit_v2* emit_v2_iface() {
+        static const xi_emit_v2 iface = [] {
+            xi_emit_v2 i{};
+            i.emit_binary_owned = [](const xi_bin_span* spans, int32_t nspans,
+                                     void* owner, void (*release)(void*)) {
+                // Zero-copy sink installed (production WS server): hand it through.
+                if (auto fn = xi::binary_owned_sink()) {
+                    fn(spans, (int)nspans, owner, release);
+                    return;
+                }
+                // GRACEFUL FALLBACK: a host with only the copying v1 sink (every
+                // test host, host_mock, the headless runner) must still DELIVER the
+                // frame — concatenate the segments and push through binary_sink(),
+                // then consume the ownership token. The zero-copy win is lost here
+                // (this is not the hot production path), correctness is not.
+                if (auto fn = xi::binary_sink()) {
+                    size_t total = 0;
+                    for (int32_t k = 0; k < nspans; ++k)
+                        if (spans[k].data && spans[k].len > 0) total += (size_t)spans[k].len;
+                    std::vector<uint8_t> buf;
+                    buf.reserve(total);
+                    for (int32_t k = 0; k < nspans; ++k)
+                        if (spans[k].data && spans[k].len > 0)
+                            buf.insert(buf.end(),
+                                       static_cast<const uint8_t*>(spans[k].data),
+                                       static_cast<const uint8_t*>(spans[k].data) + spans[k].len);
+                    fn(buf.data(), (int)buf.size());
+                }
+                if (owner && release) release(owner);   // consume the token either way
+            };
+            return i;
+        }();
+        return &iface;
+    }
     static const xi_log_v1* log_v1_iface() {
         static const xi_log_v1 iface = [] {
             const xi_host_api* h = canonical_host_api();
@@ -727,12 +1056,21 @@ public:
         // [xi.doc@1 retired at THE CUT (v12) — Record yyjson-doc plane gone.]
         if (std::strcmp(id, "xi.emit") == 0 && version == 1)
             return emit_v1_iface();
+        // xi.emit@2 (perf/ws-lean): the zero-copy owned-emit supplement to @1.
+        if (std::strcmp(id, "xi.emit") == 0 && version == 2)
+            return emit_v2_iface();
         if (std::strcmp(id, "xi.log") == 0 && version == 1)
             return log_v1_iface();
         // polaris2 wave-2: the Pack data plane, published via publish_pack_iface
         // (slot-bridged from xi_pack_abi.hpp; null on a host with no pack plane).
         if (std::strcmp(id, "xi.pack") == 0 && version == 1)
             return pack_iface_slot().load(std::memory_order_acquire);
+        // blob plane (spec 30): the xi.pack@4 self-describing-blob supplement to
+        // xi.pack@1. The retired @3 (and the never-existed @2) answer NULL by
+        // falling through — no version branch produces them. TODO(selfdesc-B):
+        // wire is package C.
+        if (std::strcmp(id, "xi.pack") == 0 && version == 4)
+            return pack4_iface_slot().load(std::memory_order_acquire);
         // Capability plane (docs/new_gen/14 pilot), published via
         // install_cap_plane (slot-bridged from xi_cap_abi.hpp; null on a host
         // with no capability plane). ZERO xi_host_api slots — both directions
@@ -807,6 +1145,23 @@ private:
         std::atomic<uint64_t>   generation{0};
         std::atomic<uint32_t>   next_free{0};   // 0 = list terminator
     };
+
+    // The ONE handle-resolve primitive (round-3 W2 #5). Root cause: release()
+    // re-implemented lookup()'s idx-mask / entry-load / generation-compare inline
+    // because it also needs the slot index — two drifting copies of the pool's
+    // most safety-critical check (both also carried a dead `idx >= SLOT_COUNT`
+    // branch: idx = h & SLOT_MASK can never exceed SLOT_COUNT-1). Rejects stale
+    // handles whose generation no longer matches the slot's current occupant —
+    // without this a careless plugin that holds a handle past release would land
+    // on the next allocation. `idx_out` (optional) receives the slot index.
+    PoolEntry* lookup_(xi_image_handle h, uint32_t* idx_out) const {
+        uint32_t idx = (uint32_t)(h & SLOT_MASK);
+        PoolEntry* e = slots_[idx].entry.load(std::memory_order_acquire);
+        if (!e) return nullptr;
+        if (e->generation != ((h >> SLOT_BITS) & GEN_MAX)) return nullptr;
+        if (idx_out) *idx_out = idx;
+        return e;
+    }
 
     Slot                  slots_[SLOT_COUNT];
     // High-water mark for slots never yet allocated. Slot 0 is reserved

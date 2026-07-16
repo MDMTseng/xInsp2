@@ -107,3 +107,12 @@ Several are platform requests from RFC
   RUN mode built; compose mode + the rest forward-looking).
 - [`linux-port.md`](./linux-port.md) — cross-platform port (revisit after a stable
   Windows release).
+- [`memory-domains.md`](./memory-domains.md) — GPU/device memory domains as a
+  lib-plugin (`xi.gpu.pool`) over the reserved `loc` descriptor key; the core owes
+  ONE pool-handle finalizer primitive. Design settled 2026-07-15, need-driven.
+- [`stream-markers.md`](./stream-markers.md) — source-emitted in-band stream
+  control markers (`$eof`/`$segment`/`$count`); zero core change. Design settled
+  2026-07-15, need-driven.
+- [`video-egress.md`](./video-egress.md) — H.264 video arm on `xi.ui.egress`
+  (stateful `xi.video.encode` cap + WebCodecs client); ladder `h264(hw)→jpeg→raw`,
+  `$seq` join, subscribe-edge IDR. Design settled 2026-07-15, need-driven.

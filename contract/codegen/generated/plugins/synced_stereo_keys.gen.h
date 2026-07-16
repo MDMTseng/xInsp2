@@ -14,7 +14,6 @@ inline constexpr int kSchemaVersion = 1;
 namespace keys {
 
 inline constexpr const char* kFps = "fps";  // int (settable)
-inline constexpr const char* kPackMode = "pack_mode";  // bool (default false) — gather left+right+seq into ONE sealed xi.pack@1 Pack per trigger instead of a Record (wave-2 Pack migration)
 inline constexpr const char* kRunning = "running";  // bool (get_def only, read-only)
 inline constexpr const char* kTicks = "ticks";  // int (get_def only, read-only)
 inline constexpr const char* kCommand = "command";  // string (command selector)

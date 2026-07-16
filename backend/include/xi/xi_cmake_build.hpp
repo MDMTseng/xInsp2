@@ -13,9 +13,9 @@
 // Extracted from xi_plugin_manager.hpp — no PluginManager state, so a leaf the
 // manager calls into.
 //
-// TODO(linux): run_cmd_capture has the _WIN32 CreateProcess path; the popen()
-// branch is stubbed pending the Linux port (see linux-port.md) — when written,
-// it must carry the same timeout bound (kCmakeBuildTimeoutMs + kill).
+// TODO(linux): run_cmd_capture has the _WIN32 xi::proc::spawn_bounded path; the
+// popen() branch is stubbed pending the Linux port (see linux-port.md) — when
+// written, it must carry the same timeout bound (kCmakeBuildTimeoutMs + kill).
 //
 #include <algorithm>
 #include <cstdio>
@@ -23,6 +23,8 @@
 #include <string>
 #include <system_error>
 #include <vector>
+
+#include "xi_proc.hpp"   // round-3 #6: the ONE bounded win32 spawn
 
 #ifdef _WIN32
   #ifndef WIN32_LEAN_AND_MEAN
@@ -78,87 +80,13 @@ static constexpr DWORD kCmakeBuildTimeoutMs = 600000;   // 10 min
 inline int run_cmd_capture(const std::string& cmd, std::string& log) {
 #ifdef _WIN32
     // Same cmd.exe routing _popen used; the outer quotes keep a quoted exe
-    // path + quoted args parsing correctly. stdout and stderr are combined by
-    // handing both the same pipe write end (no `2>&1` needed).
+    // path + quoted args parsing correctly. Round-3 #6: the spawn mechanics
+    // (kill-on-close job object, suspended start, wall-clock bound, non-
+    // blocking pipe drain) moved verbatim into xi::proc::spawn_bounded — this
+    // shape was the correct one; the script compiler's run_with_env now shares
+    // it instead of carrying its own kill-the-immediate-child-only copy.
     std::string full = "cmd.exe /C \"" + cmd + "\"";
-
-    SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
-    HANDLE rd = nullptr, wr = nullptr;
-    if (!CreatePipe(&rd, &wr, &sa, 0)) {
-        log += "[failed to spawn: " + cmd + "]\n"; return -1;
-    }
-    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);   // child gets wr only
-
-    // Kill-on-close job object so a timeout reaps the WHOLE tree — cmd ->
-    // cmake -> MSBuild -> cl/nvcc — not just the immediate cmd.exe (the gap
-    // run_with_env in xi_script_compiler.hpp still has). Created suspended so
-    // the child is inside the job before it can spawn anything.
-    HANDLE job = CreateJobObjectA(nullptr, nullptr);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
-        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
-    }
-
-    std::vector<char> mut(full.begin(), full.end()); mut.push_back('\0');
-    STARTUPINFOA si{}; si.cb = sizeof(si);
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = wr;
-    si.hStdError  = wr;
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessA(nullptr, mut.data(), nullptr, nullptr, TRUE,
-                        CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
-        if (job) CloseHandle(job);
-        CloseHandle(rd); CloseHandle(wr);
-        log += "[failed to spawn: " + cmd + "]\n"; return -1;
-    }
-    if (job) AssignProcessToJobObject(job, pi.hProcess);   // best-effort; else pi-only kill below
-    ResumeThread(pi.hThread);
-    CloseHandle(wr);   // parent's copy — children keep theirs until they exit
-
-    // Drain the pipe WHILE waiting (a full 4K pipe buffer would block the
-    // child forever — the drain is part of the liveness fix, not just
-    // capture), and enforce the wall-clock bound. PeekNamedPipe keeps every
-    // read non-blocking: a lingering grandchild (mspdbsrv, an MSBuild reuse
-    // node) holding the write end must not turn the final read into a hang.
-    auto drain = [&]() {
-        DWORD avail = 0;
-        while (PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
-            char buf[4096]; DWORD got = 0;
-            DWORD want = avail < (DWORD)sizeof(buf) ? avail : (DWORD)sizeof(buf);
-            if (!ReadFile(rd, buf, want, &got, nullptr) || got == 0) break;
-            log.append(buf, got);
-        }
-    };
-    ULONGLONG start = GetTickCount64();
-    bool timed_out = false;
-    for (;;) {
-        drain();
-        if (WaitForSingleObject(pi.hProcess, 50) != WAIT_TIMEOUT) break;   // exited
-        if (GetTickCount64() - start >= kCmakeBuildTimeoutMs) { timed_out = true; break; }
-    }
-
-    int rc;
-    if (timed_out) {
-        // A hung toolchain is as dangerous to the control plane as a crashed
-        // one: kill the tree and surface a failed build.
-        if (job) TerminateJobObject(job, 1);
-        else     TerminateProcess(pi.hProcess, 1);   // no job: immediate child only
-        WaitForSingleObject(pi.hProcess, 2000);
-        drain();
-        log += "[timed out after " + std::to_string(kCmakeBuildTimeoutMs / 1000) +
-               "s — killed: " + cmd + "]\n";
-        rc = -2;
-    } else {
-        drain();   // tail written between the last in-loop drain and exit
-        DWORD code = 0; GetExitCodeProcess(pi.hProcess, &code);
-        rc = (int)code;
-    }
-    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-    if (job) CloseHandle(job);   // kill-on-close also reaps any straggler nodes
-    CloseHandle(rd);
-    return rc;
+    return xi::proc::spawn_bounded(full, kCmakeBuildTimeoutMs, nullptr, &log);
 #else
     // popen routes through /bin/sh; combined stream via 2>&1, no outer-quote wrap
     // (the Windows form needs it for cmd.exe's quoted-exe parsing; sh doesn't).
@@ -196,7 +124,7 @@ inline int build_cmake_plugin(const std::string& cmake_exe, const std::string& s
         log += "[refused: cmake_exe/config contains shell metacharacters]\n";
         return -1;
     }
-    auto q = [](const std::string& s) { return "\"" + s + "\""; };
+    const auto q = &xi::proc::quote_arg;   // round-3 W2 #7: the shared quoter
     if (!std::filesystem::exists(std::filesystem::path(build_dir) / "CMakeCache.txt")) {
         std::string cfg = q(cmake_exe) + " -S " + q(src_dir) + " -B " + q(build_dir) +
                           " -DXINSP2_ROOT=" + q(xinsp_root);

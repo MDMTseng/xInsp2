@@ -57,8 +57,21 @@ set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 # that opts the backend in opts imgcodec in too — perf parity for the host's
 # compress_sink once it delegates to the capability. At v12 the backend target
 # drops this define; here it stays as imgcodec's fast path.
-option(XINSP2_HAS_TURBOJPEG "Link libjpeg-turbo for direct SIMD JPEG encode in imgcodec" OFF)
+# AUTO-DETECT libjpeg-turbo (mirrors backend/CMakeLists.txt): installed → default
+# ON (the imgcodec preview encoder runs ~6x faster via direct SIMD tjCompress,
+# doc 34); absent → OFF, falls back to OpenCV. No hard dependency. Sticky in cache;
+# override with -DXINSP2_HAS_TURBOJPEG=ON/OFF.
 set(TURBOJPEG_ROOT "C:/libjpeg-turbo64" CACHE PATH "libjpeg-turbo install root")
+if(DEFINED XINSP2_HAS_TURBOJPEG)
+    set(_xi_tj_default ${XINSP2_HAS_TURBOJPEG})
+elseif(EXISTS "${TURBOJPEG_ROOT}/include/turbojpeg.h"
+       OR EXISTS "/usr/include/turbojpeg.h"
+       OR EXISTS "/usr/local/include/turbojpeg.h")
+    set(_xi_tj_default ON)
+else()
+    set(_xi_tj_default OFF)
+endif()
+option(XINSP2_HAS_TURBOJPEG "Link libjpeg-turbo for direct SIMD JPEG encode in imgcodec" ${_xi_tj_default})
 if(XINSP2_HAS_TURBOJPEG)
     find_path(TURBOJPEG_INCLUDE_DIR turbojpeg.h
         HINTS ${TURBOJPEG_ROOT}/include /usr/include /usr/local/include)
@@ -194,7 +207,32 @@ if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
     target_compile_definitions(imgcodec PRIVATE XINSP2_HAS_TURBOJPEG=1)
     target_include_directories(imgcodec PRIVATE ${TURBOJPEG_INCLUDE_DIR})
     target_link_libraries(imgcodec PRIVATE ${TURBOJPEG_LIB})
+    # The PLUGIN owns its native dependency: deploy turbojpeg.dll next to
+    # xi-imgcodec.dll, NOT next to the backend exe. The runtime loader
+    # (load_plugin_dll_, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR) searches the plugin
+    # DLL's own directory for its deps, so this resolves without the core exe
+    # carrying the dependency — keeping the backend turbojpeg-free (v12 CUT).
+    get_filename_component(_tj_dir "${TURBOJPEG_LIB}" DIRECTORY)
+    get_filename_component(_tj_root "${_tj_dir}" DIRECTORY)
+    if(EXISTS "${_tj_root}/bin/turbojpeg.dll")
+        add_custom_command(TARGET imgcodec POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_tj_root}/bin/turbojpeg.dll" "$<TARGET_FILE_DIR:imgcodec>/")
+    endif()
 endif()
+
+# ui_egress — the LIVE-UI egress service-middleware LIB PLUGIN (docs/new_gen/31).
+# NO data plane: registers xi.ui.egress (push a preview -> latest-wins slot;
+# own timer thread @ UI rate -> content-keyed dedup -> dispatch by descriptor 't'
+# -> xi.jpeg.encode cap -> hand to expose). expose/src is on the include path for
+# xex1_encode.hpp — the SHARED wire encoder egress builds the UI frame through.
+add_library(ui_egress SHARED ui_egress/ui_egress.cpp)
+target_include_directories(ui_egress PRIVATE ${XI_INCLUDE} ${XI_VENDOR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
+set_target_properties(ui_egress PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/ui_egress
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/ui_egress
+)
 
 # lut_owner — the RESOURCE-HANDLE PATTERN demo lib plugin (doc 14 appendix
 # "Resource-handle convention"): a TYPE-OWNER for demo.lut (immutable sorted
@@ -474,6 +512,27 @@ endif()
 add_dependencies(cap_imgcodec_test imgcodec)
 add_test(NAME cap_imgcodec_test COMMAND cap_imgcodec_test)
 
+# LIVE-UI egress pipeline (spec 31 / docs/internals/ui-egress.md) end to end
+# across the THREE REAL DLLs through the REAL cap plane: push -> xi.ui.egress
+# (ui_egress latest-wins slot + timer flusher) -> xi.jpeg.encode (imgcodec) ->
+# xi.ui.sink (expose byte-blind store + subscription gate). Pins the LRU/slot
+# runtime the python e2e cannot make deterministic — dedup, no-subscriber zero
+# encode, latest-wins collapse, LRU eviction — observed only through the "stats"
+# and "get"/"subscribe" exchanges. Needs the same host (make_host_api +
+# install_pack_abi + install_cap_plane).
+add_executable(cap_ui_egress_test cap_ui_egress_test.cpp)
+target_include_directories(cap_ui_egress_test PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
+target_compile_definitions(cap_ui_egress_test PRIVATE
+    UI_EGRESS_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ui_egress/xi-ui_egress.dll"
+    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec.dll"
+    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose.dll")
+if(WIN32)
+    target_link_libraries(cap_ui_egress_test PRIVATE Ws2_32)
+endif()
+add_dependencies(cap_ui_egress_test ui_egress imgcodec expose)
+add_test(NAME cap_ui_egress_test COMMAND cap_ui_egress_test)
+
 # polaris2 CORE-CODEC EVICTION (stage 1) — the HOST's read_image_file
 # (backend/src/xi_image_io.cpp, linked in so its static installer runs)
 # delegating decode to xi.image.decode with an stb fallback: byte-equivalence
@@ -522,6 +581,21 @@ if(WIN32)
 endif()
 add_dependencies(cap_jpeg_encode_host_test imgcodec)
 add_test(NAME cap_jpeg_encode_host_test COMMAND cap_jpeg_encode_host_test)
+
+# bench_jpeg — JPEG-encoder benchmark, MOVED here from backend/tests. The encoder
+# (xi::encode_jpeg) and its turbojpeg dependency live in this plugins tree post-CUT,
+# so the bench that measures them lives here too — the backend build no longer knows
+# turbojpeg. Manual dev bench (no ctest / no perf-gate); run it for numbers.
+# OpenCV-free (turbo -> stb dispatch). Sources are the shared backend headers +
+# stb impl; perf_fingerprint.hpp comes from backend/tests on the include path.
+add_executable(bench_jpeg ../backend/tests/bench_jpeg.cpp ../backend/src/stb_impl.cpp)
+target_include_directories(bench_jpeg PRIVATE ${XI_INCLUDE} ${XI_VENDOR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../backend/tests)
+if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
+    target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_TURBOJPEG=1)
+    target_include_directories(bench_jpeg PRIVATE ${TURBOJPEG_INCLUDE_DIR})
+    target_link_libraries(bench_jpeg PRIVATE ${TURBOJPEG_LIB})
+endif()
 
 # Resource-handle convention (doc 14 appendix) — demo.lut end to end against
 # the REAL built DLL through the REAL host funnel: build -> handle entry

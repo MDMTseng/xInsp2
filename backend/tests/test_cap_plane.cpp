@@ -189,6 +189,18 @@ int main() {
     }
 
     // -----------------------------------------------------------------------
+    SECTION("handler returning XI_PACK_NULL -> XI_CAP_EINTERNAL, never OK+null");
+    {
+        xi_pack_builder b = pk->builder_new();
+        pk->builder_add_i64(b, "x", 1);
+        xi_pack_handle in = pk->builder_seal(b);
+        xi_pack_handle out = (xi_pack_handle)0x1;   // poison: must come back NULL
+        CHECK(cap->call("test.null", in, &out) == XI_CAP_EINTERNAL);
+        CHECK(out == XI_PACK_NULL);
+        pk->release(in);
+    }
+
+    // -----------------------------------------------------------------------
     SECTION("name-only registry: the $v / $probe in-pack version convention");
     {
         // absent $v -> the provider's documented default (1).
@@ -252,6 +264,10 @@ int main() {
         // ...and a handler is data plane: registering inside it is refused.
         CHECK(pi64(pk, out, "reg_in_handler_rc", 0) == XI_CAP_REG_ECONTEXT);
         CHECK(cap->available("test.sneaky") == 0);
+        // ...and so is the symmetric UNREGISTER (depth-guarded the same way);
+        // the capability must still be live afterwards.
+        CHECK(pi64(pk, out, "unreg_in_handler_rc", 0) == XI_CAP_REG_ECONTEXT);
+        CHECK(cap->available("test.echo") == 1);
         pk->release(out); pk->release(in);
     }
 

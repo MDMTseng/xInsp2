@@ -173,6 +173,9 @@ export class XiClient {
   getInstanceDef(name)            { return this.cmd("get_instance_def", { name }); }
   setInstanceDef(name, def)       { return this.cmd("set_instance_def", { name, def }); }
   exchange(name, cmd)             { return this.cmd("exchange_instance", { name, cmd }); }
+  // Single-parameter set (doc 31): a named script param → raw JSON value; the
+  // plugin validates (rsp ok / error). Used by the manifest param-panel.
+  setParam(name, value)           { return this.cmd("set_param", { name, value }); }
   getState(name)                  { return this.cmd("get_state", { name }); }
   prepareInstance(name, def, folder) {
     const args = { name, def };

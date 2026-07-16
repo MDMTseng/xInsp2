@@ -45,7 +45,10 @@ thread** owned by the `Server`:
 
 ## Backpressure
 
-The queue is bounded by a byte budget `kOutboundHardCapBytes = 64 MiB`. Two
+The queue is bounded by a byte budget `kOutboundHardCapBytes` (64 MiB at the
+RT8 landing; **256 MiB since 2026-07-16** for RAW-preview streaming — a 20MP
+RGB frame is ~59 MB, so the old cap held ONE frame and scheduling jitter
+dropped an otherwise-sustainable stream). Two
 mechanisms drop a client that cannot keep up, both ending in the SAME terminal
 outcome (`close_client`) the FE already handles for an `SO_SNDTIMEO` drop:
 
@@ -159,5 +162,31 @@ memcpy-scale price versus a 1.5 s lane stall.
   close a popped-in-hand cross-connection window the original `tx_mu_`-only argument
   missed (see the section above). A single `on_writer_after_pop_` test seam (null in
   production) makes that window deterministically testable.
-- Everything else (64 MiB cap value, FIFO single-drainer, send-return-on-enqueue
-  semantic, `tx_mu_` reuse) follows the brief as written.
+- Everything else (the cap value, FIFO single-drainer, send-return-on-enqueue
+  semantic, `tx_mu_` reuse) follows the brief as written. (Egress socket tuning
+  — TCP_NODELAY + 4 MiB writer chunks — added 2026-07-16 for raw-preview
+  throughput; note the SNDBUF↔SO_SNDTIMEO wedge-detection coupling documented at
+  the setsockopt site: the kernel buffer absorbs a wedged client's backlog before
+  ::send blocks, so a bigger SNDBUF stretches the wedge-drop bound — qa_slow_
+  consumer phase 2 is the regression tripwire.)
+
+### adaptive SNDBUF (perf/ws-lean, 2026-07)
+
+The SO_SNDBUF boost is **adaptive**, not set unconditionally at accept. A static
+4 MiB SNDBUF on every accepted socket regressed `qa_slow_consumer` under full-gate
+load: the wedge-drop bound grows with SNDBUF/production-rate (the kernel silently
+absorbs a wedged client's backlog before `::send` blocks and `SO_SNDTIMEO` fires),
+so a small-frame ~200 fps slow-consumer lane whose production rate collapsed under
+machine load missed its 8s/12s wedge-drop bounds (surfacing as an opaque 360s
+suite TIMEOUT when the phase-2 handoff then starved the driver's recv). Fix:
+accepted sockets keep the **small default** SNDBUF (sharp wedge detection, no
+kernel memory tax on control-plane / small-frame clients); the writer boosts
+SNDBUF to 4 MiB the FIRST time it is about to send a frame **>1 MiB** on the
+current connection (raw-preview lanes that need the kernel to stream ahead of the
+chunk loop). The boost is tracked against `conn_epoch_` (`sndbuf_boosted_for_epoch_`,
+under `tx_mu_`) so a reconnect re-arms it. This keeps BOTH the raw-preview
+throughput win AND the old small-frame wedge-drop sharpness. The qa driver
+(`examples/qa_slow_consumer/driver.py`) also grew a 50s socket recv timeout that
+converts a stalled lane/handoff into a clean phase-named `WsError` instead of the
+opaque 360s TIMEOUT. Do NOT restore an unconditional accept-time SNDBUF without
+re-running qa_slow_consumer solo AND inside a full gate.

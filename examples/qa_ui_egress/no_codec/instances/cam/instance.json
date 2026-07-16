@@ -1,0 +1,2 @@
+{ "plugin": "mock_camera",
+  "config": { "width": 64, "height": 48, "fps": 30, "ui_preview": true } }

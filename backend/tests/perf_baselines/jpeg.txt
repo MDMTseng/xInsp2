@@ -1,3 +1,0 @@
-# perf baseline for bench_jpeg.exe
-# captured by perf_gate.cmake UPDATE_BASELINE=ON — slower-is-worse integer metrics
-jpeg_us_per_encode_1920x1080 2750

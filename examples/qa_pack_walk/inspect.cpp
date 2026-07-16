@@ -8,7 +8,7 @@
 // alone (pack-only end to end). Per pack it proves:
 //
 //   1. GENERIC WALK — for_each visits exactly the three entries with the right
-//      ABI tags (XI_PACK_TAG_I64 / XI_PACK_TAG_F64 / XI_PACK_TAG_IMAGE), the
+//      ABI tags (XI_PACK_TAG_I64 / XI_PACK_TAG_F64 / XI_PACK_TAG_BLOB), the
 //      same producer-agnostic enumeration expose/record_save do host-side, in
 //      script hands.
 //   2. TYPED-SCHEMA READS — ScriptTypedPack over a declared keyset returns the
@@ -34,9 +34,9 @@ struct CamPack {
     enum : int { kSeq, kGain, kFrame };
 };
 
-static long long checksum(const xi::ScriptPackImage& img) {
+static long long checksum(const xi::ImageBlobView& img) {
     long long sum = 0;
-    for (size_t i = 0; i < img.pixels.size(); i += 97) sum += img.pixels[i];
+    for (size_t i = 0; i < img.payload.size(); i += 97) sum += img.payload[i];
     return sum;
 }
 
@@ -55,9 +55,11 @@ XI_INSPECT_ENTRY(t, frame) {
         ++n;
         if (!keys.empty()) keys += ',';
         keys.append(k);
-        if (k == "seq"   && tag != XI_PACK_TAG_I64)   tags_ok = false;
-        if (k == "gain"  && tag != XI_PACK_TAG_F64)   tags_ok = false;
-        if (k == "frame" && tag != XI_PACK_TAG_IMAGE) tags_ok = false;
+        if (k == "seq"   && tag != XI_PACK_TAG_I64)  tags_ok = false;
+        if (k == "gain"  && tag != XI_PACK_TAG_F64)  tags_ok = false;
+        // "frame" is an "xi/image" self-describing blob (spec 30); the raw walk
+        // tag is XI_PACK_TAG_BLOB, read via image_blob (the @4 blob path).
+        if (k == "frame" && tag != XI_PACK_TAG_BLOB) tags_ok = false;
     });
 
     // 2. typed-schema reads agree with the string-keyed reads.
@@ -66,16 +68,16 @@ XI_INSPECT_ENTRY(t, frame) {
     int64_t seq_typed = typed.get_i64<CamPack::kSeq>().value_or(-2);
     double  gain_str   = f.get_f64("gain").value_or(-1.0);
     double  gain_typed = typed.get_f64<CamPack::kGain>().value_or(-2.0);
-    auto    img_typed = typed.get_image<CamPack::kFrame>();
+    auto    img_typed = typed.image_blob<CamPack::kFrame>();
 
     // 3. cross-thread capture: ScriptPack by value into a worker thread.
     auto fut = std::async(std::launch::async, [f]() -> long long {
-        auto img = f.get_image("frame");             // read on the WORKER thread
+        auto img = f.image_blob("frame");             // read on the WORKER thread
         return img ? checksum(*img) : -1;
     });
     long long worker_sum = fut.get();
     long long local_sum  = -1;
-    if (auto img = f.get_image("frame")) local_sum = checksum(*img);
+    if (auto img = f.image_blob("frame")) local_sum = checksum(*img);
 
     bool xthread_ok = worker_sum >= 0 && worker_sum == local_sum;
     bool pass = n == 3 && tags_ok && seq_str >= 0 && seq_str == seq_typed &&

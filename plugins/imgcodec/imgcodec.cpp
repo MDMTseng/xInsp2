@@ -26,11 +26,11 @@
 //                       and receive byte-identical JPEG.
 //
 //   "xi.image.decode" — Pack in:  bin "data" (PNG/JPEG/BMP/TGA/GIF/PSD/HDR/PIC
-//                                 — stb_image, mirroring host_api->
-//                                 read_image_file's format set: this
-//                                 capability is that field's designated
-//                                 eviction target at v12; the host field
-//                                 stays untouched until then), optional i64
+//                                 — stb_image, the same format set the host's
+//                                 former read_image_file slot decoded: that
+//                                 field was EVICTED at THE CUT (v12) and this
+//                                 capability IS its replacement — the only
+//                                 image-decode path left), optional i64
 //                                 "raw" (1 = preserve the file's NATIVE channel
 //                                 count, incl. 2-ch gray+alpha — the host sets
 //                                 this so the eviction is byte-for-byte), and
@@ -63,8 +63,10 @@
 //
 #include <xi/xi_abi.hpp>
 #include <xi/xi_image.hpp>
+#include <xi/xi_image_blob.hpp>  // xi::read_image_blob — read an xi/image blob (off the @1 adapter)
 #include <xi/xi_jpeg.hpp>   // xi::encode_jpeg — turbojpeg (opt-in) → stb fallback
 #include <xi/xi_json.hpp>
+#include <xi/xi_mp.hpp>     // canonical msgpack Writer — the xi/image blob descriptor
 
 #include <atomic>
 #include <cstdint>
@@ -72,6 +74,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -92,7 +95,8 @@ class ImgCodec : public xi::Plugin {
 public:
     ImgCodec(const xi_host_api* host, const std::string& name)
         : xi::Plugin(host, name) {
-        pk_ = pack_iface();   // xi.pack@1 (cached by the base)
+        pk_  = pack_iface();    // xi.pack@1 (cached by the base)
+        pk4_ = pack4_iface();   // xi.pack@4 (blob door — decode output is a blob)
         if (host && host->get_interface) {
             provider_ = static_cast<const xi_cap_provider_v1*>(
                 host->get_interface("xi.cap.provider", 1));
@@ -101,6 +105,16 @@ public:
             // Inert on a host without the planes (e.g. certify probes an older
             // table): loadable, but it provides nothing and says so.
             status("imgcodec: host lacks xi.pack@1/xi.cap.provider@1 — no capabilities registered");
+            return;
+        }
+        if (!pk4_) {
+            // HARD-REFUSE, not degrade: decode's output contract is a @4 blob
+            // (self-describing plane, spec 30) — on a @1-only host it could only
+            // answer $fault forever, and one hard fault would quarantine BOTH
+            // capabilities (on_fault:"refuse"), turning a host-table gap into a
+            // runtime mystery. Legacy (@1-only) compat is waived; be inert and
+            // name the gap at load time instead.
+            status("imgcodec: host lacks xi.pack@4 (blob door) — refusing to register (no capabilities)");
             return;
         }
         int32_t r1 = provider_->register_capability("xi.jpeg.encode",  &h_encode, this);
@@ -206,8 +220,24 @@ private:
     xi_pack_handle encode_(xi_pack_handle in) {
         if (xi_pack_handle early = version_gate_(in)) return early;
 
+        // Read the input as an xi/image blob via @4 (off the deprecated @1
+        // get_image adapter); populate the legacy img struct so the encode below
+        // is unchanged. A u8 xi/image blob only (the 8-bit encoder's contract).
         xi_pack_image img{};
-        if (!pk_->get_image(in, "image", &img) || !img.pixels)
+        {
+            const void* dp = nullptr; int32_t dl = 0;
+            const void* pp = nullptr; int64_t pl = 0;
+            if (pk4_ && pk4_->get_blob && pk4_->get_blob(in, "image", &dp, &dl, &pp, &pl)) {
+                auto ib = xi::read_image_blob(
+                    std::span<const uint8_t>(static_cast<const uint8_t*>(dp), dl > 0 ? (size_t)dl : 0),
+                    std::span<const uint8_t>(static_cast<const uint8_t*>(pp), pl > 0 ? (size_t)pl : 0));
+                if (ib && ib->dt == "u8") {
+                    img.width = ib->width; img.height = ib->height; img.channels = ib->channels;
+                    img.pixels = ib->payload.data(); img.length = (int32_t)ib->payload.size();
+                }
+            }
+        }
+        if (!img.pixels)
             return fault_("missing_input", "image",
                           "xi.jpeg.encode: required image entry 'image' is missing");
         if (img.channels != 1 && img.channels != 3 && img.channels != 4)
@@ -314,8 +344,21 @@ private:
         if (comp == 2) {
             // raw gray+alpha — the pixels ride bin "pixels" (contiguous w*h*2).
             pk_->builder_add_bin(b, "pixels", px, (int32_t)((size_t)w * h * 2));
+        } else if (pk4_ && pk4_->builder_add_blob) {
+            // Decode output as a self-describing xi/image blob via @4 (the copy
+            // from stb's buffer is inherent; add_blob mints the headed buffer +
+            // copies). Off the deprecated @1 builder_add_image adapter.
+            xi::mp::Writer dw;                       // {"t":"xi/image","w","h","c","dt"}
+            dw.map(5);
+            dw.key("t");  dw.str("xi/image");
+            dw.key("w");  dw.int_(w);
+            dw.key("h");  dw.int_(h);
+            dw.key("c");  dw.int_(comp);
+            dw.key("dt"); dw.str("u8");
+            pk4_->builder_add_blob(b, "image", dw.bytes().data(), (int32_t)dw.bytes().size(),
+                                   px, (int64_t)w * h * comp);
         } else {
-            pk_->builder_add_image(b, "image", w, h, comp, px);
+            pk_->builder_add_image(b, "image", w, h, comp, px);   // pre-@4 host fallback
         }
         pk_->builder_add_i64(b, "w", w);
         pk_->builder_add_i64(b, "h", h);
@@ -357,6 +400,7 @@ private:
     }
 
     const xi_pack_v1*         pk_       = nullptr;
+    const xi_pack_v4*         pk4_      = nullptr;   // xi.pack@4 blob door (decode output)
     const xi_cap_provider_v1* provider_ = nullptr;
     bool                      registered_ = false;
 

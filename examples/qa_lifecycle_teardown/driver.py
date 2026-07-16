@@ -26,8 +26,9 @@ writes NO spurious minidump to %TEMP%/xinsp2/crashdumps:
 
 Run:  python driver.py
 
-Uses sibling example projects as fixtures: ../qa_sink_shared_doc (2 instances) for #7,
-../burst_pipeline (a free-running source) for #6.
+Fixtures live under ./fixtures/burst_proj (self-contained): two free-running
+burst_source instances — used as the "project with instances" for #7 and the
+"free-running source" for #6.
 
 TODO(linux): backend compile (cl.exe) is Windows-only; SKIPs on non-nt.
 """
@@ -45,8 +46,16 @@ from ports import free_port  # noqa: E402
 SUF = ".exe" if os.name == "nt" else ""
 BE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{SUF}"
 DUMPS = Path(os.environ.get("TEMP", "/tmp")) / "xinsp2" / "crashdumps"
-PROJ_INSTANCES = REPO_ROOT / "examples" / "qa_sink_shared_doc"
-PROJ_SOURCE    = REPO_ROOT / "examples" / "burst_pipeline"
+# Self-contained fixtures (ROOT/fixtures/burst_proj): two free-running
+# burst_source instances driving a trivial inspect. This is deliberately
+# self-owned rather than borrowing sibling example projects — the previous
+# fixtures (examples/qa_sink_shared_doc for #7, examples/burst_pipeline for #6)
+# were removed by THE CUT (commit 0042385), which silently broke this test.
+# burst_source gives us BOTH properties the checks need: live plugin instances
+# for the #7 shutdown-with-project path, and a source that keeps emitting on its
+# own thread for the #6 close-mid-stream race.
+PROJ_INSTANCES = ROOT / "fixtures" / "burst_proj"
+PROJ_SOURCE    = ROOT / "fixtures" / "burst_proj"
 
 
 def dump_count():
