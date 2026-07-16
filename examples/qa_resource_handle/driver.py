@@ -23,7 +23,8 @@ Run:  python examples/qa_resource_handle/driver.py   (Windows; backend +
       plugins built — lut_owner ships from plugins/lut_owner)
 """
 from __future__ import annotations
-import os, queue, re, subprocess, sys, time
+import os
+import tempfile, queue, re, subprocess, sys, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -31,9 +32,9 @@ REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
 sys.path.insert(0, str(REPO / "examples" / "lib"))
 from xinsp2 import Client  # noqa: E402
-from ports import free_port  # noqa: E402
+from ports import free_port, backend_exe  # noqa: E402
 
-BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
+BACKEND = backend_exe()
 PORT = int(os.environ.get("PORT", "0")) or free_port()
 MSG_RE = re.compile(
     r"rhqa seq=(-?\d+) ok=(\d) flt=(\d) built=(-?\d+) b=(-?\d+) hop=(\d) "
@@ -41,9 +42,9 @@ MSG_RE = re.compile(
 
 
 def spawn(port):
-    iso = Path(os.environ["LOCALAPPDATA"]) / "Temp" / "xi_resource_handle_iso"
+    iso = Path(tempfile.gettempdir()) / "xi_resource_handle_iso"
     iso.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ); env["TEMP"] = env["TMP"] = str(iso)
+    env = dict(os.environ); env["TEMP"] = env["TMP"] = env["TMPDIR"] = str(iso)
     log = open(ROOT / f"backend_{port}.log", "w", encoding="utf-8")
     return subprocess.Popen([str(BACKEND), f"--port={port}"], stdout=log,
                             stderr=subprocess.STDOUT, cwd=str(REPO), env=env)
@@ -73,8 +74,6 @@ def drain_verdicts(c) -> list[dict]:
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: Windows-only"); return 0
     if not BACKEND.exists():
         print(f"SKIP: backend not built ({BACKEND})"); return 0
 

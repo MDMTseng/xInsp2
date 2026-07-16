@@ -57,10 +57,10 @@ REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "xinsp2_py"))
 sys.path.insert(0, str(REPO_ROOT / "examples" / "lib"))
 from xinsp2 import Client  # noqa: E402
-from ports import free_port  # noqa: E402
+from ports import free_port, backend_exe  # noqa: E402
 
 SUF = ".exe" if os.name == "nt" else ""
-BE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{SUF}"
+BE = backend_exe()
 PORT = free_port()  # ephemeral (was 7874); no squatter cross-talk  # spare port — NOT the dev backend (7823) or web-terminal-hub (9091)
 
 # A non-empty project.json with the three extension-owned top-level keys the
@@ -166,9 +166,6 @@ def cleanup() -> None:
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: backend plugin DLLs are prebuilt Windows-only here")
-        return 0
     if not BE.exists():
         sys.exit(f"FAIL: missing {BE} (build xinsp_backend Release)")
     if port_open(PORT):

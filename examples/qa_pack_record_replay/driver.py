@@ -31,6 +31,7 @@ Asserts:
 Run:  python examples/qa_pack_record_replay/driver.py   (Windows; backend built)
 """
 from __future__ import annotations
+import tempfile
 import json, os, queue, re, shutil, subprocess, sys, time
 from pathlib import Path
 
@@ -39,10 +40,10 @@ REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
 sys.path.insert(0, str(ROOT.parents[0] / "lib"))
 from xinsp2 import Client  # noqa: E402
-from ports import free_port  # noqa: E402
+from ports import free_port, backend_exe  # noqa: E402
 from xex1 import collect_frames, decode_xex1, subscribe  # noqa: E402
 
-BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
+BACKEND = backend_exe()
 PORT = int(os.environ.get("PORT", "0")) or free_port()
 CAPTURES = ROOT / "instances" / "rec" / "captures"
 
@@ -60,9 +61,9 @@ XI_SYS_NO_VERDICT = -999005
 
 
 def spawn(port):
-    iso = Path(os.environ["LOCALAPPDATA"]) / "Temp" / "xi_pack_record_replay_iso"
+    iso = Path(tempfile.gettempdir()) / "xi_pack_record_replay_iso"
     iso.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ); env["TEMP"] = env["TMP"] = str(iso)
+    env = dict(os.environ); env["TEMP"] = env["TMP"] = env["TMPDIR"] = str(iso)
     log = open(ROOT / f"backend_{port}.log", "w", encoding="utf-8")
     return subprocess.Popen([str(BACKEND), f"--port={port}"], stdout=log,
                             stderr=subprocess.STDOUT, cwd=str(REPO), env=env)
@@ -106,8 +107,6 @@ def frame_essence(fr: dict) -> dict | str:
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: Windows-only"); return 0
     if not BACKEND.exists():
         print(f"SKIP: backend not built ({BACKEND})"); return 0
 
