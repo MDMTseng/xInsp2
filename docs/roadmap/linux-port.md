@@ -128,40 +128,26 @@ next round has a record:
 - **Per-thread dispatch affinity/scheduling** (`service_dispatch.cpp`) stays a
   no-op. Process-level priority (`setpriority`) is done; thread affinity
   (`pthread_setaffinity_np` / `cpu_set_t`) + per-worker scheduling are not.
-- **`examples/qa_*/driver.py` e2e drivers.** Recipe: `ports.backend_exe()`/
-  `fe_exe()` + drop the `os.name != "nt"` skip + `LOCALAPPDATA/Temp` →
-  `tempfile.gettempdir()` (with env `TMPDIR` so the Linux backend honours the
-  isolation dir); Windows process tooling (`taskkill`/`tasklist`/PowerShell) →
-  POSIX (`os.kill`/`/proc/<pid>/fd`). **19 ported + passing on Linux:**
-  qa_watchdog, qa_reentrancy, qa_min_interval, qa_get_dashboard,
-  qa_semaphore_queue, qa_runtime_settings, qa_dispatch_groups, qa_edge,
-  qa_group_parallelism, qa_group_stress, qa_instance_def_recompile,
-  qa_overflow_block, qa_pack_poly_door, qa_param_state_isolation,
-  qa_plugin_queue_sim, qa_recipe_script_instance, qa_run_result,
-  qa_two_group_paths, qa_working_copy. The remaining ~26 are correctly ported
-  but SKIP on Linux because they hit backend/build gaps below (NOT per-driver
-  windowisms) — kept nt-only until those land, so they never falsely FAIL:
-    - **Global example plugins aren't built/loadable on Linux** (~17 drivers:
-      the `expose`/`mock_camera`/`blob_analysis`/`record_*`/… families). Two
-      sub-gaps: (a) the `plugins/` tree isn't built for Linux, and (b) the
-      plugin loader `dlopen`s the manifest's `xi-<name>.dll` verbatim with no
-      `.dll`→`.so` mapping, so even a built `.so` wouldn't resolve. This is the
-      single highest-value next step — it unblocks the whole pack-* / multi-plugin
-      driver set.
-    - **Image codec is in the imgcodec PLUGIN, default-built with stb**
-      (qa_cap_imgcodec, qa_cap_imgcodec_autoload, qa_jpeg_preview): after the
-      2026-07 contraction the `xi.jpeg.encode` / `xi.image.decode` capability lives
-      in the imgcodec plugin, which the default Linux build compiles with the stb
-      fallback (`turbojpeg=no`), so these drivers still skip. **RESOLVED path:**
-      `apt install libturbojpeg0-dev`, then build plugins with
-      `-DXINSP2_HAS_TURBOJPEG=ON` — CMake find_path/find_library resolve it on
-      Linux and the imgcodec plugin then offers the capability (measured 3.2x vs
-      stb — see the ARM encode-acceleration note under "ARM & macOS deltas").
-    - Misc: `tools/export_bundle.py` is Windows-only (qa_export_bundle);
-      qa_local_auto's local auto image source delivers no frames; qa_cpu_affinity
-      needs per-thread affinity (separate deferred item above); qa_func/qa_recover
-      are FE-based + need the `expose` plugin or missing fixtures;
-      qa_lifecycle_teardown opens fixture projects absent from this branch.
+- **`examples/qa_*/driver.py` e2e drivers — 37 ported + passing on Linux.**
+  Recipe: `ports.backend_exe()`/`fe_exe()` + drop the `os.name != "nt"` skip +
+  `LOCALAPPDATA/Temp` → `tempfile.gettempdir()` (env `TMPDIR`); Windows process
+  tooling (`taskkill`/`tasklist`/PowerShell) → POSIX (`os.kill`/`/proc/<pid>/fd`).
+  Covers three sets: the **script-only** set (qa_watchdog, qa_edge, qa_run_result,
+  qa_min_interval, qa_group_*, …), the **pack-*/multi-plugin** set (qa_pack_* ×9,
+  qa_multi_graph, qa_kv_reload, qa_use_pack_door, qa_resource_handle,
+  qa_remove_under_load, qa_corrupt_project_json — all loading REAL global plugins),
+  and the **imgcodec** set (qa_cap_imgcodec, qa_cap_imgcodec_autoload,
+  qa_jpeg_preview — `xi.jpeg.encode`/`xi.image.decode`, verified with the default
+  stb encoder; turbojpeg optional for 3.2×). The global-plugin-loading and imgcodec
+  gaps that used to block ~20 of these are now CLOSED (see the plugin-loading work
+  above). A handful stay nt-only for specific remaining gaps (each recorded, so
+  they SKIP not FAIL):
+    - qa_cpu_affinity — per-thread CPU affinity is a no-op on Linux (deferred item above).
+    - qa_local_auto — the local auto image source delivers no frames on Linux.
+    - qa_export_bundle — `tools/export_bundle.py` is Windows-only (builds an MSVC `.dll` bundle).
+    - qa_func / qa_recover — FE-based + need the `expose` surface / an FE-path fix.
+    - qa_lifecycle_teardown — opens fixture projects (`burst_pipeline`, `qa_sink_shared_doc`) absent from this branch.
+    - qa_slow_consumer — the WS wedged-client-drop timing gap (deferred item below).
 - **Precise plugin-quarantine crash attribution** wants a real dump on the
   faulting thread; the terminate-path minidump unwinds the fault frame (module
   blame is preserved via `xi::last_fault_addr()`, but the culprit cross-check is
