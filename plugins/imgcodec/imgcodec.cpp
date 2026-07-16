@@ -69,6 +69,7 @@
 #include <xi/xi_mp.hpp>     // canonical msgpack Writer — the xi/image blob descriptor
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -166,9 +167,10 @@ public:
 
     std::string get_def() const override {
         std::lock_guard<std::mutex> lk(mu_);
-        char buf[96];
+        char buf[128];
         std::snprintf(buf, sizeof(buf),
-                      "{\"quality\":%d,\"cache_max\":%d}", quality_, cache_max_);
+                      "{\"quality\":%d,\"cache_max\":%d,\"encode_max_concurrent\":%d}",
+                      quality_, cache_max_, max_concurrent_);
         return buf;
     }
     bool set_def(const std::string& json) override {
@@ -178,6 +180,11 @@ public:
         quality_   = clamp_q_(p["quality"].as_int(quality_));
         cache_max_ = p["cache_max"].as_int(cache_max_);
         if (cache_max_ < 1) cache_max_ = 1;
+        int mc = p["encode_max_concurrent"].as_int(max_concurrent_);
+        max_concurrent_ = mc < 0 ? 0 : mc;   // 0 = unlimited
+        // A raised (or lifted) cap must wake encoders blocked on the old, smaller
+        // limit; notify under the lock is fine (they re-check the predicate).
+        enc_cv_.notify_all();
         return true;
     }
 
@@ -264,6 +271,11 @@ private:
         if (hit) {
             hits_.fetch_add(1, std::memory_order_relaxed);
         } else {
+            // Concurrency cap: wait for a slot before doing the (single-threaded,
+            // CPU-heavy) encode, so at most max_concurrent_ run at once. Held only
+            // across the encode compute — the cache lookup above and insert below
+            // are unaffected. Unlimited when max_concurrent_ == 0.
+            EncodeSlot slot(this);
             auto fresh = std::make_shared<std::vector<uint8_t>>();
             // xi_pack_image pixels are contiguous (w*h*c) — the encoder's native
             // interleaved layout; wrap without copy. xi::encode_jpeg dispatches
@@ -404,11 +416,40 @@ private:
     const xi_cap_provider_v1* provider_ = nullptr;
     bool                      registered_ = false;
 
-    mutable std::mutex mu_;   // cache_ / order_ / quality_ / cache_max_
+    mutable std::mutex mu_;   // cache_ / order_ / quality_ / cache_max_ / cap state
     std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>> cache_;
     std::deque<uint64_t> order_;      // FIFO rotation (the host xi.preview pattern)
     int quality_   = 85;
     int cache_max_ = 32;
+
+    // Encode concurrency cap (CT: bound CPU so JPEG encoding can't starve the
+    // inspection compute). At most `max_concurrent_` real encodes run at once;
+    // 0 = unlimited (default — the pre-existing reentrant behaviour, byte-unchanged).
+    // Gates ONLY the encode compute, never a cache hit. A single libjpeg-turbo
+    // encode is itself single-threaded — this caps HOW MANY run in parallel, it
+    // does not thread one encode.
+    int                     max_concurrent_ = 0;   // guarded by mu_
+    int                     active_encodes_ = 0;   // guarded by mu_
+    std::condition_variable enc_cv_;
+
+    // RAII: block until a concurrency slot is free (if capped), hold it for the
+    // encode, release on scope exit — including the encode-failed early return.
+    struct EncodeSlot {
+        ImgCodec* s;
+        explicit EncodeSlot(ImgCodec* self) : s(self) {
+            std::unique_lock<std::mutex> lk(s->mu_);
+            s->enc_cv_.wait(lk, [&] {
+                return s->max_concurrent_ <= 0 || s->active_encodes_ < s->max_concurrent_;
+            });
+            ++s->active_encodes_;
+        }
+        ~EncodeSlot() {
+            { std::lock_guard<std::mutex> lk(s->mu_); --s->active_encodes_; }
+            s->enc_cv_.notify_one();
+        }
+        EncodeSlot(const EncodeSlot&) = delete;
+        EncodeSlot& operator=(const EncodeSlot&) = delete;
+    };
 
     std::atomic<int64_t> encodes_{0};   // misses (real encode work) — dedup proof
     std::atomic<int64_t> hits_{0};

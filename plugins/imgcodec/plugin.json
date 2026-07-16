@@ -19,7 +19,8 @@
   "manifest": {
     "params": [
       { "name": "quality",   "type": "int", "default": 85, "doc": "JPEG quality 1..100 used when a request carries no 'quality' entry" },
-      { "name": "cache_max", "type": "int", "default": 32, "doc": "dedup memo cache capacity (entries, FIFO rotation)" }
+      { "name": "cache_max", "type": "int", "default": 32, "doc": "dedup memo cache capacity (entries, FIFO rotation)" },
+      { "name": "encode_max_concurrent", "type": "int", "default": 0, "doc": "cap on simultaneous JPEG encodes (0 = unlimited). Bounds CPU so encoding can't starve inspection; gates only real encodes, never a dedup cache hit. A single encode is single-threaded (libjpeg-turbo) — this limits parallelism across concurrent requests, it does not thread one image." }
     ],
     "inputs": [],
     "outputs": [],
