@@ -211,8 +211,17 @@ if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
     endforeach()
 endif()
 find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
-target_include_directories(xi_core INTERFACE ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(xi_core INTERFACE ${OpenCV_LIBS})
+# OpenCV is an OPT-IN dependency, NOT part of xi_core (completes OQ-9 for the
+# backend, matching plugins/CMakeLists.txt which already decoupled it). The core
+# runtime does NO image processing — the umbrella xi.hpp / xi_image.hpp / xi_jpeg.hpp
+# are OpenCV-free — so xinsp_backend/xinsp_runner must not link opencv_world.dll.
+# cv:: lives only behind the opt-in <xi/xi_cv.hpp>; the few targets that include it
+# (or otherwise call cv::) link the `xi_opencv` INTERFACE target below. (Runtime-
+# compiled user scripts/plugins get OpenCV via the toolchain's own compile flags —
+# opencv_dir — not via this target, so they are unaffected.)
+add_library(xi_opencv INTERFACE)
+target_include_directories(xi_opencv INTERFACE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(xi_opencv INTERFACE ${OpenCV_LIBS})
 if(XINSP2_HAS_IPP)
     # Default install layout: C:/Intel/ipp/<ver>/{include,lib,bin}
     # Override with -DIPP_ROOT=... or env IPP_ROOT.
@@ -662,7 +671,10 @@ add_test(NAME xi_pack COMMAND test_xi_pack)
 # (CV-free descriptor reader) + the cv::Mat wrappers over it. Links xi_core for
 # the OpenCV INTERFACE (the cv:: mapping under test lives in <xi/xi_cv.hpp>).
 add_executable(test_image_blob tests/test_image_blob.cpp)
-target_link_libraries(test_image_blob PRIVATE xi_core)
+# Uses the opt-in cv:: bridge (<xi/xi_cv.hpp>: as_cv_read/as_cv_write_blob), so it
+# links OpenCV explicitly via xi_opencv (xi_core is OpenCV-free).
+target_link_libraries(test_image_blob PRIVATE xi_core xi_opencv)
+target_compile_definitions(test_image_blob PRIVATE XINSP2_HAS_OPENCV=1)
 if(NOT MSVC)
     target_link_libraries(test_image_blob PRIVATE pthread)
 endif()
@@ -1036,8 +1048,8 @@ if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
     target_link_libraries(bench_jpeg PRIVATE
         ${IPP_CORE_LIB} ${IPP_I_LIB} ${IPP_CV_LIB} ${IPP_CC_LIB})
 endif()
-target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_OPENCV=1)
-# OpenCV include + libs come via xi_core's INTERFACE.
+# bench_jpeg is OpenCV-free now (the encoder is turbo/stb; the OpenCV jpeg path was
+# removed). No XINSP2_HAS_OPENCV define, no OpenCV link.
 if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
     target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_TURBOJPEG=1)
     target_include_directories(bench_jpeg PRIVATE ${TURBOJPEG_INCLUDE_DIR})
@@ -1131,8 +1143,10 @@ if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
         ${IPP_CORE_LIB} ${IPP_I_LIB} ${IPP_CV_LIB} ${IPP_CC_LIB})
 endif()
 
-target_compile_definitions(xinsp_backend PRIVATE XINSP2_HAS_OPENCV=1)
-# OpenCV include + libs come via xi_core's INTERFACE.
+# xinsp_backend is OpenCV-FREE: the core runtime does no image processing, so it
+# does not link opencv_world.dll. (opencv_world.dll is still DEPLOYED next to the
+# exe by _xinsp_deploy_dlls — but for the runtime-compiled user vision scripts that
+# load into this process, NOT for the backend's own code.)
 
 # [v12 THE CUT — the xinsp_backend target no longer links libjpeg-turbo: the
 #  in-core JPEG encoder was evicted, encode is capability-only (xi.jpeg.encode).
@@ -1396,7 +1410,7 @@ endif()
 # builds it on demand, so normal builds aren't slowed but `ctest` catches the
 # regression (compile-only — no link, guards header self-sufficiency directly).
 add_library(script_selfcheck OBJECT EXCLUDE_FROM_ALL tests/script_selfcheck.cpp)
-target_link_libraries(script_selfcheck PRIVATE xi_core)   # SDK + vendor + OpenCV include dirs
+target_link_libraries(script_selfcheck PRIVATE xi_core xi_opencv)   # models user SDK code: pulls xi_cv.hpp via xi_script_support.hpp → needs OpenCV
 if(MSVC)
     target_compile_options(script_selfcheck PRIVATE /openmp)   # xi_script_support.hpp uses <omp.h>
 else()
@@ -1437,7 +1451,7 @@ foreach(_tier easy medium expert)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_in})
 endforeach()
 add_library(template_selfcheck OBJECT EXCLUDE_FROM_ALL ${_tpl_rendered})
-target_link_libraries(template_selfcheck PRIVATE xi_core)   # SDK + yyjson + OpenCV include dirs
+target_link_libraries(template_selfcheck PRIVATE xi_core xi_opencv)   # force-includes xi_plugin_support.hpp (→ xi_cv.hpp) — needs OpenCV
 if(MSVC)
     # Mirror the plugin compile path: /EHa (host runs plugins under SEH
     # translation) + force-include the plugin support umbrella (xinsp2_plugin.cmake).
@@ -1477,7 +1491,7 @@ list(FILTER _examples_scripts EXCLUDE REGEX "/demo_async\\.cpp$")
 #  demo tree; their filter + include lines are removed.]
 if(_examples_scripts)
     add_library(examples_gate OBJECT EXCLUDE_FROM_ALL ${_examples_scripts})
-    target_link_libraries(examples_gate PRIVATE xi_core)   # SDK + vendor + OpenCV include dirs
+    target_link_libraries(examples_gate PRIVATE xi_core xi_opencv)   # example scripts use cv:: (PCH <opencv2/opencv.hpp>) — needs OpenCV
     if(MSVC)
         # Mirror the JIT's script compile (xi_script_compiler.hpp): force-include
         # the OpenCV umbrella FIRST (via the PCH below, which CMake injects as a
