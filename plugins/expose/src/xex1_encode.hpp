@@ -195,6 +195,12 @@ inline std::vector<uint8_t> encode_frame_v3(
         const std::vector<V3Entry>& entries,
         bool has_channel = true, bool has_seq = true) {
     xi::mp::Writer w;
+    // Seed the 'XEX1' magic INTO the Writer's buffer so the whole frame is built
+    // in ONE buffer and returned by move — instead of building the msgpack body
+    // then copying it into a fresh {'X','E','X','1'} + body vector (perf/ws-lean:
+    // for a blob-dominant frame that prepend was a full 15–60 MB copy, HALF the
+    // encode cost). The bytes are identical: magic followed by the same msgpack.
+    w.raw_canonical(reinterpret_cast<const uint8_t*>("XEX1"), 4);
     w.map(2 + (has_channel ? 1u : 0u) + (has_seq ? 1u : 0u));
     w.key("v");       w.int_(3);
     if (has_channel) { w.key("channel"); w.str(channel); }
@@ -233,10 +239,7 @@ inline std::vector<uint8_t> encode_frame_v3(
             w.raw_canonical(e.value.data(), e.value.size());
         }
     }
-    std::vector<uint8_t> out = {'X', 'E', 'X', '1'};
-    const xi::mp::Bytes& body = w.bytes();
-    out.insert(out.end(), body.begin(), body.end());
-    return out;
+    return w.take();   // whole frame (magic + body) in one buffer — no prepend copy
 }
 
 }  // namespace xex1

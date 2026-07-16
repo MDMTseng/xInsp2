@@ -974,6 +974,45 @@ public:
         }();
         return &iface;
     }
+    // xi.emit@2 (perf/ws-lean) — the zero-copy owned-emit door. Unlike the v1
+    // fields this verb is NOT a host_api struct field (the v12 layout is frozen);
+    // it forwards to the installed BinaryOwnedSinkFn (service_main wires it to the
+    // WS server's send_binary_owned). With no sink installed (headless) it MUST
+    // still consume the ownership token — release it — so a producer never leaks.
+    static const xi_emit_v2* emit_v2_iface() {
+        static const xi_emit_v2 iface = [] {
+            xi_emit_v2 i{};
+            i.emit_binary_owned = [](const xi_bin_span* spans, int32_t nspans,
+                                     void* owner, void (*release)(void*)) {
+                // Zero-copy sink installed (production WS server): hand it through.
+                if (auto fn = xi::binary_owned_sink()) {
+                    fn(spans, (int)nspans, owner, release);
+                    return;
+                }
+                // GRACEFUL FALLBACK: a host with only the copying v1 sink (every
+                // test host, host_mock, the headless runner) must still DELIVER the
+                // frame — concatenate the segments and push through binary_sink(),
+                // then consume the ownership token. The zero-copy win is lost here
+                // (this is not the hot production path), correctness is not.
+                if (auto fn = xi::binary_sink()) {
+                    size_t total = 0;
+                    for (int32_t k = 0; k < nspans; ++k)
+                        if (spans[k].data && spans[k].len > 0) total += (size_t)spans[k].len;
+                    std::vector<uint8_t> buf;
+                    buf.reserve(total);
+                    for (int32_t k = 0; k < nspans; ++k)
+                        if (spans[k].data && spans[k].len > 0)
+                            buf.insert(buf.end(),
+                                       static_cast<const uint8_t*>(spans[k].data),
+                                       static_cast<const uint8_t*>(spans[k].data) + spans[k].len);
+                    fn(buf.data(), (int)buf.size());
+                }
+                if (owner && release) release(owner);   // consume the token either way
+            };
+            return i;
+        }();
+        return &iface;
+    }
     static const xi_log_v1* log_v1_iface() {
         static const xi_log_v1 iface = [] {
             const xi_host_api* h = canonical_host_api();
@@ -1017,6 +1056,9 @@ public:
         // [xi.doc@1 retired at THE CUT (v12) — Record yyjson-doc plane gone.]
         if (std::strcmp(id, "xi.emit") == 0 && version == 1)
             return emit_v1_iface();
+        // xi.emit@2 (perf/ws-lean): the zero-copy owned-emit supplement to @1.
+        if (std::strcmp(id, "xi.emit") == 0 && version == 2)
+            return emit_v2_iface();
         if (std::strcmp(id, "xi.log") == 0 && version == 1)
             return log_v1_iface();
         // polaris2 wave-2: the Pack data plane, published via publish_pack_iface

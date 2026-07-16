@@ -229,6 +229,10 @@ while(TRUE)
         message(FATAL_ERROR "perf_gate: PERFORMANCE REGRESSION (persisted across a re-run) in: ${_rj} (see report above)")
     endif()
     message(STATUS "perf_gate: regression on run 1 (${_rj}) — re-measuring once to reject transient machine noise")
+    # Let the burst DECAY before re-measuring: an immediate retry samples the
+    # same noise window (observed: a suite-teardown burst held a 2us p50 at 7us
+    # across both back-to-back runs, while a solo run seconds later read 2us).
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 3)
     math(EXPR _attempt "${_attempt} + 1")
     execute_process(
         COMMAND "${BENCH_EXE}" --gate

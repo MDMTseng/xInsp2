@@ -32,6 +32,7 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <memory>
 #include <vector>
 
 namespace {
@@ -100,16 +101,25 @@ public:
         std::vector<uint8_t> frame = v3 ? build_wire_v3_from_pack_(in, channel, seq)
                                         : build_v1_from_pack_(in, channel, seq);
 
+        // MOVE the frame into a shared retained buffer: store + broadcast use the
+        // SAME bytes (a raw 5MP/20MP preview is 15-60 MB — the old store-copy was
+        // a full extra memcpy per frame on the hot path, bench5mp). The shared_ptr
+        // lets the broadcast run OUTSIDE the lock while eviction stays safe.
+        auto shared = std::make_shared<const std::vector<uint8_t>>(std::move(frame));
         long long seen; bool subscribed;
         {
             std::lock_guard<std::mutex> lk(mu_);
             Channel& ch = store_channel_(channel);
             ch.seq         = seq;
-            ch.frame_bytes = frame;    // keep the latest encoded frame for pull
+            ch.frame_bytes = shared;   // keep the latest encoded frame for pull
             seen = ++ch.seen;
             subscribed = subscribed_.count(channel) != 0;
         }
-        if (subscribed) emit_binary(frame);
+        // Zero-copy broadcast (xi.emit@2 / perf/ws-lean): hand the host a SHARE of
+        // the encoded frame instead of a copy — the host sends straight from these
+        // bytes and drops its share after. The store above holds its own share for
+        // pull, so both survive. (Falls back to a copy on a host without xi.emit@2.)
+        if (subscribed) emit_binary_owned(shared);
 
         out.str("channel", channel).i64("seen", (int64_t)seen);
     }
@@ -142,7 +152,8 @@ public:
             subscribed = subscribed_.count(channel) != 0;
             if (has_frame) {
                 Channel& ch = store_channel_(channel);
-                ch.frame_bytes.assign((const uint8_t*)fp, (const uint8_t*)fp + fn);
+                ch.frame_bytes = std::make_shared<const std::vector<uint8_t>>(
+                    (const uint8_t*)fp, (const uint8_t*)fp + fn);
                 seen = ++ch.seen;
             }
         }
@@ -190,10 +201,12 @@ public:
                 return xi::Json::object().set("found", false).set("channel", channel).dump();
             // A channel fed through the pack door holds its encoded XEX1 frame
             // bytes — the sole data plane in v12 (the Record rebuild is gone).
-            const std::vector<uint8_t>& frame = it->second.frame_bytes;
+            const auto& fb = it->second.frame_bytes;
+            if (!fb)
+                return xi::Json::object().set("found", false).set("channel", channel).dump();
             return xi::Json::object().set("found", true).set("channel", channel)
                 .set("seq", (int64_t)it->second.seq)
-                .set("frame_b64", b64(frame.data(), frame.size())).dump();
+                .set("frame_b64", b64(fb->data(), fb->size())).dump();
         }
         if (c == "clear") channels_.clear();
         return xi::Json::object().set("count", (int)channels_.size()).dump();
@@ -237,7 +250,9 @@ private:
         uint64_t                          seq  = 0;
         long long                         seen = 0;
         uint64_t                          touched = 0;   // monotonic last-write order (bounded eviction)
-        std::vector<uint8_t>              frame_bytes;  // latest encoded frame (pack-door path)
+        // Latest encoded frame, SHARED between the store (pull) and the in-flight
+        // broadcast: store+send are one buffer, no per-frame copy (bench5mp).
+        std::shared_ptr<const std::vector<uint8_t>> frame_bytes;
     };
 
     // Bounded latest-wins store (caller holds mu_): stamp the channel's write

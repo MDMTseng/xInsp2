@@ -300,6 +300,47 @@ typedef struct xi_emit_v1 {
     void (*emit_binary)(const void* data, int32_t len);
 } xi_emit_v1;
 
+/* One borrowed byte segment of a scatter-gather zero-copy binary emit (xi.emit@2). */
+typedef struct xi_bin_span {
+    const void* data;
+    int64_t     len;
+} xi_bin_span;
+
+/* xi.emit@2 — the ZERO-COPY binary emit door (perf/ws-lean). Where xi.emit@1's
+ * emit_binary COPIES `len` bytes into a host-owned buffer (unavoidable: the
+ * caller's buffer is transient), emit_binary_owned lets a producer HAND the host
+ * bytes it already owns and keep them alive until the send completes — the host
+ * copies NOTHING on the hot path (a raw 5–20 MP preview is 15–60 MB; that per-
+ * frame copy was a top egress cost).
+ *
+ *   emit_binary_owned(spans, nspans, owner, release):
+ *     Enqueue ONE binary WS message = the `nspans` segments concatenated IN
+ *     ORDER. The host records the spans + `owner` and its single ordered writer
+ *     thread sends them (after a small host-built WS header); when the frame is
+ *     sent — OR dropped (slow-consumer byte-cap) OR the connection/host tears
+ *     down — the host calls release(owner) EXACTLY ONCE. `release` runs in the
+ *     PRODUCER's TU, so the producer's own allocator/refcount frees the bytes
+ *     (no cross-DLL heap free). The segment bytes MUST stay valid and immutable
+ *     from the call until release(owner) runs. `owner`+`release` MUST be non-null
+ *     (a producer with a transient buffer uses xi.emit@1 emit_binary instead).
+ *     Enqueue order == wire order (same ordered lane as emit_binary). Thread-safe
+ *     from a dispatch worker. NULL interface on a pre-v2 host — resolve it once,
+ *     fall back to emit_binary (which copies) when absent. Field order frozen
+ *     forever; a change ships as xi_emit_v3. */
+typedef struct xi_emit_v2 {
+    void (*emit_binary_owned)(const xi_bin_span* spans, int32_t nspans,
+                              void* owner, void (*release)(void*));
+} xi_emit_v2;
+
+#if defined(__cplusplus)
+#include <cstddef>
+static_assert(sizeof(xi_emit_v2) == 1 * sizeof(void*),
+              "xi_emit_v2 layout changed: xi.emit@2 is frozen — append a verb "
+              "only at the tail (updating this count) or ship xi.emit@3.");
+static_assert(offsetof(xi_emit_v2, emit_binary_owned) == 0,
+              "xi_emit_v2.emit_binary_owned must remain the first field.");
+#endif
+
 /* xi.log@1 — the operator/UI text-I/O capability domain. log (a leveled line to
  * the backend log + operator channel) + set_status (latest sticky status string
  * per source, served via cmd:status). Same pointers as the legacy log/set_status
@@ -771,6 +812,10 @@ typedef struct xi_host_api {
     /*   get_interface("xi.emit", 1)    -> const xi_emit_v1*  (carries     */
     /*       ONLY emit_binary since v12 — emit_record left with the        */
     /*       Record plane; see the xi_emit_v1 typedef above).              */
+    /*   get_interface("xi.emit", 2)    -> const xi_emit_v2*  (the zero-    */
+    /*       copy emit_binary_owned scatter/ownership-handoff door,        */
+    /*       perf/ws-lean; NULL on a host without it — fall back to        */
+    /*       emit_binary, which copies).                                    */
     /*   get_interface("xi.log", 1)     -> const xi_log_v1*  (log +       */
     /*       set_status, Phase 3).                                        */
     /*   get_interface("xi.pack", 1)    -> const xi_pack_v1*  (the v3     */
