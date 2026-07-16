@@ -168,7 +168,13 @@ static std::string discover_sibling_exe(const char* base) {
     fs::path dir = fs::path(std::string(buf, n)).parent_path();
     std::string exe = std::string(base) + ".exe";
 #else
-    fs::path dir = fs::current_path();
+    // Mirror Windows' GetModuleFileName: resolve the FE's OWN dir, not the cwd.
+    // The FE may be launched from an arbitrary working directory (e.g. an
+    // fe.json scratch dir), so cwd is not where the sibling backend lives.
+    // TODO(macos): /proc/self/exe is Linux-only; macOS uses _NSGetExecutablePath.
+    std::error_code ec;
+    fs::path self = fs::read_symlink("/proc/self/exe", ec);
+    fs::path dir = ec ? fs::current_path() : self.parent_path();
     std::string exe = base;
 #endif
     fs::path p = dir;
