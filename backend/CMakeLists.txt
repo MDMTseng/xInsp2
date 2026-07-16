@@ -146,25 +146,11 @@ endif()
 
 # OpenCV is mandatory (image operators); IPP stays opt-in.
 option(XINSP2_HAS_IPP        "Link Intel IPP for JPEG encode acceleration" OFF)
-# Default install root: C:\libjpeg-turbo64 (Windows) or /opt/libjpeg-turbo (Linux)
-set(TURBOJPEG_ROOT "C:/libjpeg-turbo64" CACHE PATH "libjpeg-turbo install root")
-# libjpeg-turbo is AUTO-DETECTED (mirrors the OpenCV_DIR autodetect below): if it is
-# installed at TURBOJPEG_ROOT (or a system path) default it ON — the direct SIMD RGB
-# encode (tjCompress) is ~6x the OpenCV libjpeg+cvtColor fallback (measured, doc 34),
-# and it is the encoder the imgcodec plugin's preview egress rides. A build with no
-# libjpeg-turbo defaults OFF and falls back to OpenCV, so this adds NO hard
-# dependency. First configure only (sticky in cache); override with
-# -DXINSP2_HAS_TURBOJPEG=ON/OFF.
-if(DEFINED XINSP2_HAS_TURBOJPEG)
-    set(_xi_tj_default ${XINSP2_HAS_TURBOJPEG})
-elseif(EXISTS "${TURBOJPEG_ROOT}/include/turbojpeg.h"
-       OR EXISTS "/usr/include/turbojpeg.h"
-       OR EXISTS "/usr/local/include/turbojpeg.h")
-    set(_xi_tj_default ON)
-else()
-    set(_xi_tj_default OFF)
-endif()
-option(XINSP2_HAS_TURBOJPEG  "Link libjpeg-turbo for direct SIMD JPEG encode" ${_xi_tj_default})
+# NOTE: libjpeg-turbo is NOT a backend concern. Post-CUT the JPEG encoder lives in
+# the imgcodec LIB PLUGIN, so turbojpeg detection/linking is owned entirely by
+# plugins/CMakeLists.txt (and the JPEG bench moved there too). The shared header
+# xi/xi_jpeg.hpp still has an #ifdef XINSP2_HAS_TURBOJPEG turbo path, but ONLY the
+# plugin ever defines it — the backend build never sets or looks for turbojpeg.
 
 # yyjson — the JSON DOM + serializer that replaces cJSON (v0.12.0, pinned).
 # Mutable doc for build, immutable doc for fast read; pool allocator for
@@ -196,7 +182,7 @@ target_include_directories(xi_fe INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../fe/inc
 enable_testing()
 
 # Resolve optional encoder libs ONCE so every target that needs them
-# (xinsp_backend, xinsp_runner, bench_jpeg) shares the same lookup.
+# (xinsp_backend, xinsp_runner) shares the same lookup.
 # OpenCV: mandatory. Auto-detect typical Windows install locations if
 # OpenCV_DIR isn't already set.
 if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
@@ -244,15 +230,6 @@ if(XINSP2_HAS_IPP)
     find_library(IPP_CC_LIB   ippcc   HINTS ${IPP_ROOT}/lib)
     if(NOT (IPP_INCLUDE_DIR AND IPP_CORE_LIB))
         message(WARNING "XINSP2_HAS_IPP=ON but IPP not found at ${IPP_ROOT}; set -DIPP_ROOT=...")
-    endif()
-endif()
-if(XINSP2_HAS_TURBOJPEG)
-    find_path(TURBOJPEG_INCLUDE_DIR turbojpeg.h
-        HINTS ${TURBOJPEG_ROOT}/include /usr/include /usr/local/include)
-    find_library(TURBOJPEG_LIB NAMES turbojpeg
-        HINTS ${TURBOJPEG_ROOT}/lib /usr/lib /usr/local/lib)
-    if(NOT (TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB))
-        message(WARNING "XINSP2_HAS_TURBOJPEG=ON but libjpeg-turbo not found at ${TURBOJPEG_ROOT}")
     endif()
 endif()
 
@@ -1037,25 +1014,9 @@ target_compile_definitions(xinsp_fe PRIVATE
 # line-safe case is handled by a comms plugin's own sidecar process, not the
 # core/FE. See docs/internals/comms-sidecar.md.)
 
-# JPEG-encoder benchmark — quantifies the IPP/OpenCV/stb dispatch.
-# Not run as a test (no pass/fail); invoke manually for numbers.
-add_executable(bench_jpeg tests/bench_jpeg.cpp src/stb_impl.cpp)
-target_link_libraries(bench_jpeg PRIVATE xi_core)
-target_compile_definitions(bench_jpeg PRIVATE XINSP2_COMMIT="${XINSP2_COMMIT}")
-if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR AND IPP_CORE_LIB)
-    target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_IPP=1)
-    target_include_directories(bench_jpeg PRIVATE ${IPP_INCLUDE_DIR})
-    target_link_libraries(bench_jpeg PRIVATE
-        ${IPP_CORE_LIB} ${IPP_I_LIB} ${IPP_CV_LIB} ${IPP_CC_LIB})
-endif()
-# bench_jpeg is OpenCV-free now (the encoder is turbo/stb; the OpenCV jpeg path was
-# removed). No XINSP2_HAS_OPENCV define, no OpenCV link.
-if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
-    target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_TURBOJPEG=1)
-    target_include_directories(bench_jpeg PRIVATE ${TURBOJPEG_INCLUDE_DIR})
-    target_link_libraries(bench_jpeg PRIVATE ${TURBOJPEG_LIB})
-endif()
-_xinsp_perf_gate(perf_jpeg bench_jpeg jpeg.txt)
+# bench_jpeg / perf_jpeg MOVED to plugins/CMakeLists.txt — the JPEG encoder (and its
+# turbojpeg dependency) lives in the imgcodec plugin post-CUT, so its benchmark lives
+# there too. The backend build no longer references turbojpeg at all.
 
 # [ABI v12 THE CUT: bench_record + the perf_record gate removed — the bench
 #  measured the Record in-process handoff (Record::share_out / adopt_shared,
@@ -1171,9 +1132,8 @@ function(_xinsp_deploy_dlls tgt)
     # deploys its own turbojpeg.dll (next to xi-imgcodec.dll, see
     # plugins/CMakeLists.txt), and the loader resolves it from there because
     # load_plugin_dll_ loads with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (searches the
-    # plugin DLL's own directory for its dependencies). Keeping it out of the exe
-    # dir keeps the core dependency-free (bench_jpeg, a dev bench, still links turbo
-    # but is not a shipped exe and resolves turbojpeg.dll via PATH on a dev box).
+    # plugin DLL's own directory for its dependencies). The backend build no longer
+    # references turbojpeg at all (the JPEG bench moved to the plugins tree too).
     if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR)
         get_filename_component(_ipp_root "${IPP_INCLUDE_DIR}" DIRECTORY)
         if(EXISTS "${_ipp_root}/bin")

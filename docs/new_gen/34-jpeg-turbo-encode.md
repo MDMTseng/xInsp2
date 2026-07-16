@@ -48,11 +48,12 @@ OpenCV. This change makes the flag **AUTO-DETECT** (same pattern as `OpenCV_DIR`
   existing build dir keeps its value — a fresh configure (or a one-time `-D…=ON`)
   picks up the new default.
 
-Applied in BOTH `backend/CMakeLists.txt` (bench_jpeg + host tests) and
-`plugins/CMakeLists.txt` — the latter is what matters in production: post-CUT the
-JPEG encoder lives in the **imgcodec lib plugin** (`xi.jpeg.encode`), which the
-preview egress (`expose` / `ui.egress`) calls. So this turns the real preview
-encoder from OpenCV to turbo wherever the box has libjpeg-turbo.
+turbojpeg is owned **entirely by `plugins/CMakeLists.txt`** — the backend build does
+not reference it at all. Post-CUT the JPEG encoder lives in the **imgcodec lib
+plugin** (`xi.jpeg.encode`), which the preview egress (`expose` / `ui.egress`) calls,
+so the detection + link live where the encoder does. This turns the real preview
+encoder from OpenCV to turbo wherever the box has libjpeg-turbo. (`bench_jpeg`, the
+JPEG-encoder bench, also lives in the plugins tree for the same reason.)
 
 ## Where it sits in the egress picture (doc 32 / 33)
 
@@ -72,7 +73,7 @@ same image both ways); the absolute fps on real imagery will be somewhat lower.
 ## Reproduce
 
 ```
-cmake -S backend -B backend/build -DXINSP2_HAS_TURBOJPEG=ON
-cmake --build backend/build --config Release --target bench_jpeg
-./backend/build/Release/bench_jpeg.exe 40 2448 2048     # 5 MP
+cmake -S plugins -B plugins/build            # auto-detects libjpeg-turbo
+cmake --build plugins/build --config Release --target bench_jpeg
+./plugins/build/Release/bench_jpeg.exe 40 2448 2048     # 5 MP
 ```

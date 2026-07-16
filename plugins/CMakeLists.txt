@@ -574,6 +574,21 @@ endif()
 add_dependencies(cap_jpeg_encode_host_test imgcodec)
 add_test(NAME cap_jpeg_encode_host_test COMMAND cap_jpeg_encode_host_test)
 
+# bench_jpeg — JPEG-encoder benchmark, MOVED here from backend/tests. The encoder
+# (xi::encode_jpeg) and its turbojpeg dependency live in this plugins tree post-CUT,
+# so the bench that measures them lives here too — the backend build no longer knows
+# turbojpeg. Manual dev bench (no ctest / no perf-gate); run it for numbers.
+# OpenCV-free (turbo -> stb dispatch). Sources are the shared backend headers +
+# stb impl; perf_fingerprint.hpp comes from backend/tests on the include path.
+add_executable(bench_jpeg ../backend/tests/bench_jpeg.cpp ../backend/src/stb_impl.cpp)
+target_include_directories(bench_jpeg PRIVATE ${XI_INCLUDE} ${XI_VENDOR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../backend/tests)
+if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
+    target_compile_definitions(bench_jpeg PRIVATE XINSP2_HAS_TURBOJPEG=1)
+    target_include_directories(bench_jpeg PRIVATE ${TURBOJPEG_INCLUDE_DIR})
+    target_link_libraries(bench_jpeg PRIVATE ${TURBOJPEG_LIB})
+endif()
+
 # Resource-handle convention (doc 14 appendix) — demo.lut end to end against
 # the REAL built DLL through the REAL host funnel: build -> handle entry
 # {type,id,gen,$v}, content dedup (built=0, builds pinned), the handle HOP
