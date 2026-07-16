@@ -199,6 +199,18 @@ if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
     target_compile_definitions(imgcodec PRIVATE XINSP2_HAS_TURBOJPEG=1)
     target_include_directories(imgcodec PRIVATE ${TURBOJPEG_INCLUDE_DIR})
     target_link_libraries(imgcodec PRIVATE ${TURBOJPEG_LIB})
+    # The PLUGIN owns its native dependency: deploy turbojpeg.dll next to
+    # xi-imgcodec.dll, NOT next to the backend exe. The runtime loader
+    # (load_plugin_dll_, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR) searches the plugin
+    # DLL's own directory for its deps, so this resolves without the core exe
+    # carrying the dependency — keeping the backend turbojpeg-free (v12 CUT).
+    get_filename_component(_tj_dir "${TURBOJPEG_LIB}" DIRECTORY)
+    get_filename_component(_tj_root "${_tj_dir}" DIRECTORY)
+    if(EXISTS "${_tj_root}/bin/turbojpeg.dll")
+        add_custom_command(TARGET imgcodec POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_tj_root}/bin/turbojpeg.dll" "$<TARGET_FILE_DIR:imgcodec>/")
+    endif()
 endif()
 
 # ui_egress — the LIVE-UI egress service-middleware LIB PLUGIN (docs/new_gen/31).

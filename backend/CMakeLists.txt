@@ -1152,13 +1152,14 @@ function(_xinsp_deploy_dlls tgt)
             break()
         endif()
     endforeach()
-    if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_LIB)
-        get_filename_component(_tj_dir "${TURBOJPEG_LIB}" DIRECTORY)
-        get_filename_component(_tj_root "${_tj_dir}" DIRECTORY)
-        if(EXISTS "${_tj_root}/bin/turbojpeg.dll")
-            list(APPEND _dll_files "${_tj_root}/bin/turbojpeg.dll")
-        endif()
-    endif()
+    # turbojpeg.dll is NOT deployed here. Post-CUT (v12) the backend exe does not
+    # link libjpeg-turbo — only the imgcodec LIB PLUGIN does. The plugin owns and
+    # deploys its own turbojpeg.dll (next to xi-imgcodec.dll, see
+    # plugins/CMakeLists.txt), and the loader resolves it from there because
+    # load_plugin_dll_ loads with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (searches the
+    # plugin DLL's own directory for its dependencies). Keeping it out of the exe
+    # dir keeps the core dependency-free (bench_jpeg, a dev bench, still links turbo
+    # but is not a shipped exe and resolves turbojpeg.dll via PATH on a dev box).
     if(XINSP2_HAS_IPP AND IPP_INCLUDE_DIR)
         get_filename_component(_ipp_root "${IPP_INCLUDE_DIR}" DIRECTORY)
         if(EXISTS "${_ipp_root}/bin")
