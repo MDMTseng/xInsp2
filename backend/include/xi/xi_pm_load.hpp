@@ -169,6 +169,14 @@ inline int PluginManager::autoload_machine_providers_locked_() {
         InstanceRegistry::instance().add(inst);
         machine_instances_[name] = inst;
         ++created;
+        // Deployment config (--lib-config): apply the per-machine def to this
+        // autoloaded provider BEFORE it serves. Non-fatal: a bad/rejected entry
+        // leaves the compiled defaults (logged). A project instance of the same
+        // plugin still wins later (it displaces this machine provider).
+        if (auto ci = lib_config_.find(name); ci != lib_config_.end() && !ci->second.empty()) {
+            std::fprintf(stderr, "[xinsp2] autoload: %s --lib-config to '%s'\n",
+                         inst->set_def(ci->second) ? "applied" : "REJECTED", name.c_str());
+        }
         std::fprintf(stderr, "[xinsp2] autoload: machine lib provider '%s' up (owner=%llu)\n",
                      name.c_str(), (unsigned long long)inst->owner_id());
     }

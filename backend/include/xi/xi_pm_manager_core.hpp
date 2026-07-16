@@ -240,6 +240,18 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         return autoload_enabled_;
     }
+
+    // Deployment lib-plugin config (per machine): plugin name -> its def JSON.
+    // Applied via set_def to each AUTOLOADED machine provider before it serves
+    // (see autoload_machine_providers_locked_), so a deployment can tune a lib
+    // plugin (e.g. imgcodec's encode_max_concurrent) WITHOUT a project instance.
+    // Set from the service's --lib-config / env XINSP2_LIB_CONFIG before boot
+    // autoload. A project instance of the same plugin still wins (it displaces
+    // the machine provider with its own config).
+    void set_lib_config(std::unordered_map<std::string, std::string> cfg) {
+        std::lock_guard<std::mutex> lk(mu_);
+        lib_config_ = std::move(cfg);
+    }
     // Machine-scoped recovery: rebuild a machine provider from a fresh factory
     // (the analogue of an operator re-committing a project instance's config to
     // clear a quarantine). Evicts the current machine adapter for `plugin_name`
@@ -486,6 +498,9 @@ private:
     std::unordered_map<std::string, std::shared_ptr<CAbiInstanceAdapter>> machine_instances_;
     // V3 deployment opt-in (see set_autoload_enabled). OFF = no autoload anywhere.
     bool autoload_enabled_ = false;
+    // Deployment lib-plugin config (see set_lib_config): plugin name -> def JSON,
+    // applied to autoloaded machine providers. Empty = compiled defaults.
+    std::unordered_map<std::string, std::string> lib_config_;
     ProjectInfo project_;
     // Host-tracked instance lifecycle state (see the public set/get above). Guarded
     // by mu_; migrated inline by create/remove/rename so it never drifts.

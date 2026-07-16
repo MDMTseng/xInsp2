@@ -14,11 +14,32 @@
 
 #include "perf_fingerprint.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+// Process CPU time (user+kernel) in seconds — "cores busy" = cpu/wall.
+static double proc_cpu_seconds() {
+#ifdef _WIN32
+    FILETIME c, e, k, u;
+    GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
+    auto to = [](FILETIME f) { ULARGE_INTEGER x; x.LowPart = f.dwLowDateTime;
+        x.HighPart = f.dwHighDateTime; return double(x.QuadPart) * 1e-7; };
+    return to(k) + to(u);
+#else
+    return 0.0;
+#endif
+}
 
 static const char* dispatch_label() {
 #ifdef XINSP2_HAS_TURBOJPEG
@@ -76,9 +97,84 @@ static int gate_main() {
     return 0;
 }
 
+// --- multi-thread scaling mode -------------------------------------------
+// Sweeps thread counts; each thread encodes the SAME (read-only) image into its
+// OWN output buffer for a fixed wall window (encode_jpeg_turbo keeps a
+// thread_local tj compressor, so N threads = N independent encoders). Reports
+// aggregate throughput, CPU cores busy, and scaling efficiency vs 1 thread —
+// i.e. how well CPU JPEG encode parallelises across cores.
+static int mt_main(int w, int h, double secs) {
+    auto img = make_gradient(w, h);
+    const double mp = (double)w * h / 1e6;
+    unsigned hw = std::thread::hardware_concurrency();
+    if (!hw) hw = 8;
+    std::vector<unsigned> Ts;
+    for (unsigned t : {1u, 2u, 4u, 8u, 16u}) if (t <= hw) Ts.push_back(t);
+    if (Ts.empty() || Ts.back() != hw) Ts.push_back(hw);
+
+    std::printf("encoder: %s\n", dispatch_label());
+    std::printf("image:   %dx%d (%.2f MP) q85 | %u logical CPUs | %.1fs window/point\n\n",
+                w, h, mp, hw, secs);
+    std::printf("%-8s | %-9s | %-10s | %-11s | %-7s | %-10s\n",
+                "threads", "agg fps", "agg MP/s", "fps/thread", "cores", "efficiency");
+    std::printf("---------+-----------+------------+-------------+---------+-----------\n");
+
+    double base_fps = 0;
+    for (unsigned T : Ts) {
+        std::atomic<unsigned> ready{0};
+        std::atomic<bool> go{false};
+        std::chrono::steady_clock::time_point deadline;   // set before go (release/acquire)
+        std::vector<uint64_t> counts(T, 0);
+        std::vector<std::thread> pool;
+        for (unsigned id = 0; id < T; ++id) {
+            pool.emplace_back([&, id] {
+                std::vector<uint8_t> out;
+                (void)xi::encode_jpeg(img, 85, out);      // warm the thread_local tj handle
+                ready.fetch_add(1, std::memory_order_release);
+                while (!go.load(std::memory_order_acquire)) { /* spin to align start */ }
+                uint64_t c = 0;
+                while (std::chrono::steady_clock::now() < deadline) {
+                    xi::encode_jpeg(img, 85, out);
+                    ++c;
+                }
+                counts[id] = c;
+            });
+        }
+        while (ready.load(std::memory_order_acquire) < T) { /* wait all warmed */ }
+        deadline = std::chrono::steady_clock::now() +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(secs));
+        double cpu0 = proc_cpu_seconds();
+        auto wall0 = std::chrono::steady_clock::now();
+        go.store(true, std::memory_order_release);
+        for (auto& th : pool) th.join();
+        double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count();
+        double cores = (proc_cpu_seconds() - cpu0) / wall;
+        uint64_t tot = 0; for (auto c : counts) tot += c;
+        double agg_fps = tot / wall;
+        if (base_fps == 0) base_fps = agg_fps;
+        double eff = agg_fps / (base_fps * T);
+        char effs[24];
+        std::snprintf(effs, sizeof(effs), "%.0f%%%s", eff * 100.0, T == 1 ? " base" : "");
+        std::printf("%-8u | %-9.0f | %-10.0f | %-11.0f | %-7.1f | %-10s\n",
+                    T, agg_fps, agg_fps * mp, agg_fps / T, cores, effs);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i)
         if (std::string_view(argv[i]) == "--gate") return gate_main();
+
+    // --mt [W H] [secs]: multi-thread scaling sweep.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--mt") {
+            int    w    = (argc > i + 1) ? std::atoi(argv[i + 1]) : 2448;
+            int    h    = (argc > i + 2) ? std::atoi(argv[i + 2]) : 2048;
+            double secs = (argc > i + 3) ? std::atof(argv[i + 3]) : 2.0;
+            if (w <= 0 || h <= 0 || secs <= 0) { std::fprintf(stderr, "usage: bench_jpeg --mt [W H] [secs]\n"); return 2; }
+            return mt_main(w, h, secs);
+        }
+    }
 
     int iters = (argc > 1) ? std::atoi(argv[1]) : 50;
     int w     = (argc > 2) ? std::atoi(argv[2]) : 1920;

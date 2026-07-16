@@ -597,6 +597,47 @@ int main(int argc, char** argv) {
         bool autoload_lib = xi::cli::has_flag(argc, argv, "--autoload-lib") ||
                             (env && *env && std::strcmp(env, "0") != 0);
         g_eng.plugin_mgr.set_autoload_enabled(autoload_lib);
+        // Deployment lib-plugin config (per machine): --lib-config <path> / env
+        // XINSP2_LIB_CONFIG. A JSON OBJECT mapping plugin name -> its def object,
+        // applied to each autoloaded machine provider via set_def BEFORE it serves.
+        // Lets a deployment tune a lib plugin (e.g. imgcodec's encode_max_concurrent
+        // to the box's core count) WITHOUT a project instance, surviving plugin
+        // rebuilds. No file / bad JSON -> compiled defaults (logged, non-fatal). Must
+        // run BEFORE autoload_machine_providers() below.
+        if (autoload_lib) {
+            std::string cfg_path;
+            if (const char* e = std::getenv("XINSP2_LIB_CONFIG"); e && *e) cfg_path = e;
+            for (int i = 1; i + 1 < argc; ++i)
+                if (std::strcmp(argv[i], "--lib-config") == 0) { cfg_path = argv[i + 1]; break; }
+            if (!cfg_path.empty()) {
+                std::ifstream lf(cfg_path, std::ios::binary);
+                if (!lf) {
+                    std::fprintf(stderr, "[xinsp2] --lib-config: cannot open %s\n", cfg_path.c_str());
+                } else {
+                    std::string body((std::istreambuf_iterator<char>(lf)), std::istreambuf_iterator<char>());
+                    yyjson_doc* ldoc = yyjson_read(body.data(), body.size(), 0);
+                    yyjson_val* lroot = ldoc ? yyjson_doc_get_root(ldoc) : nullptr;
+                    std::unordered_map<std::string, std::string> lm;
+                    if (lroot && yyjson_is_obj(lroot)) {
+                        yyjson_val* lk; yyjson_obj_iter lit; yyjson_obj_iter_init(lroot, &lit);
+                        while ((lk = yyjson_obj_iter_next(&lit))) {
+                            yyjson_val* lv = yyjson_obj_iter_get_val(lk);
+                            size_t llen = 0;
+                            char* ls = yyjson_val_write(lv, 0, &llen);
+                            if (ls) { lm.emplace(yyjson_get_str(lk), std::string(ls, llen)); free(ls); }
+                        }
+                    } else {
+                        std::fprintf(stderr, "[xinsp2] --lib-config: %s is not a JSON object\n", cfg_path.c_str());
+                    }
+                    if (ldoc) yyjson_doc_free(ldoc);
+                    if (!lm.empty()) {
+                        std::fprintf(stderr, "[xinsp2] --lib-config: %zu entry(s) from %s\n",
+                                     lm.size(), cfg_path.c_str());
+                        g_eng.plugin_mgr.set_lib_config(std::move(lm));
+                    }
+                }
+            }
+        }
         if (autoload_lib) {
             int nlib = g_eng.plugin_mgr.autoload_machine_providers();
             std::fprintf(stderr, "[xinsp2] lib autoload ENABLED — %d machine "
