@@ -49,8 +49,21 @@ set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 # that opts the backend in opts imgcodec in too — perf parity for the host's
 # compress_sink once it delegates to the capability. At v12 the backend target
 # drops this define; here it stays as imgcodec's fast path.
-option(XINSP2_HAS_TURBOJPEG "Link libjpeg-turbo for direct SIMD JPEG encode in imgcodec" OFF)
+# AUTO-DETECT libjpeg-turbo (mirrors backend/CMakeLists.txt): installed → default
+# ON (the imgcodec preview encoder runs ~6x faster via direct SIMD tjCompress,
+# doc 34); absent → OFF, falls back to OpenCV. No hard dependency. Sticky in cache;
+# override with -DXINSP2_HAS_TURBOJPEG=ON/OFF.
 set(TURBOJPEG_ROOT "C:/libjpeg-turbo64" CACHE PATH "libjpeg-turbo install root")
+if(DEFINED XINSP2_HAS_TURBOJPEG)
+    set(_xi_tj_default ${XINSP2_HAS_TURBOJPEG})
+elseif(EXISTS "${TURBOJPEG_ROOT}/include/turbojpeg.h"
+       OR EXISTS "/usr/include/turbojpeg.h"
+       OR EXISTS "/usr/local/include/turbojpeg.h")
+    set(_xi_tj_default ON)
+else()
+    set(_xi_tj_default OFF)
+endif()
+option(XINSP2_HAS_TURBOJPEG "Link libjpeg-turbo for direct SIMD JPEG encode in imgcodec" ${_xi_tj_default})
 if(XINSP2_HAS_TURBOJPEG)
     find_path(TURBOJPEG_INCLUDE_DIR turbojpeg.h
         HINTS ${TURBOJPEG_ROOT}/include /usr/include /usr/local/include)

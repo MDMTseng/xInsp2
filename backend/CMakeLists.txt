@@ -144,12 +144,27 @@ if(XINSP2_SANITIZE)
     endforeach()
 endif()
 
-# OpenCV is mandatory (image operators); IPP / turbojpeg stay opt-in
-# accelerators for the JPEG-encode path only.
+# OpenCV is mandatory (image operators); IPP stays opt-in.
 option(XINSP2_HAS_IPP        "Link Intel IPP for JPEG encode acceleration" OFF)
-option(XINSP2_HAS_TURBOJPEG  "Link libjpeg-turbo for direct SIMD JPEG encode" OFF)
 # Default install root: C:\libjpeg-turbo64 (Windows) or /opt/libjpeg-turbo (Linux)
 set(TURBOJPEG_ROOT "C:/libjpeg-turbo64" CACHE PATH "libjpeg-turbo install root")
+# libjpeg-turbo is AUTO-DETECTED (mirrors the OpenCV_DIR autodetect below): if it is
+# installed at TURBOJPEG_ROOT (or a system path) default it ON — the direct SIMD RGB
+# encode (tjCompress) is ~6x the OpenCV libjpeg+cvtColor fallback (measured, doc 34),
+# and it is the encoder the imgcodec plugin's preview egress rides. A build with no
+# libjpeg-turbo defaults OFF and falls back to OpenCV, so this adds NO hard
+# dependency. First configure only (sticky in cache); override with
+# -DXINSP2_HAS_TURBOJPEG=ON/OFF.
+if(DEFINED XINSP2_HAS_TURBOJPEG)
+    set(_xi_tj_default ${XINSP2_HAS_TURBOJPEG})
+elseif(EXISTS "${TURBOJPEG_ROOT}/include/turbojpeg.h"
+       OR EXISTS "/usr/include/turbojpeg.h"
+       OR EXISTS "/usr/local/include/turbojpeg.h")
+    set(_xi_tj_default ON)
+else()
+    set(_xi_tj_default OFF)
+endif()
+option(XINSP2_HAS_TURBOJPEG  "Link libjpeg-turbo for direct SIMD JPEG encode" ${_xi_tj_default})
 
 # yyjson — the JSON DOM + serializer that replaces cJSON (v0.12.0, pinned).
 # Mutable doc for build, immutable doc for fast read; pool allocator for
