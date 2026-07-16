@@ -33,6 +33,14 @@ if(MSVC)
     # handles (1 ImagePool slot per absorbed crash) — and _set_se_translator warns
     # C4535 that it is inoperative.
     add_compile_options(/W3 /utf-8 /EHa)
+else()
+    # Non-MSVC (Linux/macOS g++/clang) must match the backend's plugin ABI flags
+    # (backend/CMakeLists) so a plugin .so composes with the host: -fno-gnu-unique
+    # (the module truly unloads on dlclose + per-load statics — hot-reload), and
+    # -fnon-call-exceptions (a hardware fault inside the plugin unwinds into the
+    # host's seh_exception translator). -fvisibility=default keeps the XI_PLUGIN_IMPL
+    # export thunks published. SHARED targets are -fPIC automatically.
+    add_compile_options(-Wall -fno-gnu-unique -fnon-call-exceptions -fvisibility=default)
 endif()
 
 # All plugin DLLs are namespaced with an "xi-" prefix (xi-<name>.dll). Set once

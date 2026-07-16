@@ -232,6 +232,18 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
     }
     if (dll)  pi.dll_name = *dll;
     else      pi.dll_name = pi.name + ".dll";
+    // fs-aware platform module mapping at the single parse point, so every
+    // downstream fs::exists / load / sha256 / cert-cache compare uses one
+    // consistent name. Prefer the native module (xi-<name>.so/.dylib) ONLY when it
+    // actually exists in the plugin folder: that maps a real prebuilt plugin
+    // (built as .so) while leaving a fixture that ships a .dll-named module — or a
+    // simply-unbuilt plugin — under its manifest name so the load site reports an
+    // honest missing-module error. No-op on Windows (platform_module_path is
+    // identity, so mapped == name and the branch is skipped).
+    if (std::string mapped = platform_module_path(pi.dll_name);
+        mapped != pi.dll_name &&
+        std::filesystem::exists(std::filesystem::path(folder) / mapped))
+        pi.dll_name = mapped;
     if (fact) pi.factory_symbol = *fact;
     else      pi.factory_symbol = "xi_plugin_create";
 

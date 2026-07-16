@@ -118,6 +118,8 @@ inline int certify_in_process(const std::string& plugin_dir) {
     if (!fs::exists(manifest)) return kExitAbiMismatch;
     auto info = parse_manifest(manifest.string(), plugin_dir);
     if (info.name.empty()) return kExitAbiMismatch;
+    // info.dll_name is already the platform module file (parse_manifest maps the
+    // manifest's xi-<name>.dll to xi-<name>.so/.dylib on POSIX).
     auto dll_path = (fs::path(plugin_dir) / info.dll_name).string();
     if (!fs::exists(dll_path)) return kExitAbiMismatch;
 

@@ -6,6 +6,7 @@ build-*/
 *.obj
 *.exe
 *.dll
+*.so
 *.lib
 *.pdb
 *.ilk
