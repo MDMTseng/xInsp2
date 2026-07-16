@@ -37,10 +37,10 @@ REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
 sys.path.insert(0, str(REPO / "examples" / "lib"))
 from xinsp2 import Client       # noqa: E402
-from ports import free_port     # noqa: E402
+from ports import free_port, backend_exe     # noqa: E402
 from xex1 import collect_frames, jpeg_dims  # noqa: E402
 
-BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
+BACKEND = backend_exe()
 INSPECT = ROOT / "inspect.cpp"
 W, H = 128, 96
 RAW = W * H  # 1-channel raw plane bytes
@@ -224,8 +224,6 @@ def phase2(fails: list[str]) -> None:
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: Windows-only"); return 0
     if not BACKEND.exists():
         print(f"SKIP: backend not built ({BACKEND})"); return 0
 
