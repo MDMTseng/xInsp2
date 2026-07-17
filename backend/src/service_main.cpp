@@ -393,6 +393,16 @@ int main(int argc, char** argv) {
     // concern from the dump machinery; owned here, re-set per inspect thread).
     xi::install_seh_translator();
 
+#ifndef _WIN32
+    // POSIX: a WS client that drops mid-write makes the ws_server's ::send()
+    // raise SIGPIPE, whose default action kills the whole backend (exit rc
+    // -13) — Windows has no such signal, so this was invisible until the fuzz
+    // ws_cmd churn hit it on Linux. Ignore it process-wide; the send() sites
+    // then just observe EPIPE and the normal connection-drop path runs. (The
+    // FE supervisor already does the same for its probe sockets.)
+    ::signal(SIGPIPE, SIG_IGN);
+#endif
+
     // --test-crash: deliberately trigger a fatal exception so the
     // top-level minidump filter fires. Used by runCrashDump E2E.
     for (int i = 1; i < argc; ++i) {
