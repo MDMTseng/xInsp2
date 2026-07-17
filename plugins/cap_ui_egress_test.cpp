@@ -43,9 +43,9 @@
 #include <xi/xi_pack_abi.hpp>
 #include <xi/xi_seh.hpp>
 
-#ifdef _WIN32
-  #include <windows.h>
-#endif
+// LoadLibraryA/GetProcAddress/HMODULE/GetLastError for make_instance below:
+// real <windows.h> on Windows, dlopen/dlsym shim on POSIX (same names).
+#include <xi/xi_dynlib.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -94,7 +94,6 @@ static bool jfound_true(const std::string& s) {
 static std::shared_ptr<xi::CAbiInstanceAdapter>
 make_instance(const char* dll_path, const char* iname, const char* pname,
               const xi_host_api* host) {
-#ifdef _WIN32
     HMODULE dll = LoadLibraryA(dll_path);
     if (!dll) {
         std::fprintf(stderr, "FAIL: LoadLibrary(%s) err %lu\n", dll_path, GetLastError());
@@ -111,10 +110,6 @@ make_instance(const char* dll_path, const char* iname, const char* pname,
     inst->adopt_owner_id(scope.release());
     xi::InstanceRegistry::instance().add(inst);
     return inst;
-#else
-    (void)dll_path; (void)iname; (void)pname; (void)host;
-    return nullptr;
-#endif
 }
 
 // A deterministic, content-distinct 16x16 gray image keyed by `seed`.
