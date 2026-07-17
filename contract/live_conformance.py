@@ -66,7 +66,24 @@ CONTRACT = ROOT / "contract"
 SCHEMA_DIR = CONTRACT / "schemas"
 MAP_PATH = CONTRACT / "live-wire-map.json"
 ALLOWLIST_PATH = CONTRACT / "live-allowlist.json"
-BACKEND = ROOT / "backend" / "build" / "Release" / "xinsp-backend.exe"
+def _backend_exe() -> Path:
+    """The built backend, cross-platform + build-layout aware.
+
+    `.exe` only on Windows; probe the gate's multi-config Release/Debug dirs
+    and the Linux single-config build-linux tree. XINSP_BACKEND_EXE overrides
+    (CI / non-default build dirs). Returns the first that exists, else the
+    canonical Release candidate so a missing build raises a clear error."""
+    override = os.environ.get("XINSP_BACKEND_EXE")
+    if override:
+        return Path(override)
+    suf = ".exe" if os.name == "nt" else ""
+    base = ROOT / "backend"
+    cands = [base / b / f"xinsp-backend{suf}"
+             for b in ("build/Release", "build/Debug", "build-linux", "build")]
+    return next((c for c in cands if c.exists()), cands[0])
+
+
+BACKEND = _backend_exe()
 PROJECT = ROOT / "examples" / "qa_recipe_script_instance"
 
 REQUIRE = bool(os.environ.get("XINSP2_REQUIRE_SCHEMA_GATE"))

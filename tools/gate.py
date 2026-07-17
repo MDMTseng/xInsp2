@@ -65,8 +65,16 @@ USAGE
     python tools/gate.py --port 7824     # WS port for the fuzz smoke (dev-box:
                                          #   dodge the VS Code extension on 7823)
 
-Windows-first (MSVC / cl.exe, like the rest of the toolchain). Exits non-zero
-if any selected stage fails, so it is usable directly as a CI gate.
+Windows-first (MSVC / cl.exe, like the rest of the toolchain), but the harness
+itself is now platform-neutral and runs on the Linux/aarch64 port: it invokes
+every Python leg through `sys.executable`, resolves the backend exe and the
+plugin shared libraries by the host's real suffix (no `.exe`/`.dll` hard-coding
+downstream), and builds with the same Ninja Multi-Config generator under g++.
+The one Linux prerequisite is the interpreter: launch the gate with a venv that
+has the e2e deps (`pytest`, `jsonschema`, `websocket-client`, and an editable
+`tools/xinsp2_py`) so the `fixtures`/`live`/`qa`/`fuzz` legs import cleanly —
+the system `/usr/bin/python` lacks them. Exits non-zero if any selected stage
+fails, so it is usable directly as a CI gate.
 """
 from __future__ import annotations
 
