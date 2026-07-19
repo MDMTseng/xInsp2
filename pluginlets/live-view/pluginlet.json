@@ -1,0 +1,30 @@
+{
+  "name": "live-view",
+  "version": "0.1.0",
+  "doc": "docs/new_gen/37-pluginlet-model.md",
+  "summary": "A plugin's self-owned live-preview egress: demand-gated, content-deduped, viewport-cropped JPEG streaming. Parasitic (doc 37) — no owner identity, no cap registration; bills the host plugin.",
+  "halves": {
+    "native": {
+      "entry": "live_view.hpp",
+      "symbol": "xi::pluginlet::LiveView",
+      "include": "<live-view/live_view.hpp>",
+      "delivery": "header — #include'd into the host plugin DLL at compile time"
+    },
+    "ui": {
+      "entry": "live_view.ui.ts",
+      "symbol": "mountLiveView",
+      "delivery": "TS module — bundled into the webui at build time"
+    }
+  },
+  "contract": "contract.ts",
+  "channels": "ui/<instance>",
+  "requires": {
+    "capabilities": ["xi.ui.sink", "xi.jpeg.encode"],
+    "planes": ["xi.cap", "xi.pack"]
+  },
+  "viewportFeedback": {
+    "upstream": "widget -> expose: contract.ts ViewportMessage {type:'viewport',channel,x,y,w,h}",
+    "downstream": "expose -> native: 'viewport' key in the xi.ui.sink probe reply (x,y,w,h CSV)",
+    "status": "native + UI ready; expose relay (store latest viewport per channel, return it in the probe reply) is the remaining seam"
+  }
+}

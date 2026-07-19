@@ -18,16 +18,17 @@ namespace {
 // A rig with knobs for demand + a failing projection, and counters proving what
 // actually ran (the whole point: gated work must NOT run).
 struct Rig {
-    int  viewers      = 1;
-    bool project_ok   = true;
-    int  project_runs = 0;
-    int  sink_runs    = 0;
+    int      viewers      = 1;
+    uint64_t window       = 0;   // Demand::window — folds into the dedup key
+    bool     project_ok   = true;
+    int      project_runs = 0;
+    int      sink_runs    = 0;
     std::string last_sunk;
 
     Derived<std::string> make() {
         return Derived<std::string>(
             "rig",
-            [this] { return Demand{ viewers, 0 }; },
+            [this] { return Demand{ viewers, window }; },
             [this](std::string& out) {
                 ++project_runs;
                 if (!project_ok) return false;
@@ -132,6 +133,25 @@ XI_TEST(failed_projection_reports_and_recovers) {
     auto r2 = cell.refresh(0x6666);       // same hash, but nothing was retained
     XI_EXPECT(r2.status == S::Derived);
     XI_EXPECT_EQ(rig.sink_runs, 1);
+}
+
+// Demand::window folds into the dedup key: same input pixels but a changed
+// viewport re-projects (pan/zoom the same frame => a different crop); an
+// unchanged window still dedups. This is what makes window meaningful at the
+// core, not a passenger the application hashes in by hand.
+XI_TEST(window_change_reprojects_same_input) {
+    Rig rig; rig.window = 0x0001'0002'0003'0004ull;
+    auto cell = rig.make();
+
+    cell.refresh(0x8888);                 // Derived (window A)
+    auto same = cell.refresh(0x8888);     // same input + same window => Deduped
+    XI_EXPECT(same.status == S::Deduped);
+    XI_EXPECT_EQ(rig.project_runs, 1);
+
+    rig.window = 0x0009'0009'0009'0009ull; // viewport moved
+    auto moved = cell.refresh(0x8888);    // SAME input pixels, new window
+    XI_EXPECT(moved.status == S::Derived);
+    XI_EXPECT_EQ(rig.project_runs, 2);
 }
 
 // invalidate() forces a re-project on an otherwise-deduped input (the

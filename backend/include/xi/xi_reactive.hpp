@@ -1,8 +1,11 @@
 #pragma once
 //
 // xi_reactive.hpp — xi::Derived<Out>: a demand-gated, dedup-memoized derivation
-// cell for SDK-side plugin code, plus UiView, one worked application of it (the
-// live-preview egress a plugin owns for itself).
+// cell for SDK-side plugin code. The reusable CORE of the pluginlet model (doc
+// 37). Its first worked application, the `live-view` pluginlet's native half
+// (xi::pluginlet::LiveView), lives in pluginlets/live-view/live_view.hpp — this
+// header stays dependency-free (functional/string only) so it unit-tests
+// headless and any plugin can #include it without pulling the pack/cap planes.
 //
 // WHERE THIS LIVES. Entirely ABOVE the frozen C ABI — an SDK header, zero core
 // change, no new xi_host_api slot. A plugin instantiates a Derived cell in its
@@ -98,13 +101,21 @@ public:
     // (e.g. fnv1a over the source pixels) — the dedup key. Ordering is the whole
     // point: gate FIRST (so an unwatched channel never even reaches project),
     // dedup SECOND (so an unchanged input never re-projects), project LAST.
+    //
+    // Demand::window folds INTO the dedup key: a projection scoped to a viewport
+    // must re-run when the viewport changes even if the input pixels are
+    // identical (pan/zoom the same frame → a different crop). window==0 (no/full
+    // viewport) leaves the key = input_hash, so a subscription-only cell is
+    // unaffected. This is what makes Demand::window meaningful at the core rather
+    // than a passenger the application has to hash in by hand.
     Result refresh(uint64_t input_hash) {
         stats_.ticks++;
 
         const Demand d = demand_ ? demand_() : Demand{};
         if (d.viewers <= 0) { stats_.suspended++; return {Status::Suspended, nullptr}; }
 
-        if (have_ && input_hash == last_hash_) {
+        const uint64_t key = input_hash ^ (d.window * 0x9E3779B97F4A7C15ull);
+        if (have_ && key == last_hash_) {
             stats_.deduped++;
             return {Status::Deduped, &value_};
         }
@@ -113,7 +124,7 @@ public:
         if (!project_ || !project_(next)) { stats_.failed++; return {Status::Failed, nullptr}; }
 
         value_     = std::move(next);
-        last_hash_ = input_hash;
+        last_hash_ = key;
         have_      = true;
         if (sink_) sink_(value_);
         stats_.derived++;
@@ -141,113 +152,3 @@ private:
 };
 
 } // namespace xi
-
-// ---------------------------------------------------------------------------
-// UiView — one worked application: a plugin's self-owned live-preview egress.
-//
-// It is exactly the Derived pattern wired to the real planes:
-//     demand   = probe xi.ui.sink for `subscribed`   (expose's gate)
-//     project  = encode the retained Image via xi.jpeg.encode (imgcodec)
-//     sink     = hand the encoded frame to xi.ui.sink (expose transport)
-// so a plugin that wants to own its preview policy writes:
-//
-//     UiView view(host, "ui/" + name);        // in the ctor
-//     ...
-//     view.publish(painted_image);            // per processed frame
-//
-// and gets the full "no viewer => no encode, same frame => no re-encode" gate
-// for free, without going through the shared ui_egress timer. This OVERLAPS
-// ui_egress on purpose — it is the SDK-level demonstration of the pattern
-// ui_egress hard-codes, for plugins that want the policy in their own hands
-// (a different quality per channel, a crop, a downsample) rather than the
-// one-size middleware. It is deliberately behind XI_REACTIVE_UIVIEW so the
-// pure Derived core above stays dependency-free for headless unit tests.
-// ---------------------------------------------------------------------------
-#ifdef XI_REACTIVE_UIVIEW
-#include <vector>
-#include <xi/xi_abi.h>
-#include <xi/xi_image.hpp>
-#include <xi/xi_jpeg_cap.hpp>     // xi::encode_via_capability
-#include <xi/xi_pack_contract.hpp> // xi::pack_contract::kChannel
-
-namespace xi {
-
-class UiView {
-public:
-    using Frame = std::vector<uint8_t>;
-
-    UiView(const xi_host_api* host, std::string channel, int quality = 80)
-        : channel_(std::move(channel)), quality_(quality),
-          cell_(channel_,
-                [this] { return probe_demand_(); },
-                [this](Frame& out) { return project_(out); },
-                [this](const Frame& f) { sink_(f); }) {
-        if (host && host->get_interface) {
-            cap_ = static_cast<const xi_cap_v1*>(host->get_interface("xi.cap", 1));
-            pk_  = static_cast<const xi_pack_v1*>(host->get_interface("xi.pack", 1));
-        }
-    }
-
-    // Per processed frame. Retains the image for the (possibly deferred/deduped)
-    // projection, hashes its pixels as the dedup key, and runs one tick. Returns
-    // true iff a frame was served (freshly encoded OR handed the last encode).
-    bool publish(const Image& img) {
-        if (!cap_ || !pk_ || img.empty() || !img.data()) return false;
-        pending_ = img;   // a view is cheap; a plugin that outlives the pixels
-                          // should hand an owning Image (retain the pack, not a
-                          // dangling handle) — the design's "retain pack not
-                          // handle" caveat.
-        const uint64_t h = fnv1a(img.data(), (size_t)img.width * img.height * img.channels);
-        return cell_.refresh(h).served();
-    }
-
-    const Derived<Frame>::Stats& stats() const { return cell_.stats(); }
-
-private:
-    // demand: expose answers `subscribed` for this channel (0 when nobody's on
-    // the socket). Absent plane / absent expose => 0 viewers => gate shut.
-    Demand probe_demand_() {
-        if (!cap_ || !pk_ || !cap_->available || !cap_->available("xi.ui.sink"))
-            return Demand{};
-        xi_pack_builder b = pk_->builder_new();
-        pk_->builder_add_str(b, pack_contract::kChannel, channel_.c_str(), (int32_t)channel_.size());
-        xi_pack_handle req = pk_->builder_seal(b);
-        xi_pack_handle rsp = XI_PACK_NULL;
-        const int32_t rc = cap_->call("xi.ui.sink", req, &rsp);
-        pk_->release(req);
-        if (rc < 0 || rsp == XI_PACK_NULL) { if (rsp != XI_PACK_NULL) pk_->release(rsp); return Demand{}; }
-        int64_t sub = 0;
-        pk_->get_i64(rsp, "subscribed", &sub);
-        pk_->release(rsp);
-        return Demand{ sub != 0 ? 1 : 0, 0 };
-    }
-
-    // project: the expensive step, reached only past the gate + dedup. Encode
-    // the retained image through xi.jpeg.encode (imgcodec / turbojpeg).
-    bool project_(Frame& out) {
-        return encode_via_capability(pending_, quality_, out);
-    }
-
-    // sink: hand the encoded bytes to expose's byte-blind transport.
-    void sink_(const Frame& f) {
-        if (!cap_ || !pk_ || f.empty()) return;
-        xi_pack_builder b = pk_->builder_new();
-        pk_->builder_add_str(b, pack_contract::kChannel, channel_.c_str(), (int32_t)channel_.size());
-        pk_->builder_add_bin(b, "frame", f.data(), (int32_t)f.size());
-        xi_pack_handle req = pk_->builder_seal(b);
-        xi_pack_handle rsp = XI_PACK_NULL;
-        cap_->call("xi.ui.sink", req, &rsp);
-        pk_->release(req);
-        if (rsp != XI_PACK_NULL) pk_->release(rsp);
-    }
-
-    std::string       channel_;
-    int               quality_;
-    const xi_cap_v1*  cap_ = nullptr;
-    const xi_pack_v1* pk_  = nullptr;
-    Image             pending_;
-    Derived<Frame>    cell_;
-};
-
-} // namespace xi
-#endif // XI_REACTIVE_UIVIEW
