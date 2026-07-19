@@ -122,15 +122,18 @@ mechanism, just a new consumer of one.
 
 `xi::Derived`'s `Demand::window` was aspirational (doc `xi_reactive.hpp`): no ABI
 viewport channel exists, so `UiView` gates on subscription only. The pluginlet
-closes this WITHOUT touching the frozen ABI. The UI widget already knows the
-viewport (it is the thing displaying); it sends `{viewport:{x,y,w,h,zoom}}` back on
-the SAME channel; the native `LiveView.demand()` reads it, `Demand{viewers, window}`
-becomes real, and the cell can crop+downsample to exactly that window before
-encoding (crop is free — offset+stride on the pool blob). The viewport protocol is
-**pluginlet-internal**, not a new global ABI channel — which is exactly why it
-ships without an ABI change. This is where the pluginlet concept earns its keep: it
-converts an aspirational seam into a shippable feature by scoping the protocol to
-the pluginlet.
+closes this WITHOUT touching the frozen ABI, and it is now **landed end to end**.
+The UI widget already knows the viewport (it is the thing displaying); it sends the
+viewport back on the SAME channel (as expose's `viewport` exchange command); expose
+stores it per channel (only while subscribed) and hands it back as the `viewport`
+key in the xi.ui.sink probe reply; the native `LiveView::demand_()` reads it,
+`Demand{viewers, window}` becomes real (window folds into the cell's dedup key so a
+pan/zoom re-projects), and `project_()` crops+downsamples to exactly that window
+before encoding. The viewport protocol is **pluginlet-internal**, not a new global
+ABI channel — which is exactly why it ships without an ABI change. This is where
+the pluginlet concept earns its keep: it converts an aspirational seam into a
+shipped feature by scoping the protocol to the pluginlet. (Verified: cap_ui_egress_
+test "VIEWPORT RELAY" section, through the real expose/imgcodec/ui_egress DLLs.)
 
 ## Naming
 
@@ -145,7 +148,16 @@ product noun — `pluginlet` is the noun for the same idea.
 - **native core** — `xi_reactive.hpp` (`xi::Derived<Out>` + `UiView`), 9/9 unit
   tests (`test_reactive`, gate/dedup/stats + ordering law), UiView compiles against
   the real cap/pack ABI. Landed.
-- **restructure into a pluginlet** — move `UiView` → `xi::pluginlet::LiveView`,
-  carve the `pluginlets/live-view/` two-halves + contract, add the minimal UI
-  widget (subscribe + render + emit-viewport), wire `Demand::window` to a crop.
-  In progress on this branch.
+- **restructure into a pluginlet** — `UiView` → `xi::pluginlet::LiveView`;
+  `pluginlets/live-view/` two-halves + contract + manifest; UI widget
+  (subscribe + render + pan/zoom emit-viewport); `Demand::window` folded into the
+  dedup key and wired to a crop+downsample. Landed.
+- **viewport relay through expose** — expose stores the browser's per-channel
+  viewport (only while subscribed) and returns it in the xi.ui.sink probe reply;
+  `LiveView::demand_()` reads it. Landed; verified by cap_ui_egress_test's
+  "VIEWPORT RELAY" section.
+
+Remaining (not scheduled): the webui-side transport that maps the widget's
+ViewportMessage onto expose's `viewport` exchange command and mounts the widget
+from a plugin's `"pluginlets"` declaration — the frontend integration, owned by the
+webui build (doc 37 "two build worlds").

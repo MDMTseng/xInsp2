@@ -31,8 +31,10 @@ export function encodeViewport(v: Viewport): string {
 }
 
 /** The message the UI widget sends UPSTREAM (widget -> expose -> native demand).
- *  expose stores the latest per channel and returns it as LiveViewKeys.viewport
- *  in the next subscription probe reply. */
+ *  The webui transport delivers it as expose's `viewport` exchange command
+ *  ({command:"viewport",channel,x,y,w,h}); expose stores the latest per channel
+ *  (only while subscribed) and returns it as LiveViewKeys.viewport in the next
+ *  subscription probe reply. */
 export interface ViewportMessage {
   type: "viewport";
   channel: string;

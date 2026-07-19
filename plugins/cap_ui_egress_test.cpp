@@ -201,6 +201,44 @@ int main() {
         CHECK(jfound_true(g));                    // the frame reached expose
     }
 
+    SECTION("VIEWPORT RELAY (doc 37): the browser viewport rides the ui.sink probe reply");
+    {
+        // Probe xi.ui.sink for a channel; read back {subscribed, viewport?} — the
+        // exact path the live-view pluginlet's LiveView::demand_() drives.
+        auto probe = [&](const char* chan, int64_t& sub, std::string& vp) {
+            xi_pack_builder b = pk->builder_new();
+            pk->builder_add_str(b, "$channel", chan, (int32_t)std::strlen(chan));
+            xi_pack_handle req = pk->builder_seal(b), rsp = XI_PACK_NULL;
+            cap->call("xi.ui.sink", req, &rsp);
+            pk->release(req);
+            sub = 0; vp.clear();
+            if (rsp != XI_PACK_NULL) {
+                pk->get_i64(rsp, "subscribed", &sub);
+                const char* p = nullptr; int32_t n = 0;
+                if (pk->get_str(rsp, "viewport", &p, &n) && p && n > 0) vp.assign(p, (size_t)n);
+                pk->release(rsp);
+            }
+        };
+        int64_t sub = 0; std::string vp;
+        probe("ui/x", sub, vp);
+        CHECK(sub == 1);
+        CHECK(vp.empty());                          // subscribed, but no viewport reported yet
+
+        // The UI widget reports the browser's on-screen viewport for the channel.
+        expose->exchange("{\"command\":\"viewport\",\"channel\":\"ui/x\",\"x\":10,\"y\":20,\"w\":100,\"h\":50}");
+        probe("ui/x", sub, vp);
+        CHECK(sub == 1);
+        CHECK(vp == "10,20,100,50");                 // relayed back verbatim on the next probe
+
+        // An UNSUBSCRIBED channel REFUSES a viewport (nobody's watching -> meaningless),
+        // so nothing is stored and its probe carries no viewport.
+        std::string r = expose->exchange("{\"command\":\"viewport\",\"channel\":\"ui/nosub\",\"x\":1,\"y\":2,\"w\":3,\"h\":4}");
+        CHECK(r.find("not subscribed") != std::string::npos);
+        probe("ui/nosub", sub, vp);
+        CHECK(sub == 0);
+        CHECK(vp.empty());
+    }
+
     SECTION("NO SUBSCRIBER -> ZERO ENCODE: an unsubscribed channel drops at the probe");
     {
         const int enc0 = jint(stats(egress.get()), "encodes");

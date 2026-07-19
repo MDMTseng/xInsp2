@@ -146,10 +146,11 @@ public:
         const void* fp = nullptr; int32_t fn = 0;
         const bool has_frame = pk->get_bin(in, "frame", &fp, &fn) && fp && fn > 0;
 
-        long long seen = 0; bool subscribed;
+        long long seen = 0; bool subscribed; std::string viewport;
         {
             std::lock_guard<std::mutex> lk(mu_);
             subscribed = subscribed_.count(channel) != 0;
+            if (subscribed) { auto v = viewport_.find(channel); if (v != viewport_.end()) viewport = v->second; }
             if (has_frame) {
                 Channel& ch = store_channel_(channel);
                 ch.frame_bytes = std::make_shared<const std::vector<uint8_t>>(
@@ -162,6 +163,11 @@ public:
         xi_pack_builder b = pk->builder_new();
         pk->builder_add_i64(b, "subscribed", subscribed ? 1 : 0);
         pk->builder_add_i64(b, "seen", (int64_t)seen);
+        // Viewport relay (doc 37): hand back the browser's latest viewport for the
+        // channel so the producer's live-view pluginlet crops to it. Absent => the
+        // producer ships the full frame (clean degrade).
+        if (!viewport.empty())
+            pk->builder_add_str(b, "viewport", viewport.c_str(), (int32_t)viewport.size());
         return pk->builder_seal(b);
     }
     static xi_pack_handle h_ui_sink(void* self, xi_pack_handle in) {
@@ -179,11 +185,33 @@ public:
             p["channels"].for_each([&](const char*, const xi::Json& v) {
                 const std::string name = v.as_string();
                 if (name.empty()) return;
-                if (sub) subscribed_.insert(name); else subscribed_.erase(name);
+                if (sub) { subscribed_.insert(name); }
+                else     { subscribed_.erase(name); viewport_.erase(name); }  // drop stale viewport
             });
             auto arr = xi::Json::array();
             for (auto& s : subscribed_) arr.push(s);
             return xi::Json::object().set("ok", true).set("subscribed", arr).dump();
+        }
+        // Viewport relay (doc 37, live-view pluginlet): a UI widget reports the
+        // browser's current on-screen viewport for a channel (full-image px). We
+        // store the latest as an "x,y,w,h" CSV and hand it back in the xi.ui.sink
+        // probe reply, so the producer's pluginlet can crop+downsample to exactly
+        // what's visible. Byte-blind relay — we never interpret the numbers. Only
+        // stored for a SUBSCRIBED channel (an unwatched viewport is meaningless),
+        // which bounds viewport_ to subscribed_ and needs no separate cap.
+        if (c == "viewport") {
+            const std::string channel = p["channel"].as_string("default");
+            if (subscribed_.count(channel)) {
+                char csv[64];
+                std::snprintf(csv, sizeof(csv), "%d,%d,%d,%d",
+                              (int)p["x"].as_int(0), (int)p["y"].as_int(0),
+                              (int)p["w"].as_int(0), (int)p["h"].as_int(0));
+                viewport_[channel] = csv;
+                return xi::Json::object().set("ok", true).set("channel", channel)
+                    .set("viewport", csv).dump();
+            }
+            return xi::Json::object().set("ok", false).set("channel", channel)
+                .set("reason", "not subscribed").dump();
         }
         if (c == "list_channels") {
             auto chans = xi::Json::object();
@@ -481,6 +509,10 @@ private:
     uint64_t                        touch_ctr_ = 0;      // monotonic write order for bounded eviction
     static constexpr size_t         kMaxChannels = 256;  // cap on retained channels (F-B)
     std::set<std::string>           subscribed_;
+    // Viewport relay (doc 37): channel -> "x,y,w,h" CSV, the browser's latest
+    // on-screen viewport, handed back in the xi.ui.sink probe reply. Bounded by
+    // subscribed_ (only stored while subscribed; erased on unsubscribe).
+    std::map<std::string, std::string> viewport_;
     bool                            wire_v3_ = true;    // v12 default: XEX1-v3 (v1 opt-out for one release)
 
     // --- xi.ui.sink@1 provider (spec 31): the egress -> transport ingestion ---

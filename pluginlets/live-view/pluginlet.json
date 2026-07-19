@@ -23,8 +23,8 @@
     "planes": ["xi.cap", "xi.pack"]
   },
   "viewportFeedback": {
-    "upstream": "widget -> expose: contract.ts ViewportMessage {type:'viewport',channel,x,y,w,h}",
-    "downstream": "expose -> native: 'viewport' key in the xi.ui.sink probe reply (x,y,w,h CSV)",
-    "status": "native + UI ready; expose relay (store latest viewport per channel, return it in the probe reply) is the remaining seam"
+    "upstream": "widget -> expose: ViewportMessage, carried as expose's `viewport` exchange command {command:'viewport',channel,x,y,w,h}",
+    "downstream": "expose -> native: 'viewport' key (x,y,w,h CSV) in the xi.ui.sink probe reply",
+    "status": "LANDED end-to-end. expose relays per-channel viewport (stored only while subscribed, returned in the probe reply); LiveView::demand_() reads it and crops. Verified by cap_ui_egress_test 'VIEWPORT RELAY' section."
   }
 }
