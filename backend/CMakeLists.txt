@@ -250,6 +250,15 @@ add_executable(test_mp tests/test_mp.cpp)
 target_include_directories(test_mp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME mp COMMAND test_mp)
 
+# xi::Derived<Out> reactive cell (xi/xi_reactive.hpp) — the demand-gate / dedup /
+# stats contract. The Derived CORE is dependency-free (functional/string only),
+# so like test_mp this links nothing but the include dir. (UiView, the cap/pack
+# application, is behind XI_REACTIVE_UIVIEW and not exercised here — it needs a
+# live host; the gate/dedup logic it rides is what this test pins.)
+add_executable(test_reactive tests/test_reactive.cpp)
+target_include_directories(test_reactive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME reactive COMMAND test_reactive)
+
 # Canonical msgpack GOLDEN fixtures (protocol/fixtures/canonical) — the
 # cross-implementation lockstep with the sibling TS/Python codecs. Drives the
 # same Writer/canonicalizer and byte-compares against the committed *.bin;
