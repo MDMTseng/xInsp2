@@ -8,7 +8,10 @@ relay are landed and tested. The overlay/report model (and everything in the
 section before assuming any of it exists.
 
 Revision 2 (2026-07-20) folded in a review pass that overturned three positions
-from revision 1; see the **Corrections log**.
+from revision 1. Revision 3 (2026-07-21) adds the overlay plet, the controls plet
+(the default plugin UI), record keying, plet settings persistence, the additive
+invariant, and a prior-art survey — and overturned two more positions. See the
+**Corrections log**. Everything added in rev 3 is DESIGN ONLY (no code) per CT.
 
 ## The observation (CT)
 
@@ -292,10 +295,54 @@ pack {
 - **`overlay` entries name their subject** via `target` (a pack image-entry name),
   resolving multi-image packs (multi-camera, source + crop) while the reference
   points overlay → image, never image → overlay.
-- **the overlay vocabulary is defined ONCE in core** (point / line / polyline /
-  circle / arc / rect / text + verdict-driven styling), not invented per plugin.
-  This is the single uniform point the whole scheme rests on.
+- **the overlay vocabulary lives in a PLET's contract, NOT in core** (point / line /
+  polyline / circle / arc / rect / text + verdict styling). Revision 2 said "defined
+  once in core" — corrected: the vocabulary *evolves* (new primitive types keep
+  arriving), and pinning an evolving thing into the frozen ABI means an ABI change
+  per primitive. As a plet contract, a new primitive is a plet version bump and the
+  ABI never moves — consistent with the whole "zero core change" thesis. The overlay
+  system is itself a plet (the most widely-used one), which is the model eating its
+  own dog food. See **The overlay plet** and corrections #4.
 - **transport stays byte-blind** — expose forwards, never interprets.
+
+### Record keying: `report` flat, everything else `plet/<fqname>/<var>`
+
+The split above generalizes to the whole pack/record, and the key IS the namespace
+(CT). One flat, contracted key holds serious data; every plet-owned var is prefixed
+by its fully-qualified plet name, which triples as identity, in-pack address, and
+the UI component's binding address (one string, three roles):
+
+```
+record entry {
+  "report":                       { …contracted inspection truth, ANY shape… }
+  "frame":                        <xi/image blob>            ← data plane, shared
+  "plet/acme.vision.overlay/$v":   1
+  "plet/acme.vision.overlay/draw": [ { target:"frame", prims:[…] } ]
+  "plet/acme.vision.overlay/mask": <small inline msgpack bin>   ← embedded copy
+  "plet/acme.vision.overlay/preview_ref": "plet/acme.vision.overlay/preview"
+  "plet/acme.vision.overlay/preview": <pool-blob entry>        ← zero-copy, ref'd
+}
+```
+
+- **the line for `report`:** strip every `plet/*` key — can this record still drive
+  judgment + SPC? If yes, it was split correctly. `report` = contracted, downstream-
+  consumed truth; `plet/*` = auxiliary/presentation/diagnostic, removable with no
+  effect on any verdict.
+- **structured data nests under the filter key** (a UI component filters one key and
+  gets its whole bag); **binary chooses by copy cost** — small/per-frame bin embeds
+  in the msgpack (`bin` type, one copy per hop); image-sized or shared data is minted
+  as a **pool blob** (a pack-level entry, refcounted, zero-copy) and *referenced* from
+  inside the object (`*_ref`). A nested map cannot hold a pool blob, so ref-to-sibling
+  dissolves the flat-vs-nested dilemma. Never re-add a per-frame image-sized memcpy
+  the system worked to remove (ws zero-copy, expose shared `frame_bytes`).
+- **`$v` per plet** (records outlive plet versions; the plet owns its own schema
+  version, like mock_camera's schema check). Prefer a `$v` sibling key over baking a
+  version into the name string.
+- **naming style is OPEN** — dotted FQ (`plet/acme.vision.overlay`, aligning with the
+  capability plane's `xi.jpeg.encode`) vs the channel style (`ui/<instance>`, slashed).
+  A plet is more capability-like than channel-like, which argues dotted, but this is
+  unsettled. Whatever is chosen bakes into records, so a company/toolbox namespace
+  layer is cheap insurance now vs. invalidating every stored record later.
 
 **Why this makes demand-gating structural.** `report` is produced unconditionally
 (it is truth). `overlay` is produced ONLY when someone is watching — the whole
@@ -309,6 +356,185 @@ replaying a record with overlays means re-running the plugin's projection, not
 re-deriving it UI-side. That is fine when replay re-runs inspection anyway; if
 offline overlay-without-re-run is ever required, storing overlay in the record
 becomes a deliberate, eyes-open trade — not the default.
+
+## The overlay plet
+
+Overlay is not a core feature — it is a plet (per the correction above). Its two
+halves:
+
+- **native**: a typed builder that fills declarative draw primitives into the pack,
+  with the demand gate HIDDEN inside it — the author writes draw calls
+  unconditionally and each is an early-return when nobody is watching (no buffer
+  even allocated). The fiddly "is anyone looking" logic is exactly what the plet
+  hides, the same gate as `xi::Derived`.
+  ```cpp
+  xi::pluginlet::Overlay ov{out, "frame"};   // bound to a pack image
+  ov.line(p0, p1, Verdict::OK).circle(c, r).text(pos, "12.34mm");
+  ```
+- **UI**: the generic renderer draws the standard vocabulary; a plugin with a
+  special primitive registers a custom **draw hook** instead of forking the renderer
+  — which inserts a useful tier 1.5 (standard vocabulary + one custom hook) between
+  "no UI code" and "full custom widget", smoothing the escalation path.
+
+Live-view and the overlay plet do NOT talk to each other (the peer-to-peer ban): the
+HOST builds the UI pack, hands it to live-view to fill the image and to the overlay
+plet to fill the overlay, then pushes it. Host-mediated, no plet-to-plet edge.
+
+## The controls plet — the DEFAULT plugin UI (tier-1's main use case)
+
+The highest-leverage plet is not `live-view` (streaming is the fancy ~20% case) —
+it is the **control panel** almost every plugin wants: expose the def parameters as
+typed widgets (buttons, sliders, numeric entry with a touch NUMPAD, toggles,
+dropdowns) plus read-only I/O readouts. Reframed: **the controls plet is the default
+UI every plugin gets; live-view / overlay are opt-in upgrades most plugins never
+need.** It is also SIMPLER than live-view (no encode, no viewport, no zero-copy
+traps).
+
+### It rides existing paths — zero new transport, zero ABI
+
+The UI needs three operations, each already routed to instances:
+
+| op | for | existing path |
+|---|---|---|
+| **describe** | fetch the schema to build widgets | `get_def()`'s `$schema` (or `exchange("describe")`) |
+| **read** | current values → widgets + readouts | `get_def()` |
+| **write / invoke** | change a param (persists) / press a button (transient) | `set_def()` / `exchange()` |
+
+### Native half: `xi::pluginlet::Controls` — replaces def boilerplate
+
+Its whole value is REPLACING the hand-written `get_def`/`set_def` marshalling every
+plugin repeats today (mock_camera's is the exact boilerplate). Declare params once;
+get get_def / set_def / UI schema / thread-safe access for free:
+
+```cpp
+ctl_.tab("Capture")
+      .section("Basic").slider("fps",30,1,60).numpad("gain",1.0,0.1,4.0)
+      .section("Advanced").collapsed().enumsel("mode","fast",{"fast","accurate"})
+    .tab("Output").readout("last_result","Last measured");
+// host delegates:
+std::string get_def() const override { return ctl_.get_def(); }
+bool set_def(const std::string& j) override { return ctl_.set_def(j); }
+void process(...) override { auto s = ctl_.snapshot(); int fps = s.i("fps"); … }
+```
+
+Three things it centralizes for ALL plugins: (1) **validation declared once** — the
+descriptor's min/max/enum; `set_def` MUST clamp/reject against it (never trust the
+client), the UI mirrors it. (2) **thread safety** — the set_def-vs-process race
+(set_def arrives on any thread; process runs on a dispatch thread) is handled by a
+`shared_mutex` + a per-frame `snapshot()`, once, for everyone. (3) **`$v`** so old
+persisted defs still parse.
+
+### The UI declaration is a TREE, from a static file OR native
+
+Layout (tabs / collapsible sections) is far easier as a tree than a flat list, so
+the schema is a tree of **container** nodes (tabs / section / row / grid) and **leaf**
+control nodes. Two sources, one vocabulary, one renderer:
+
+- **static file (the default)** — the whole tree in `plugin.json`; 80% of plugins,
+  **zero native code**. This is the "default supports static declarative" baseline.
+- **native `get_def` (opt-in)** — native emits the tree, so runtime-dynamic tabs /
+  conditional sections / state-driven collapse are just "build the tree." (Blender's
+  proven `bpy.props` + `UILayout` model, across a JSON boundary.)
+
+**Separate structure from values or native-emitted trees churn the UI.** The schema
+carries `$rev`; the renderer caches the tree and, when `$rev` is unchanged, only
+patches new values into existing widgets (keeping focus / a half-dragged slider /
+scroll). Native bumps `$rev` only when the STRUCTURE changes. Same dedup discipline
+as `Demand::window` / the overlay `report`-vs-data split.
+
+### Three states, three owners (the answer to "where does layout state live")
+
+| state | example | owner | persisted |
+|---|---|---|---|
+| **values (config)** | fps, gain, mode | `set_def` → instance def | ✅ instance.json |
+| **structure (declaration)** | which tabs/sections/controls exist | manifest OR native `get_def` | ❌ it is a declaration |
+| **view state** | which tab is open, which section collapsed, scroll | **browser-local, per-operator** | ❌ NOT in def |
+
+The load-bearing rule: **collapse / active-tab is view state, not config.** Native
+declares the DEFAULT (`collapsed:true` = start collapsed); the operator expanding it
+is their view, and must not round-trip to native or dirty the machine config (which
+would re-persist and could touch inspection state). Conditional visibility: a static
+`visibleWhen` predicate for simple cases, native omission of the node for arbitrary
+logic.
+
+The widget vocabulary is the controls plet's **contract, not core ABI** (same reason
+as overlay: widget types evolve). Touch NUMPAD is a first-class, host-owned
+input-method surface (Qt Virtual Keyboard's model) — a widget declares "numeric",
+the host presents the numpad; the keypad is not baked into each widget.
+
+## Plet settings persistence: a namespace inside the host's def
+
+A plet needs no config-file identity of its own — it borrows the host's def exactly
+as it borrows the host's identity and lifecycle. The plet exposes plain (non-ABI)
+`get_def()`/`set_def()`; the host DELEGATES a namespaced slice:
+
+```cpp
+std::string get_def() const override {
+    return xi::Json::object().set("width", w_.load())
+        .set("plet/acme.vision.overlay", ov_.get_def()).dump();   // delegate
+}
+bool set_def(const std::string& j) override {
+    auto p = xi::Json::parse(j);
+    /* host's own keys… */
+    auto s = p["plet/acme.vision.overlay"]; if (s.valid()) ov_.set_def(s);
+    return true;
+}
+```
+
+One name (`plet/<fqname>`) addresses the SAME plet on both the data plane (record)
+and the config plane (def) — a UI component knowing its name knows where to read
+data AND read/write settings. Notes: config nests plainly (no pool-blob problem, so
+no ref-to-sibling needed — that asymmetry with the pack is deliberate); the plet
+stamps its own `$v`; set_def/process threading and absent-section tolerance are the
+same rules as above (an old instance.json lacking the plet's slice must default
+cleanly, not fail). **No new persistence mechanism** — the host def already persists;
+the plet just occupies a named slice of it.
+
+## The additive invariant — what touches what (CT)
+
+The whole model is designed so that everything here is **pure-additive and rides
+above the frozen ABI** — zero `xi_core` / C-ABI change. Precisely:
+
+- **native halves** (`xi::Derived`, `LiveView`, `Overlay`, `Controls`) — SDK headers
+  a plugin `#include`s. Additive, no core, no other-plugin change.
+- **UI halves** — webui modules bundled at build time. Additive, no core.
+- **data-shape conventions** (`report` / `plet/<fqname>/<var>` keys, overlay `target`,
+  ref-to-sibling blobs) — the plugin writes these through the EXISTING pack builder;
+  the record already stores arbitrary keyed entries + blobs (spec 30). No format
+  change, no core change — a convention each plet honors.
+- **config** — a named slice of the host's existing def. No new mechanism.
+
+**The one shared piece that is NOT per-plet, and is not `xi_core` either:** the
+upstream-control relay in **expose** (a plugin). Today it is hard-coded to `viewport`
+(the landed relay). To keep every FUTURE plet purely additive, generalize it ONCE
+into a generic per-channel control store (byte-blind, additive to expose); after that
+one enabling change every plet rides it with no further expose or core change. So the
+honest statement is: **zero frozen-ABI / zero xi_core change; one generic additive
+enabler in expose; everything else per-plet additive.**
+
+## Prior art (control-panel frameworks surveyed) — what to adopt
+
+A 2026-07 survey of mature declarative/schema-driven control-panel libraries, to
+ground the controls-plet API rather than invent it. Full findings off-doc; the
+load-bearing conclusions:
+
+| library | model | what we take |
+|---|---|---|
+| **Foxglove Studio** settings | panel emits a typed settings tree; host renders generically; changes via `actionHandler` | the closest production analogue to our exact model (same domain family) — validates the architecture |
+| **Blender** `bpy.props`+`UILayout` | typed prop declaration (min/max/**subtype**/soft-range) ⟂ separate draw-tree | structure⟂values split; **subtype** hint decides units + which touch editor; **soft vs hard range** for slider+numpad |
+| **JSON Forms** | JSON Schema + UI Schema (Categorization = tabs) + **tester-ranked renderer registry** | tester-ranked widget registry (third parties add widgets without editing a central map) > flat name map |
+| **Tweakpane v4** | `addBinding`/`addBlade({view,…})`, folders/tabs, `readonly`+`interval` monitors, `createPlugin` | blade/plugin layer as the widget IMPLEMENTATION tier; monitor = readonly binding + poll interval |
+| **Leva** | schema-object `useControls`, `createPlugin({normalize,sanitize,format})` | per-widget **normalize/sanitize/format** — `sanitize` IS our native clamp mirror; `format` gives readout strings |
+| **RJSF** | JSON Schema + uiSchema + widgets registry | schema ⟂ uiSchema ⟂ code-registry triad (referenced by string) |
+| **lil-gui / dat.GUI** | infer widget from value type | inference as a convenience layer only — its object-mutation binding assumes shared memory, which our get_def/set_def boundary breaks, so bindings must be **controlled**, not mutate-in-place |
+| **Dear ImGui** | immediate mode | cautionary: great native ergonomics but the UI is per-frame code — cannot serialize / ship a manifest / persist. We are declarative/retained on purpose |
+| **ControlP5** | imperative `addSlider/Numberbox/Toggle`, Accordion/Tab | C++ builder naming reference (LGPL — design only) |
+
+Landing route if built: **web half** = JSON-Forms-style schema/uiSchema/tester-registry
+skeleton + Tweakpane blades as the widget layer + a custom touch numpad; **native half**
+= Blender-style declare(+subtype/soft-range)/layout-tree, builder naming after
+ControlP5. Licenses of the borrow-from set are MIT/Apache (Tweakpane, Leva, JSON
+Forms, RJSF); ControlP5 LGPL and Blender GPL are design references only.
 
 ## Corrections log (what this doc got wrong first)
 
@@ -326,6 +552,15 @@ Recorded because the discarded positions are attractive and will be re-proposed:
 3. **"attach overlay to the image (keyed by image entry)"** — images are shareable
    refcounted pool blobs; an annotation on a shared subject leaks to every consumer.
    *Overturned by:* image shareability. Corrected to the `report`/`overlay` pack split.
+4. **"the overlay vocabulary is defined once in CORE"** (rev 2) — the vocabulary
+   evolves (new primitive types keep arriving); pinning it in the frozen ABI means an
+   ABI change per primitive. *Overturned by:* the same "zero core change" thesis this
+   doc rests on. Corrected: overlay is itself a **plet**; the vocabulary is its
+   contract, a new primitive is a plet version bump.
+5. **"live-view is the first/reference pluginlet"** (rev 1 framing) — streaming is the
+   fancy ~20% case. *Reframed:* the **controls plet** (schema-driven config panel) is
+   the default UI ~80%+ of plugins actually need and is simpler; if anything is built
+   next, it is the higher-leverage one.
 
 ## Naming
 
@@ -359,16 +594,24 @@ webui build (see "two build worlds").
 The following are settled design in this doc with **no code written**; do not read
 the sections above as describing shipped behaviour:
 
-- **the `report` / `overlay` pack split** and the `target`-referenced overlay —
-  agreed shape, not implemented. Nothing in the pack contract changed.
-- **the core overlay vocabulary** (point/line/polyline/circle/arc/rect/text +
-  verdict styling) — not defined anywhere in code yet. This is the prerequisite for
-  tier-1 (no-UI-half) plugins and the highest-leverage next step, since it is the
-  shared denominator every plugin would draw through.
-- **the generic overlay renderer** in the webui — not written.
+- **the `report` / `plet/<fqname>/<var>` record keying** (filter keys, ref-to-sibling
+  blobs, per-plet `$v`) — agreed shape, not implemented; nothing in the pack contract
+  changed. Naming style (dotted vs slashed) is an OPEN question.
+- **the overlay plet** — vocabulary (point/line/…/text + verdict styling), the native
+  `Overlay` builder, and the generic webui renderer + custom draw hook: none written.
+- **the controls plet** — `xi::pluginlet::Controls` (native declare/validate/snapshot),
+  the `$schema` UI-tree + `$rev` structure/values split, the generic schema renderer,
+  and the touch numpad: none written. Highest-leverage next build (corrections #5).
+- **plet settings persistence** — the delegated `plet/<fqname>` def slice: convention
+  only, no helper written.
+- **generalizing expose's upstream relay** from the hard-coded `viewport` to a generic
+  per-channel control store — the one additive enabler that keeps future plets
+  purely additive (see "additive invariant"); not done.
 - **the thin `Plet` interface** (`publish()` + `stats()` for uniform lifecycle /
   metrics reporting under the host's owner name) — not written; plain members remain
   the recommendation until several pluginlets exist.
+- **prior-art landing route** (JSON-Forms skeleton + Tweakpane blades + Blender-style
+  native declare) — a survey conclusion, not a commitment.
 
 The one known gap in what IS built: `live_view.ui.ts` infers full-image dimensions
 from the first frame, but the native half may already have downsampled it
