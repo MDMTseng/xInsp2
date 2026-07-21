@@ -573,6 +573,32 @@ void xi_inspect_entry(int frame) {
     await sleep(1500);
     shot('final_after_close');
 
+    // ====== STEP 12: Reopen it — every declared instance must come back ======
+    // open_project is the SILENT path: an instance whose plugin module cannot be
+    // loaded is skipped with one log line while the command still reports ok, so
+    // the project comes up short and nothing fails. That is how a platform module
+    // -naming regression hid (manifests name xi-<n>.dll on every OS; the POSIX
+    // .so mapping is what makes a PREBUILT plugin resolvable — see
+    // platform_module_path in xi_dynlib.hpp). STEP 2 does not cover it: creating
+    // an instance and RESTORING one from project.json are different code paths.
+    // Assert on the count, not just ok.
+    console.log('\n[STEP 12] User: Reopen the project — all instances restored');
+    // open_project's OWN response carries the instances it actually brought up
+    // (PluginManager::to_json). list_instances is no good here: it answers `{}`
+    // and pushes the list as a separate "instances" event.
+    const r12 = await vscode.commands.executeCommand('xinsp2.openProject', projDir);
+    assert.ok(r12?.ok, 'project reopens');
+    await sleep(1500);
+    const names = (r12?.data?.instances ?? []).map(i => i.name ?? i).sort();
+    assert.deepStrictEqual(names, ['cam0', 'det0', 'saver0'],
+        `every declared instance loaded after reopen (got ${JSON.stringify(names)}) — `
+        + 'a missing one means its plugin module did not resolve');
+    console.log(`  ✓ instances restored: ${names.join(', ')}`);
+    try { await vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}
+    await sleep(1200);
+    shot('reopened_instances_restored');
+    try { await vscode.commands.executeCommand('xinsp2.closeProject'); } catch {}
+
     console.log(`\n=== USER JOURNEY COMPLETE — ${stepNum} screenshots ===`);
     console.log(`Project: ${projDir}`);
     console.log(`Saved files: ${saveDir}`);
