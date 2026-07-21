@@ -67,9 +67,28 @@ def load_serial() -> set[str]:
     return out
 
 
+def test_name(drv: Path) -> str:
+    """The suite-visible name of a driver — also the quarantine / serial key.
+
+    examples/qa_foo/driver.py        -> "qa_foo"
+    plugins/foo/example/driver.py    -> "example_foo"   (the folder is always
+    named "example", so the PLUGIN supplies the identity)
+    """
+    if drv.parent.name == "example":
+        return f"example_{drv.parents[1].name}"
+    return drv.parent.name
+
+
 def discover(filt: str):
-    return [d / "driver.py" for d in sorted(EXAMPLES.glob("qa_*"))
-            if (d / "driver.py").exists() and (not filt or filt in d.name)]
+    """The qa_* regression suite PLUS every official plugin's shipped example.
+
+    An example nobody executes rots into a broken first impression — this repo
+    has the receipts. Running plugins/<name>/example the same way as a qa_* test
+    is what keeps `plugins/<name>/example` an actual demo instead of a claim.
+    """
+    dirs = sorted(EXAMPLES.glob("qa_*")) + sorted((REPO / "plugins").glob("*/example"))
+    return [d / "driver.py" for d in dirs
+            if (d / "driver.py").exists() and (not filt or filt in test_name(d / "driver.py"))]
 
 
 def verdict_of(text: str) -> str:
@@ -88,7 +107,7 @@ def run_one(drv: Path, timeout: int, quarantine: dict[str, str]):
     (name, outcome, dt, report_str) where report_str is the fully-formatted line
     (+ any detail lines) ready to print atomically — so parallel workers don't
     interleave their output."""
-    name = drv.parent.name
+    name = test_name(drv)
     t0 = time.time()
     r = None
     try:
@@ -142,7 +161,7 @@ def main() -> int:
     serial_names = load_serial()
     tests = discover(filt)
     if opts.get("--list"):
-        for t in tests: print(t.parent.name)
+        for t in tests: print(test_name(t))
         return 0
     if not tests:
         print(f"no qa_* tests match {filt!r}"); return 1
@@ -150,8 +169,8 @@ def main() -> int:
     # jobs=1 → one sequential pass (old behaviour, no serial split).
     # jobs>1 → parallel pool over the parallel-safe tests, then a serial tail.
     if jobs > 1:
-        serial = [t for t in tests if t.parent.name in serial_names]
-        par    = [t for t in tests if t.parent.name not in serial_names]
+        serial = [t for t in tests if test_name(t) in serial_names]
+        par    = [t for t in tests if test_name(t) not in serial_names]
     else:
         serial, par = [], tests
 

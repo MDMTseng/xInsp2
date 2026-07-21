@@ -55,6 +55,7 @@ examples/*/_run_all_summary.json
 examples/*/backend.log
 examples/*/backend.log.err
 examples/**/backend*.log
+plugins/**/example/backend*.log
 examples/**/session*.log
 examples/**/fe*.log
 examples/**/be*.log

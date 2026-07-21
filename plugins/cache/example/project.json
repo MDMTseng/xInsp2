@@ -1,0 +1,16 @@
+{
+  "name": "cache_example",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "instances": [
+    { "name": "cam", "plugin": "mock_camera" },
+    { "name": "buffer", "plugin": "cache" },
+    { "name": "expose", "plugin": "expose" }
+  ],
+  "plugins": {}
+}

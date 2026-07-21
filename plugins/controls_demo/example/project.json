@@ -1,0 +1,14 @@
+{
+  "name": "controls_demo_example",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "instances": [
+    { "name": "ctl", "plugin": "controls_demo" }
+  ],
+  "plugins": {}
+}
