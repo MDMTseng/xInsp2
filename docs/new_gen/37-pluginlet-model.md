@@ -599,9 +599,12 @@ the sections above as describing shipped behaviour:
   changed. Naming style (dotted vs slashed) is an OPEN question.
 - **the overlay plet** — vocabulary (point/line/…/text + verdict styling), the native
   `Overlay` builder, and the generic webui renderer + custom draw hook: none written.
-- **the controls plet** — `xi::pluginlet::Controls` (native declare/validate/snapshot),
-  the `$schema` UI-tree + `$rev` structure/values split, the generic schema renderer,
-  and the touch numpad: none written. Highest-leverage next build (corrections #5).
+- **the controls plet** — native half `xi::pluginlet::Controls` is now **LANDED**
+  (`pluginlets/controls/controls.hpp` + `contract.ts` + manifest; `test_controls`,
+  8 tests: `$schema` tree emit, set_def clamp/enum-reject/absent-tolerant,
+  button/readout unwritable, snapshot typing, set_def/snapshot concurrency). Still
+  DESIGN ONLY: the `$schema` renderer + touch numpad (webui build world) and native
+  dynamic-tree `$rev` bumping (the current tree is static, `$rev` constant).
 - **plet settings persistence** — the delegated `plet/<fqname>` def slice: convention
   only, no helper written.
 - **generalizing expose's upstream relay** from the hard-coded `viewport` to a generic

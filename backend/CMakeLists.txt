@@ -259,6 +259,21 @@ add_executable(test_reactive tests/test_reactive.cpp)
 target_include_directories(test_reactive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME reactive COMMAND test_reactive)
 
+# controls pluginlet native half (pluginlets/controls/controls.hpp) — the default
+# plugin UI: declare params → get_def/set_def/$schema tree/thread-safe snapshot.
+# Uses xi_json (yyjson) for the def marshalling, so it links yyjson like
+# test_mp_fixtures; needs the pluginlets/ include root for <controls/controls.hpp>.
+add_executable(test_controls tests/test_controls.cpp)
+target_link_libraries(test_controls PRIVATE yyjson)
+target_include_directories(test_controls PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../pluginlets)
+if(NOT MSVC)
+    target_link_libraries(test_controls PRIVATE pthread)
+endif()
+add_test(NAME controls COMMAND test_controls)
+
 # Canonical msgpack GOLDEN fixtures (protocol/fixtures/canonical) — the
 # cross-implementation lockstep with the sibling TS/Python codecs. Drives the
 # same Writer/canonicalizer and byte-compares against the committed *.bin;

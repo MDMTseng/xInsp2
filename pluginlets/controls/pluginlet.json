@@ -1,0 +1,31 @@
+{
+  "name": "controls",
+  "version": "0.1.0",
+  "doc": "docs/new_gen/37-pluginlet-model.md",
+  "summary": "The DEFAULT plugin UI (doc 37 tier-1): declare params once as a UI tree (tabs/sections of sliders/numpads/toggles/dropdowns/buttons/readouts) and get get_def/set_def/$schema/thread-safe access. Parasitic — a plain host member, no owner identity, no ABI surface.",
+  "halves": {
+    "native": {
+      "entry": "controls.hpp",
+      "symbol": "xi::pluginlet::Controls",
+      "include": "<controls/controls.hpp>",
+      "delivery": "header — a host member; host delegates get_def/set_def to it",
+      "status": "IMPLEMENTED — test_controls (8 tests): schema tree emit, set_def clamp/enum-reject/absent-tolerant, button/readout unwritable, snapshot typing, set_def/snapshot concurrency"
+    },
+    "ui": {
+      "entry": "(generic $schema renderer)",
+      "symbol": "mountControls",
+      "delivery": "TS module bundled into the webui at build time",
+      "status": "DESIGN ONLY — not written (webui build world). Landing route per doc 37 prior-art: JSON-Forms-style schema/uiSchema/tester-registry + Tweakpane blades as the widget layer + a custom touch numpad (host-owned IME)."
+    }
+  },
+  "contract": "contract.ts",
+  "requires": {
+    "hostMethods": ["get_def", "set_def", "exchange"],
+    "planes": []
+  },
+  "notes": {
+    "zeroCore": "Rides get_def/set_def/exchange only — no new transport, no cap, no ABI change (doc 37 additive invariant).",
+    "schemaSource": "Static plugin.json OR native get_def emit; both produce the same $schema tree. This helper is the native-emit path.",
+    "state": "values→def (persisted); structure→$schema (declaration, $rev-versioned); view state (open tab / collapse / scroll)→browser-local, NOT in def."
+  }
+}
