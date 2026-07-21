@@ -18,10 +18,9 @@
 //     stamped with the missing_input reason code (PackOut::fault).
 //   * Pooled-handle balance across the whole pilot path.
 //
-#ifdef _WIN32
-  #define WIN32_LEAN_AND_MEAN
-  #include <windows.h>
-#endif
+// LoadLibraryA/GetProcAddress/HMODULE/GetLastError for the loader below:
+// real <windows.h> on Windows, dlopen/dlsym shim on POSIX (same names).
+#include <xi/xi_dynlib.hpp>
 
 #include <xi/xi_cabi_adapter.hpp>   // CAbiInstanceAdapter (has_pack_door / run_pack_door)
 #include <xi/xi_image_pool.hpp>     // make_host_api + cumulative().live_now

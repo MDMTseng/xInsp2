@@ -36,9 +36,9 @@
 #include <xi/xi_pack_abi.hpp>
 #include <xi/xi_seh.hpp>
 
-#ifdef _WIN32
-  #include <windows.h>
-#endif
+// LoadLibraryA/GetProcAddress/HMODULE/GetLastError for the loader below:
+// real <windows.h> on Windows, dlopen/dlsym shim on POSIX (same names).
+#include <xi/xi_dynlib.hpp>
 
 #include <cstdint>
 #include <cstdio>

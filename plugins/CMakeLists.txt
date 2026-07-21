@@ -33,6 +33,14 @@ if(MSVC)
     # handles (1 ImagePool slot per absorbed crash) — and _set_se_translator warns
     # C4535 that it is inoperative.
     add_compile_options(/W3 /utf-8 /EHa)
+else()
+    # Non-MSVC (Linux/macOS g++/clang) must match the backend's plugin ABI flags
+    # (backend/CMakeLists) so a plugin .so composes with the host: -fno-gnu-unique
+    # (the module truly unloads on dlclose + per-load statics — hot-reload), and
+    # -fnon-call-exceptions (a hardware fault inside the plugin unwinds into the
+    # host's seh_exception translator). -fvisibility=default keeps the XI_PLUGIN_IMPL
+    # export thunks published. SHARED targets are -fPIC automatically.
+    add_compile_options(-Wall -fno-gnu-unique -fnon-call-exceptions -fvisibility=default)
 endif()
 
 # All plugin DLLs are namespaced with an "xi-" prefix (xi-<name>.dll). Set once
@@ -342,8 +350,8 @@ target_include_directories(pack_pilot_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
     ${CMAKE_CURRENT_SOURCE_DIR}/mock_camera)
 target_compile_definitions(pack_pilot_test PRIVATE
-    BLOB_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis/xi-blob_analysis.dll"
-    MOCK_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera.dll")
+    BLOB_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis/xi-blob_analysis${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    MOCK_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(pack_pilot_test PRIVATE Ws2_32)
 endif()
@@ -364,9 +372,9 @@ target_include_directories(use_pack_door_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis)
 target_compile_definitions(use_pack_door_test PRIVATE
-    BLOB_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis/xi-blob_analysis.dll"
-    MOCK_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera.dll"
-    JSON_SOURCE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/json_source/xi-json_source.dll")
+    BLOB_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis/xi-blob_analysis${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    MOCK_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mock_camera/xi-mock_camera${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    JSON_SOURCE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/json_source/xi-json_source${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(use_pack_door_test PRIVATE Ws2_32)
 endif()
@@ -390,7 +398,7 @@ target_include_directories(json_source_pack_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/json_source)
 target_compile_definitions(json_source_pack_test PRIVATE
-    JSON_SOURCE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/json_source/xi-json_source.dll")
+    JSON_SOURCE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/json_source/xi-json_source${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(json_source_pack_test PRIVATE Ws2_32)
 endif()
@@ -410,7 +418,7 @@ target_include_directories(config_swap_probe_pack_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe)
 target_compile_definitions(config_swap_probe_pack_test PRIVATE
-    CONFIG_SWAP_PROBE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe/xi-config_swap_probe.dll")
+    CONFIG_SWAP_PROBE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config_swap_probe/xi-config_swap_probe${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(config_swap_probe_pack_test PRIVATE Ws2_32)
 endif()
@@ -431,7 +439,7 @@ target_include_directories(cache_pack_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/cache/src)
 target_compile_definitions(cache_pack_test PRIVATE
-    CACHE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/cache/xi-cache.dll")
+    CACHE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/cache/xi-cache${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(cache_pack_test PRIVATE Ws2_32)
 endif()
@@ -470,7 +478,7 @@ target_include_directories(expose_pack_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
 target_compile_definitions(expose_pack_test PRIVATE
-    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose.dll")
+    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(expose_pack_test PRIVATE Ws2_32)
 endif()
@@ -487,7 +495,7 @@ add_executable(expose_script_push_test expose_script_push_test.cpp)
 target_include_directories(expose_script_push_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(expose_script_push_test PRIVATE
-    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose.dll")
+    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(expose_script_push_test PRIVATE Ws2_32)
 endif()
@@ -505,7 +513,7 @@ add_executable(pack_order_gate_test pack_order_gate_test.cpp)
 target_include_directories(pack_order_gate_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(pack_order_gate_test PRIVATE
-    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose.dll")
+    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(pack_order_gate_test PRIVATE Ws2_32)
 endif()
@@ -524,7 +532,7 @@ target_include_directories(record_save_pack_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
 target_compile_definitions(record_save_pack_test PRIVATE
-    RECORD_SAVE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/record_save/xi-record_save.dll")
+    RECORD_SAVE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/record_save/xi-record_save${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(record_save_pack_test PRIVATE Ws2_32)
 endif()
@@ -542,8 +550,8 @@ target_include_directories(record_replay_pack_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
 target_compile_definitions(record_replay_pack_test PRIVATE
-    RECORD_SAVE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/record_save/xi-record_save.dll"
-    RECORD_REPLAY_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/record_replay/xi-record_replay.dll")
+    RECORD_SAVE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/record_save/xi-record_save${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    RECORD_REPLAY_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/record_replay/xi-record_replay${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(record_replay_pack_test PRIVATE Ws2_32)
 endif()
@@ -560,7 +568,7 @@ add_executable(cap_imgcodec_test cap_imgcodec_test.cpp)
 target_include_directories(cap_imgcodec_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(cap_imgcodec_test PRIVATE
-    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec.dll")
+    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(cap_imgcodec_test PRIVATE Ws2_32)
 endif()
@@ -579,9 +587,9 @@ add_executable(cap_ui_egress_test cap_ui_egress_test.cpp)
 target_include_directories(cap_ui_egress_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(cap_ui_egress_test PRIVATE
-    UI_EGRESS_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ui_egress/xi-ui_egress.dll"
-    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec.dll"
-    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose.dll")
+    UI_EGRESS_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ui_egress/xi-ui_egress${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    EXPOSE_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/expose/xi-expose${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(cap_ui_egress_test PRIVATE Ws2_32)
 endif()
@@ -603,7 +611,7 @@ add_executable(cap_imgcodec_host_test
 target_include_directories(cap_imgcodec_host_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(cap_imgcodec_host_test PRIVATE
-    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec.dll")
+    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(cap_imgcodec_host_test PRIVATE Ws2_32)
 endif()
@@ -625,7 +633,7 @@ add_executable(cap_jpeg_encode_host_test
 target_include_directories(cap_jpeg_encode_host_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(cap_jpeg_encode_host_test PRIVATE
-    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec.dll")
+    IMGCODEC_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/imgcodec/xi-imgcodec${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(XINSP2_HAS_TURBOJPEG AND TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIB)
     target_compile_definitions(cap_jpeg_encode_host_test PRIVATE XINSP2_HAS_TURBOJPEG=1)
     target_include_directories(cap_jpeg_encode_host_test PRIVATE ${TURBOJPEG_INCLUDE_DIR})
@@ -663,7 +671,7 @@ add_executable(cap_lut_owner_test cap_lut_owner_test.cpp)
 target_include_directories(cap_lut_owner_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(cap_lut_owner_test PRIVATE
-    LUT_OWNER_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/lut_owner/xi-lut_owner.dll")
+    LUT_OWNER_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/lut_owner/xi-lut_owner${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
     target_link_libraries(cap_lut_owner_test PRIVATE Ws2_32)
 endif()
