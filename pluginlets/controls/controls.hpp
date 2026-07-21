@@ -46,6 +46,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <mutex>          // std::unique_lock (MSVC pulls it in via <shared_mutex>; libstdc++ does not)
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
