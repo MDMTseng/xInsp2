@@ -3143,13 +3143,25 @@ ${exposeBlock}
             const args = [`--port=${port}`];
             for (const dir of extraPluginDirs) args.push(`--plugins-dir=${dir}`);
             output.appendLine(`[xinsp2] starting ${exe} ${args.join(' ')}`);
-            backend = spawn(exe, args, {
+            const child = spawn(exe, args, {
                 stdio: ['ignore', 'pipe', 'pipe'],
             });
-            backend.stdout?.on('data', (d: Buffer) => output.append(d.toString()));
-            backend.stderr?.on('data', (d: Buffer) => output.append(d.toString()));
-            backend.on('exit', (code: number | null, signal: string | null) => {
+            backend = child;
+            child.stdout?.on('data', (d: Buffer) => output.append(d.toString()));
+            child.stderr?.on('data', (d: Buffer) => output.append(d.toString()));
+            child.on('exit', (code: number | null, signal: string | null) => {
                 output.appendLine(`[xinsp2] backend exited (code=${code} signal=${signal})`);
+                // Only the CURRENT backend's exit is ours to react to. `exit` is
+                // async, so a manual restart (kill + immediate respawn) delivers
+                // the dead process's exit AFTER its replacement is already live
+                // and intendedRunning is back to true. Without this identity
+                // check that stale event reads as a crash: it nulls the handle to
+                // the NEW backend, spends a respawn-budget slot, and spawns a
+                // duplicate that cannot bind the port — which exits(1), respawns,
+                // and burns the whole budget in seconds. One user-initiated
+                // "Restart Backend" was enough to end at "backend crashed 5× in
+                // last minute — giving up".
+                if (backend !== child) return;  // superseded — not the live one
                 backend = null;
                 if (!intendedRunning) return;   // clean shutdown
                 // Per-project / workspace opt-out — recompute in case
