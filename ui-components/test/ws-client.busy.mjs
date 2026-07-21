@@ -17,6 +17,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { XiClient, BUSY_CLOSE_CODE } from "../src/ws-client.mjs";
+import { backendExe, skipLiveBackendTest } from "./backend-exe.mjs";
 
 // --- fake sockets -----------------------------------------------------------
 // Browser-style: only on* handler props, no EventEmitter `.on` (so the shim's
@@ -88,10 +89,9 @@ test("open then close emits open + a non-busy close (normal disconnect)", async 
 // Native WebSocket (undici) can't read the 503 status — that's the platform
 // limit the proxy exists to paper over — so here we only assert the shim surfaces
 // the single-client rejection as a settled (rejected) connect, not a hang.
-const backendExe = resolve(dirname(fileURLToPath(import.meta.url)), "../../backend/build/Release/xinsp-backend.exe");
 const port = 38000 + Math.floor(Math.random() * 20000);
 
-test("real backend: the 2nd client's connect rejects (single-client enforced)", { timeout: 30000 }, async () => {
+test("real backend: the 2nd client's connect rejects (single-client enforced)", { skip: skipLiveBackendTest, timeout: 30000 }, async () => {
   const child = spawn(backendExe, [`--port=${port}`], { stdio: ["ignore", "ignore", "inherit"] });
   let a;
   try {

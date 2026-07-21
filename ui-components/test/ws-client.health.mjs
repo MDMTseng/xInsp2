@@ -21,9 +21,9 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { XiClient } from "../src/ws-client.mjs";
+import { backendExe, skipLiveBackendTest } from "./backend-exe.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const backendExe = resolve(__dirname, "../../backend/build/Release/xinsp-backend.exe");
 const port = 38000 + Math.floor(Math.random() * 20000);
 const KNOWN_STATES = ["boot", "project_loaded", "running", "degraded", "draining", "fault"];
 
@@ -37,7 +37,7 @@ async function getHealth(c) {
   }
 }
 
-test("get_health honours the health contract (or degrades cleanly)", { timeout: 30000 }, async () => {
+test("get_health honours the health contract (or degrades cleanly)", { skip: skipLiveBackendTest, timeout: 30000 }, async () => {
   const child = spawn(backendExe, [`--port=${port}`], { stdio: ["ignore", "ignore", "inherit"] });
   let c;
   try {
