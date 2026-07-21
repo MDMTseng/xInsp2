@@ -62,11 +62,14 @@ class Controls {
         bool container = false;
         std::string type, title;          // container
         bool collapsed = false;
+        int  columns = 0;                 // grid container: column count (0 = not a grid)
         std::vector<std::unique_ptr<Node>> children;
         std::string key, command, label, widget;   // leaf
         Kind kind = Kind::Float;
         double lo = 0, hi = 0;
         std::vector<std::string> options;
+        int  span = 0;                    // width in grid columns (0 = default/full)
+        int  rows = 0;                    // height in grid rows   (0 = 1)
     };
 
 public:
@@ -87,12 +90,27 @@ public:
         last_container_ = cur_;
         return *this;
     }
+    // A GRID: children flow left-to-right and wrap to the next row when the columns
+    // fill. Nests inside the CURRENT container (a section/tab/root). Give each child
+    // a width with .span(cols) (default = full width); a taller widget .rows(n).
+    Controls& grid(int columns = 12) {
+        auto n = mk_container_("grid", "");
+        n->columns = columns < 1 ? 1 : columns;
+        cur_ = add_(cur_, std::move(n));
+        last_container_ = cur_;
+        return *this;
+    }
     // Mark the most-recently-opened container collapsed-by-default (view state; the
     // operator expanding it is browser-local, never persisted — doc 37).
     Controls& collapsed() {
         if (last_container_) last_container_->collapsed = true;
         return *this;
     }
+    // Width (in grid columns) / height (in grid rows) of the LAST-added node —
+    // the layout analogue of .collapsed(). Normalizes element size in a grid so
+    // controls pack right and wrap.
+    Controls& span(int cols) { if (last_added_) last_added_->span = cols; return *this; }
+    Controls& rows(int n)    { if (last_added_) last_added_->rows = n;    return *this; }
 
     // ---- control builders (leaves) ---------------------------------------
     Controls& slider(std::string key, double def, double lo, double hi) {
@@ -243,7 +261,8 @@ private:
     // vector growth, so the cursor pointers below never dangle).
     Node* add_(Node* parent, std::unique_ptr<Node> child) {
         parent->children.push_back(std::move(child));
-        return parent->children.back().get();
+        last_added_ = parent->children.back().get();   // target of .span()/.rows()
+        return last_added_;
     }
     Node* add_leaf_(Kind kind, const std::string& key, const char* widget) {
         auto leaf = std::make_unique<Node>();
@@ -290,7 +309,10 @@ private:
         o.set("type", n.container ? n.type.c_str() : "control");
         if (!n.title.empty()) o.set("title", n.title.c_str());
         if (n.collapsed) o.set("collapsed", true);
+        if (n.span > 0) o.set("span", n.span);   // grid width (columns)
+        if (n.rows > 0) o.set("rows", n.rows);   // grid height (rows)
         if (n.container) {
+            if (n.columns > 0) o.set("columns", n.columns);   // grid: column count
             Json arr = Json::array();
             for (const auto& c : n.children) arr.push(emit_node_(*c));
             o.set("children", arr);
@@ -313,6 +335,7 @@ private:
     Node* cur_ = nullptr;             // where leaves are added
     Node* cur_tab_ = nullptr;
     Node* last_container_ = nullptr;  // target of collapsed()
+    Node* last_added_ = nullptr;      // target of span()/rows() (leaf or container)
     std::unordered_map<std::string, Node*> leaf_by_key_;   // stable ptrs (unique_ptr)
 
     mutable std::shared_mutex mu_;

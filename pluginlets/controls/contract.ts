@@ -28,10 +28,14 @@ export interface ControlsDef {
 export type Node = Container | Control;
 
 export interface Container {
-  type: "root" | "tab" | "section" | "row" | "group";
+  type: "root" | "tab" | "section" | "grid" | "row" | "group";
   title?: string;
   collapsed?: boolean;         // DEFAULT collapse only; the operator's actual
                                // open/closed state is browser-local, never in def
+  columns?: number;            // grid only: column count (default 12). Children flow
+                               // left→right by their `span` and WRAP to the next row.
+  span?: number;               // this node's own width in the PARENT grid's columns
+  rows?: number;               // this node's height in grid rows (default 1)
   children: Node[];
 }
 
@@ -61,7 +65,14 @@ export interface Control {
   min?: number;                // slider / numpad
   max?: number;
   options?: string[];          // dropdown / radio
+  span?: number;               // width in the enclosing grid's columns (default full)
+  rows?: number;               // height in grid rows (default 1) — e.g. a tall readout
 }
+
+// Layout model: a `grid` container has `columns` (default 12). Each child occupies
+// `span` columns (default = full width) and `rows` rows (default 1); children flow
+// left→right and wrap to the next row when the columns fill — normalized element
+// sizing with automatic wrapping, no manual row bookkeeping.
 
 /** Validation is DECLARED once (min/max/options) and enforced on BOTH sides: the
  *  native set_def clamps/rejects (never trusts the client); the UI mirrors it for

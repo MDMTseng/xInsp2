@@ -195,6 +195,38 @@ XI_TEST(presentation_and_radio_widgets) {
     XI_EXPECT_EQ(c.snapshot().s("polarity"), std::string("falling"));
 }
 
+// Grid: a grid container carries its column count; children carry their span/rows.
+XI_TEST(grid_layout) {
+    Controls c;
+    c.section("Params")
+        .grid(12)
+            .slider("x", 0, 0, 100).span(6)
+            .slider("y", 0, 0, 100).span(6)      // fills the row → z wraps below
+            .numpad("z", 0, 0, 100).span(4)
+            .readout("mon", "Monitor").span(8).rows(2);
+
+    Json d = Json::parse(c.get_def());
+    // locate the grid and read a couple of child spans
+    int columns = 0, span_x = -1, rows_mon = -1;
+    std::function<void(const Json&)> walk = [&](const Json& n) {
+        if (n["type"].as_string() == "grid") columns = n["columns"].as_int(0);
+        if (n["key"].as_string() == "x")   span_x = n["span"].as_int(-1);
+        if (n["key"].as_string() == "mon") rows_mon = n["rows"].as_int(-1);
+        Json kids = n["children"];
+        for (int i = 0;; ++i) { Json k = kids[i]; if (!k.valid()) break; walk(k); }
+    };
+    walk(d["$schema"]);
+    XI_EXPECT_EQ(columns, 12);
+    XI_EXPECT_EQ(span_x, 6);
+    XI_EXPECT_EQ(rows_mon, 2);
+
+    // values under the grid still bind + validate normally
+    c.set_def(R"({"x": 250, "z": 40})");
+    auto s = c.snapshot();
+    XI_EXPECT_EQ(s.i("x"), 100);   // clamped
+    XI_EXPECT_EQ(s.i("z"), 40);
+}
+
 // snapshot returns typed values lock-free for the caller.
 XI_TEST(snapshot_types) {
     Controls c; build(c);
