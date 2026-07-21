@@ -154,6 +154,18 @@ set_target_properties(data_output PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/data_output
 )
 
+# controls_demo — def surface = the controls pluginlet (doc 37). Uses xi_json
+# (yyjson) for the def marshalling and the pluginlets/ include root for
+# <controls/controls.hpp>.
+add_library(controls_demo SHARED controls_demo/controls_demo.cpp)
+target_link_libraries(controls_demo PRIVATE yyjson_plugin)
+target_include_directories(controls_demo PRIVATE
+    ${XI_INCLUDE} ${XI_VENDOR} ${CMAKE_CURRENT_SOURCE_DIR}/../pluginlets)
+set_target_properties(controls_demo PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/controls_demo
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/controls_demo
+)
+
 # blob_analysis
 add_library(blob_analysis SHARED blob_analysis/blob_analysis.cpp)
 target_include_directories(blob_analysis PRIVATE ${XI_INCLUDE} ${XI_VENDOR})
