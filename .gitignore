@@ -1,6 +1,7 @@
 build/
 **/build/
 build-linux/
+build-*/
 **/build-linux/
 build_plugins/
 **/build_plugins/

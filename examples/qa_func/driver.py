@@ -41,7 +41,7 @@ sys.path.insert(0, str(SDK))
 # xi::use("expose").process(rec) and a consumer pulls them back here.
 sys.path.insert(0, str(ROOT.parents[0] / "lib"))
 from xex1 import pull_latest, subscribe  # noqa: E402
-from ports import free_port  # noqa: E402
+from ports import free_port, backend_exe, fe_exe  # noqa: E402
 
 
 def _pull_value(c, channel, key, retries=20, delay=0.1):
@@ -57,8 +57,8 @@ def _pull_value(c, channel, key, retries=20, delay=0.1):
     return None
 
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
-BACKEND_EXE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{EXE_SUFFIX}"
-FE_EXE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-fe{EXE_SUFFIX}"
+BACKEND_EXE = backend_exe()
+FE_EXE = fe_exe()
 
 NOSCRIPT_PROJ = ROOT / "proj_noscript"
 
@@ -123,8 +123,11 @@ def spawn_fe(port: int, log_path: Path, extra: list[str], cwd: Path) -> subproce
     """Spawn xinsp-fe.exe (the supervisor). cwd controls fe.json discovery."""
     logf = open(log_path, "wb")
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    # A slow ARM box cold-compiles the project plugin + script on autostart; the
+    # FE's default 60s boot window is too tight and it would kill+respawn the
+    # backend mid-compile, so it never reaches 'autostart: ready'. Give it room.
     return subprocess.Popen(
-        [str(FE_EXE), f"--port={port}", *extra],
+        [str(FE_EXE), f"--port={port}", "--boot-timeout-ms=180000", *extra],
         cwd=str(cwd),
         stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
         creationflags=flags,
@@ -436,10 +439,6 @@ CASES = [
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: xinsp-fe / backend autostart are Windows-only today "
-              "(see docs/roadmap/linux-port.md)")
-        return 0
     if not BACKEND_EXE.exists():
         sys.exit(f"FAIL: backend exe not found: {BACKEND_EXE}\n"
                  f"build: cmake --build backend/build --config Release "

@@ -19,7 +19,36 @@ port. For parallel example/test runs this is enough.
 from __future__ import annotations
 
 import contextlib
+import os
 import socket
+from pathlib import Path
+
+
+def _built_exe(name: str) -> Path:
+    """Locate a built xInsp2 executable across platforms + build layouts.
+
+    Windows CMake builds to build/Release (multi-config); the Linux/POSIX port
+    builds to build-linux (single-config). Probe both (+ Debug / plain build) so a
+    driver need not care which. Returns the first that exists, else the first
+    candidate (caller reports the missing path)."""
+    suf = ".exe" if os.name == "nt" else ""
+    repo = Path(__file__).resolve().parents[2]   # examples/lib/ -> repo root
+    bases = ["build-linux", "build/Release", "build/Debug", "build"]
+    cands = [repo / "backend" / b / f"{name}{suf}" for b in bases]
+    return next((c for c in cands if c.exists()), cands[0])
+
+
+def backend_exe() -> Path:
+    """Path to the built xinsp-backend, cross-platform + build-layout aware."""
+    return _built_exe("xinsp-backend")
+
+
+def runner_exe() -> Path:
+    return _built_exe("xinsp-runner")
+
+
+def fe_exe() -> Path:
+    return _built_exe("xinsp-fe")
 
 
 def free_port(host: str = "127.0.0.1") -> int:

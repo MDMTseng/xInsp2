@@ -43,7 +43,7 @@
 #include <xi/xi_pack_abi.hpp>
 #include <xi/xi_seh.hpp>
 
-// LoadLibraryA/GetProcAddress/HMODULE/GetLastError for the loader below:
+// LoadLibraryA/GetProcAddress/HMODULE/GetLastError for make_instance below:
 // real <windows.h> on Windows, dlopen/dlsym shim on POSIX (same names).
 #include <xi/xi_dynlib.hpp>
 

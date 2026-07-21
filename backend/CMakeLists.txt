@@ -960,6 +960,38 @@ add_test(NAME capability_handshake COMMAND test_capability_handshake)
 # <<< lv2-capability-handshake end.
 
 
+# ---- Optional Google Breakpad — real POSIX minidumps -----------------------
+# OFF by default: the text-backtrace crash sidecar in xi_crash_dump.hpp covers the
+# standard build. Build Breakpad's client lib separately (see docs/roadmap/
+# linux-port.md) and configure with -DXINSP2_HAS_BREAKPAD=ON -DBREAKPAD_ROOT=<checkout>.
+# Only the two processes that WRITE dumps (backend + runner) link it, via
+# _xinsp_add_breakpad(); the single Breakpad TU is src/crash_breakpad.cpp, so the
+# rest of the tree (and every test) stays Breakpad-free.
+option(XINSP2_HAS_BREAKPAD "Link Google Breakpad for real minidumps (POSIX)" OFF)
+set(BREAKPAD_ROOT "" CACHE PATH "Google Breakpad checkout root (contains src/)")
+set(XINSP2_BREAKPAD_READY OFF)
+if(XINSP2_HAS_BREAKPAD AND NOT WIN32)
+    find_path(BREAKPAD_INCLUDE_DIR client/linux/handler/exception_handler.h
+        HINTS ${BREAKPAD_ROOT}/src)
+    find_library(BREAKPAD_CLIENT_LIB NAMES breakpad_client
+        HINTS ${BREAKPAD_ROOT}/src/client/linux)
+    if(BREAKPAD_INCLUDE_DIR AND BREAKPAD_CLIENT_LIB)
+        set(XINSP2_BREAKPAD_READY ON)
+        message(STATUS "xinsp2: Breakpad enabled (${BREAKPAD_CLIENT_LIB})")
+    else()
+        message(WARNING "XINSP2_HAS_BREAKPAD=ON but Breakpad not found under "
+            "BREAKPAD_ROOT=${BREAKPAD_ROOT}; using the text-backtrace crash sidecar")
+    endif()
+endif()
+function(_xinsp_add_breakpad tgt)
+    if(XINSP2_BREAKPAD_READY)
+        target_sources(${tgt} PRIVATE src/crash_breakpad.cpp)
+        target_compile_definitions(${tgt} PRIVATE XINSP2_HAS_BREAKPAD=1)
+        target_include_directories(${tgt} PRIVATE ${BREAKPAD_INCLUDE_DIR})
+        target_link_libraries(${tgt} PRIVATE ${BREAKPAD_CLIENT_LIB})
+    endif()
+endfunction()
+
 add_executable(xinsp_backend
     src/service_main.cpp
     src/service_sinks.cpp
@@ -985,6 +1017,7 @@ set_target_properties(xinsp_backend PROPERTIES OUTPUT_NAME "xinsp-backend")
 target_compile_definitions(xinsp_backend PRIVATE
     XINSP2_VERSION="${XINSP2_VERSION}"
     XINSP2_COMMIT="${XINSP2_COMMIT}")
+_xinsp_add_breakpad(xinsp_backend)
 # PCH: xinsp_backend is the one big MULTI-TU target (14 .cpp all pulling the same
 # heavy STD headers), so a per-target PCH is parsed once and reused across all 14 —
 # a real win here (unlike the ~70 single-TU test exes, where a PCH would only add
@@ -1011,6 +1044,7 @@ set_target_properties(xinsp_runner PROPERTIES OUTPUT_NAME "xinsp-runner")
 target_compile_definitions(xinsp_runner PRIVATE
     XINSP2_VERSION="${XINSP2_VERSION}"
     XINSP2_COMMIT="${XINSP2_COMMIT}")
+_xinsp_add_breakpad(xinsp_runner)
 
 # Frontend supervisor. Spawns + monitors xinsp-backend.exe, records crash
 # forensics on backend death, respawns it (rate-limited). (Driving the line to a

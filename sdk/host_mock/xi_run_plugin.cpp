@@ -41,9 +41,10 @@
 
 #include <opencv2/opencv.hpp>
 
-#ifdef _WIN32
-  #include <windows.h>
-#endif
+// LoadLibrary/GetProcAddress/FreeLibrary/HMODULE/GetLastError: on Windows this
+// forwards the real <windows.h>; on POSIX it supplies same-named inline shims
+// over dlopen/dlsym/dlclose, so the loader call sites below compile unchanged.
+#include <xi/xi_dynlib.hpp>
 
 #include <cstdio>
 #include <cstring>

@@ -46,9 +46,9 @@ sys.path.insert(0, str(REPO_ROOT / "tools" / "xinsp2_py"))
 sys.path.insert(0, str(ROOT.parent / "lib"))   # examples/lib (shared xex1 decoder)
 from xinsp2 import Client  # noqa: E402
 from xex1 import collect_frames, subscribe  # noqa: E402
+from ports import backend_exe  # noqa: E402
 
-SUF = ".exe" if os.name == "nt" else ""
-BE = REPO_ROOT / "backend" / "build" / "Release" / f"xinsp-backend{SUF}"
+BE = backend_exe()
 COLLECT_S = 4.0
 
 
@@ -116,9 +116,6 @@ def inversions(seq: list[int]) -> int:
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: backend compile is Windows-only here")
-        return 0
     if not BE.exists():
         sys.exit(f"FAIL: missing {BE} (build xinsp_backend)")
 

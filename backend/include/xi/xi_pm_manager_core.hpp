@@ -374,6 +374,12 @@ private:
     // TODO(linux): dlopen resolves deps via RPATH/$ORIGIN + LD_LIBRARY_PATH;
     // build plugin .so with -Wl,-rpath,$ORIGIN for the same "deps beside me".
     static HMODULE load_plugin_dll_(const std::string& path) {
+        // `path` is already the resolved platform module file: a JIT build emits a
+        // .so directly, and a manifest-derived name was fs-aware-mapped once in
+        // parse_manifest (xi-<name>.dll -> .so only when the .so exists; a
+        // .dll-named fixture stays .dll). So load it verbatim — do NOT remap the
+        // suffix here, or a fixture that legitimately ships a .dll-named module
+        // would be mis-resolved to a non-existent .so.
         return LoadLibraryExA(path.c_str(), nullptr,
                               LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);

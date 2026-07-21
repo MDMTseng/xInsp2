@@ -1,12 +1,11 @@
-"""backends.py — locate + spawn the built backend, whatever the build layout.
+"""backends.py — spawn/connect helpers for driver scripts.
 
-The exe name and the directory both differ per generator: the Windows/MSVC
-multi-config build writes backend/build/<Config>/xinsp-backend.exe, the
-Linux/macOS Ninja build is single-config and writes backend/build/xinsp-backend.
-Drivers should not each re-derive that. Mirrors the same convention as
-tests/fuzz/_common.py, ui-components/test/backend-exe.mjs and the extension's
-findBackendExe: XINSP2_BACKEND_EXE wins, then Release, then Debug, then the
-single-config dir.
+WHERE the executables are is `ports.py`'s job (`ports.backend_exe()` and
+friends probe build-linux / build/Release / build/Debug / build, cross-platform)
+— the 39 ported qa drivers already resolve through it, so there is exactly one
+answer to "which exe" in this tree. This module adds the two steps every driver
+then repeats: spawning the backend with an isolated temp dir, and polling until
+it accepts a WS client.
 """
 from __future__ import annotations
 import os
@@ -16,32 +15,16 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-_EXE = "xinsp-backend.exe" if os.name == "nt" else "xinsp-backend"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ports import backend_exe, runner_exe, fe_exe  # noqa: E402,F401 (re-exported)
 
 
-def backend_exe() -> Path | None:
-    """The built backend, or None if this checkout has no build."""
+def backend_built() -> bool:
+    """True when this checkout has a built backend (drivers SKIP when it doesn't)."""
     override = os.environ.get("XINSP2_BACKEND_EXE")
     if override:
-        p = Path(override)
-        return p if p.exists() else None
-    base = REPO / "backend" / "build"
-    for cfg in ("Release", "Debug", ""):
-        cand = base / cfg / _EXE if cfg else base / _EXE
-        if cand.exists():
-            return cand
-    return None
-
-
-def runner_exe() -> Path | None:
-    """The headless runner, same layout rules as backend_exe()."""
-    name = "xinsp-runner.exe" if os.name == "nt" else "xinsp-runner"
-    base = REPO / "backend" / "build"
-    for cfg in ("Release", "Debug", ""):
-        cand = base / cfg / name if cfg else base / name
-        if cand.exists():
-            return cand
-    return None
+        return Path(override).exists()
+    return backend_exe().exists()
 
 
 def spawn_backend(port: int, log_path: Path, tag: str = "xi") -> subprocess.Popen:
@@ -51,11 +34,10 @@ def spawn_backend(port: int, log_path: Path, tag: str = "xi") -> subprocess.Pope
     with a parallel driver's (run_qa runs a pool). TMPDIR is the POSIX knob,
     TEMP/TMP the Windows one — set all three and let each platform read its own.
     """
-    exe = backend_exe()
-    if exe is None:
-        raise FileNotFoundError(
-            f"no backend built (looked for backend/build/[Release|Debug/]{_EXE}; "
-            "set XINSP2_BACKEND_EXE to override)")
+    exe = Path(os.environ.get("XINSP2_BACKEND_EXE") or backend_exe())
+    if not exe.exists():
+        raise FileNotFoundError(f"no backend built at {exe} "
+                                "(set XINSP2_BACKEND_EXE to override)")
     iso = Path(tempfile.gettempdir()) / f"{tag}_iso_{port}"
     iso.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)

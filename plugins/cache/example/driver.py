@@ -15,7 +15,7 @@ REPO = ROOT.parents[2]
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
 sys.path.insert(0, str(REPO / "examples" / "lib"))
 from ports import free_port          # noqa: E402
-from backends import backend_exe, spawn_backend, connect  # noqa: E402
+from backends import backend_built, spawn_backend, connect  # noqa: E402
 
 PORT = int(os.environ.get("PORT", "0")) or free_port()
 
@@ -35,7 +35,7 @@ def drain(c, seconds: float) -> list:
 
 
 def main() -> int:
-    if backend_exe() is None:
+    if not backend_built():
         print("SKIP: backend not built"); return 0
     fails: list[str] = []
     proc = spawn_backend(PORT, ROOT / f"backend_{PORT}.log", tag="xi_cache_ex")

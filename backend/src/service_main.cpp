@@ -374,6 +374,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--certify-plugin") {
             const char* dir = (i + 1 < argc) ? argv[i + 1] : nullptr;
+            xi::crash::install_minidump_writer();   // Breakpad when built in
             xi::crash::install();   // a crashed certify still yields a minidump
             int code = dir ? xi::certify::certify_in_process(dir)
                            : xi::certify::kExitAbiMismatch;
@@ -386,10 +387,21 @@ int main(int argc, char** argv) {
     // Install the crash-forensics handlers (minidump filter + CRT death-path
     // interceptors + first-chance logger + fault-stack reserve). Lives in the
     // extracted leaf xi_crash_dump.hpp.
+    xi::crash::install_minidump_writer();   // Breakpad minidump writer when built in
     xi::crash::install();
     // SEH → C++ exception translator so try/catch catches segfaults (a separate
     // concern from the dump machinery; owned here, re-set per inspect thread).
     xi::install_seh_translator();
+
+#ifndef _WIN32
+    // POSIX: a WS client that drops mid-write makes the ws_server's ::send()
+    // raise SIGPIPE, whose default action kills the whole backend (exit rc
+    // -13) — Windows has no such signal, so this was invisible until the fuzz
+    // ws_cmd churn hit it on Linux. Ignore it process-wide; the send() sites
+    // then just observe EPIPE and the normal connection-drop path runs. (The
+    // FE supervisor already does the same for its probe sockets.)
+    ::signal(SIGPIPE, SIG_IGN);
+#endif
 
     // --test-crash: deliberately trigger a fatal exception so the
     // top-level minidump filter fires. Used by runCrashDump E2E.
@@ -463,21 +475,21 @@ int main(int argc, char** argv) {
     // Raise the OS timer resolution to 1ms (default ~15.6ms) so timer-tick fps,
     // sleeps, and CV waits are tight. winmm.timeBeginPeriod via runtime-load so we
     // don't add a link dependency. Process-wide; the paired timeEndPeriod is optional.
+    // (POSIX clock_nanosleep is already high-res, so no equivalent is needed.)
     if (HMODULE w = LoadLibraryA("winmm.dll")) {
         if (auto fn = (UINT(WINAPI*)(UINT))GetProcAddress(w, "timeBeginPeriod")) fn(1);
     }
+#endif
     // --priority=<class>: bump the whole backend's process priority (for a
-    // dedicated inspection PC). Default = leave as-is. Also settable live via
-    // cmd:set_process_priority / project.json runtime.process_priority.
+    // dedicated inspection PC). Default = leave as-is. Cross-platform:
+    // SetPriorityClass on Windows, setpriority(nice) on POSIX (see
+    // apply_process_priority_). Also settable live via cmd:set_process_priority /
+    // project.json runtime.process_priority.
     if (std::string pri = xi::cli::parse_str_flag(argc, argv, "--priority"); !pri.empty()) {
         if (!apply_process_priority_(pri))
             std::fprintf(stderr,
                 "[xinsp2] unknown --priority '%s' (high|above|normal|below|realtime)\n", pri.c_str());
     }
-#else
-    // TODO(linux): clock_nanosleep is already high-res; setpriority(PRIO_PROCESS)
-    // / sched_setscheduler for --priority.
-#endif
 
     // Derive include dir for the script compiler. In a normal dev tree the
     // backend .exe is at backend/build/Release, and headers are at

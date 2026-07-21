@@ -14,7 +14,8 @@ delaying `high` — needs a self-emitting source in each group; that's a follow-
 Run:  python examples/qa_dispatch_groups/driver.py   (Windows; backend built)
 """
 from __future__ import annotations
-import os, subprocess, sys, time
+import os
+import tempfile, subprocess, sys, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -22,16 +23,16 @@ REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
 sys.path.insert(0, str(REPO / "examples" / "lib"))
 from xinsp2 import Client  # noqa: E402
-from ports import free_port  # noqa: E402
+from ports import free_port, backend_exe  # noqa: E402
 
-BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
+BACKEND = backend_exe()
 PORT = int(os.environ.get("PORT", "0")) or free_port()
 
 
 def spawn(port, iso_name):
-    iso = Path(os.environ["LOCALAPPDATA"]) / "Temp" / iso_name
+    iso = Path(tempfile.gettempdir()) / iso_name
     iso.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ); env["TEMP"] = env["TMP"] = str(iso)
+    env = dict(os.environ); env["TEMP"] = env["TMP"] = env["TMPDIR"] = str(iso)
     log = open(ROOT / f"backend_{port}.log", "w", encoding="utf-8")
     return subprocess.Popen([str(BACKEND), f"--port={port}"], stdout=log,
                             stderr=subprocess.STDOUT, cwd=str(REPO), env=env)
@@ -47,8 +48,6 @@ def connect(port):
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: Windows-only"); return 0
     if not BACKEND.exists():
         print(f"SKIP: backend not built ({BACKEND})"); return 0
     fails: list[str] = []
@@ -128,7 +127,7 @@ def main() -> int:
     # --- helper: write a temp project with a given parallelism block ---
     import json, shutil
     def make_proj(sub, parallelism):
-        d = Path(os.environ["LOCALAPPDATA"]) / "Temp" / sub
+        d = Path(tempfile.gettempdir()) / sub
         if d.exists(): shutil.rmtree(d)
         d.mkdir(parents=True)
         (d / "inspect.cpp").write_text((ROOT / "inspect.cpp").read_text(encoding="utf-8"), encoding="utf-8")

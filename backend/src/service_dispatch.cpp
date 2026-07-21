@@ -10,6 +10,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+#ifndef _WIN32
+#  include <sys/resource.h>   // setpriority / PRIO_PROCESS (process-priority port)
+#  include <cerrno>
+#endif
 
 #include "service_internal.hpp"
 
@@ -87,7 +91,28 @@ bool apply_process_priority_(const std::string& cls) {
     std::fprintf(stderr, "[xinsp2] process priority = %s\n", cls.c_str());
     return true;
 #else
-    (void)cls; return false;   // TODO(linux): setpriority/sched_setscheduler
+    // POSIX: map the priority class onto a process nice value (setpriority).
+    // Lowering priority (positive nice) always works; RAISING it (negative nice)
+    // needs CAP_SYS_NICE, which a normal deploy may lack — so a failed raise is
+    // logged best-effort but the (valid) class is still reported applied, rather
+    // than surfacing as "bad priority class". ("realtime" is approximated by the
+    // lowest nice, not SCHED_FIFO, to avoid requiring privileged RT scheduling.)
+    int nice_val;
+    if      (cls == "high")     nice_val = -10;
+    else if (cls == "above")    nice_val = -5;
+    else if (cls == "normal")   nice_val = 0;
+    else if (cls == "below")    nice_val = 5;
+    else if (cls == "realtime") nice_val = -20;
+    else return false;
+    errno = 0;
+    if (::setpriority(PRIO_PROCESS, 0, nice_val) != 0 && errno != 0) {
+        std::fprintf(stderr, "[xinsp2] process priority '%s' (nice %d) not applied: %s "
+                     "(needs CAP_SYS_NICE to raise) — best-effort\n",
+                     cls.c_str(), nice_val, std::strerror(errno));
+    } else {
+        std::fprintf(stderr, "[xinsp2] process priority = %s (nice %d)\n", cls.c_str(), nice_val);
+    }
+    return true;
 #endif
 }
 
