@@ -20,6 +20,7 @@ const fs = require('fs');
 const os = require('os');
 const assert = require('assert');
 const { execSync } = require('child_process');
+const { captureScreenPosix } = require('./journey_helpers.cjs');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -70,6 +71,7 @@ function assertActiveEditor(fileBasename) {
 let mainCodePid = null;
 function resolveMainCodePid() {
     if (mainCodePid) return mainCodePid;
+    if (process.platform !== 'win32') return null;   // no PowerShell / Win32_Process
     try {
         // Walk up the ancestor chain from the extension host (this Node
         // process) to find the first Code.exe that actually owns a
@@ -109,6 +111,7 @@ function takeScreenshot(label) {
     fs.mkdirSync(screenshotDir, { recursive: true });
     const fname = `journey_${String(stepNum).padStart(2,'0')}_${label}.png`;
     const fpath = path.join(screenshotDir, fname);
+    if (process.platform !== 'win32') { captureScreenPosix(fpath, fname); return; }
     const pid = resolveMainCodePid() || 0;
     // PrintWindow with flag 3 = PW_CLIENTONLY | PW_RENDERFULLCONTENT;
     // works with DWM-composited windows (modern VS Code) where older
@@ -233,7 +236,7 @@ async function run() {
     const r1 = await vscode.commands.executeCommand('xinsp2.createProject', projDir, 'my_inspection');
     assert.ok(r1?.ok, 'create_project should succeed');
     assert.ok(fs.existsSync(path.join(projDir, 'project.json')), 'project.json created on disk');
-    assert.ok(fs.existsSync(path.join(projDir, 'inspection.cpp')), 'starter inspection.cpp created');
+    assert.ok(fs.existsSync(path.join(projDir, 'inspect.cpp')), 'starter inspect.cpp created');
     console.log(`  ✓ project created: ${projDir}`);
     try { await vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}
     await sleep(1500);
@@ -400,8 +403,8 @@ async function run() {
     shot('saver_enabled');
 
     // ====== STEP 6: User writes inspection script that wires them together ======
-    console.log('\n[STEP 6] User: Edit inspection.cpp');
-    const scriptPath = path.join(projDir, 'inspection.cpp');
+    console.log('\n[STEP 6] User: Edit inspect.cpp');
+    const scriptPath = path.join(projDir, 'inspect.cpp');
     // v12 (THE CUT): the data plane is the sealed pack — build inputs with
     // xi::ScriptPackBuilder, drive plugin pack doors with use().process(pack),
     // and surface the observable via the run_result verdict (VAR is gone).
@@ -450,15 +453,15 @@ void xi_inspect_entry(int frame) {
 }
 `;
     fs.writeFileSync(scriptPath, scriptCode);
-    console.log('  ✓ inspection.cpp written');
+    console.log('  ✓ inspect.cpp written');
 
     // Open in editor (so user sees their code — editor title actions visible)
     const doc = await vscode.workspace.openTextDocument(scriptPath);
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
     await sleep(1800);
     shot('script_in_editor');
-    assertActiveEditor('inspection.cpp');
-    console.log(`  ✓ UI assert: inspection.cpp is the active editor`);
+    assertActiveEditor('inspect.cpp');
+    console.log(`  ✓ UI assert: inspect.cpp is the active editor`);
 
     // ====== STEP 7: User compiles via command ======
     console.log('\n[STEP 7] User: Command Palette → "xInsp2: Compile Script"');

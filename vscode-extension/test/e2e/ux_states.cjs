@@ -12,6 +12,7 @@ const path   = require('path');
 const fs     = require('fs');
 const os     = require('os');
 const { execSync } = require('child_process');
+const { captureScreenPosix } = require('./journey_helpers.cjs');
 
 const screenshotDir = path.resolve(__dirname, '..', '..', '..', 'screenshot');
 let stepNum = 0;
@@ -22,6 +23,7 @@ function shot(label) {
     fs.mkdirSync(screenshotDir, { recursive: true });
     const fname = `ux_${String(stepNum).padStart(2,'0')}_${label}.png`;
     const fpath = path.join(screenshotDir, fname);
+    if (process.platform !== 'win32') { captureScreenPosix(fpath, fname); return; }
     const ps = path.join(os.tmpdir(), `xi_ux_ss_${process.pid}.ps1`);
     // Use PrintWindow on the current extension-host's VS Code main window.
     // GetForegroundWindow won't work if another app stole focus; so we
@@ -177,10 +179,10 @@ async function run() {
     await sleep(2000);
     shot('12_blob_analysis_polished');
 
-    // --- STATE 13: Editor title actions — open inspection.cpp + screenshot
+    // --- STATE 13: Editor title actions — open inspect.cpp + screenshot
     // the Compile/Run icons in the editor title bar.
     try {
-        const scriptPath = path.join(projDir2, 'inspection.cpp');
+        const scriptPath = path.join(projDir2, 'inspect.cpp');
         const doc = await vscode.workspace.openTextDocument(scriptPath);
         await vscode.window.showTextDocument(doc, vscode.ViewColumn.Three);
     } catch {}

@@ -68,9 +68,33 @@ async function restoreAndSave(uri, original) {
 // process tree from process.pid). PrintWindow it directly so unrelated
 // VS Code instances on the user's desktop don't get captured.
 
+/**
+ * Screenshot on non-Windows, where PowerShell/PrintWindow does not exist:
+ * grab the whole output (grim on Wayland, ImageMagick `import` on X11).
+ * Coarser than PrintWindow's per-window capture, but these shots are for
+ * human spot-checks — and a missing screenshot must never fail a journey,
+ * so every failure path here is a log line, not a throw.
+ * Shared by makeShooter and user_journey.cjs's own takeScreenshot.
+ */
+function captureScreenPosix(fpath, fname) {
+    const tools = process.env.WAYLAND_DISPLAY
+        ? [`grim "${fpath}"`, `import -window root "${fpath}"`]
+        : [`import -window root "${fpath}"`, `grim "${fpath}"`];
+    for (const cmd of tools) {
+        try {
+            execSync(cmd, { timeout: 15000, stdio: 'ignore' });
+            console.log(`  📸 ${fname}`);
+            return true;
+        } catch { /* try the next tool */ }
+    }
+    console.log(`  📸 ${fname} skipped (no grim/import on PATH)`);
+    return false;
+}
+
 let mainCodePid = null;
 function resolveMainCodePid() {
     if (mainCodePid) return mainCodePid;
+    if (process.platform !== 'win32') return null;   // no PowerShell / Win32_Process
     try {
         const psFile = path.join(os.tmpdir(), `xinsp2_jhelpers_pid_${process.pid}.ps1`);
         // $cur, NOT $pid — $pid is read-only in PowerShell.
@@ -113,6 +137,9 @@ function makeShooter(outDir, prefix) {
         fs.mkdirSync(outDir, { recursive: true });
         const fname = `${prefix}_${String(n).padStart(2, '0')}_${label}.png`;
         const fpath = path.join(outDir, fname);
+
+        if (process.platform !== 'win32') { captureScreenPosix(fpath, fname); return; }
+
         const pid = resolveMainCodePid() || 0;
         const psScript = path.join(os.tmpdir(), `xinsp2_jhelpers_ss_${process.pid}.ps1`);
         fs.writeFileSync(psScript, `
@@ -203,4 +230,5 @@ module.exports = {
     restoreAndSave,
     makeShooter,
     clearOldShots,
+    captureScreenPosix,
 };
