@@ -71,6 +71,30 @@ function(xi_use_pluginlet target name)
     endif()
 endfunction()
 
+# xi_wire_pluginlets(<target> <plugin_subdir>) — read <plugin_subdir>/plugin.json's
+# "pluginlets":[...] declaration and pull each in via xi_use_pluginlet. So declaring
+# the plet in plugin.json is the ONLY step — no CMake edit per plet added (doc 37:
+# "one declaration, three consumers" — this is the C++ build consumer).
+function(xi_wire_pluginlets target dir)
+    set(_pj ${CMAKE_CURRENT_SOURCE_DIR}/${dir}/plugin.json)
+    if(NOT EXISTS ${_pj})
+        return()
+    endif()
+    file(READ ${_pj} _json)
+    string(JSON _plets ERROR_VARIABLE _e GET "${_json}" pluginlets)
+    if(_e OR NOT _plets)
+        return()   # plugin declares no pluginlets
+    endif()
+    string(JSON _n LENGTH "${_plets}")
+    if(_n GREATER 0)
+        math(EXPR _last "${_n} - 1")
+        foreach(_i RANGE ${_last})
+            string(JSON _name GET "${_plets}" ${_i})
+            xi_use_pluginlet(${target} ${_name})
+        endforeach()
+    endif()
+endfunction()
+
 # libjpeg-turbo — opt-in, MIRRORING backend/CMakeLists.txt. polaris2 ENCODE
 # eviction: turbojpeg's direct SIMD JPEG encoder LEAVES the backend/core and
 # lands in the imgcodec LIB PLUGIN (the xi.jpeg.encode provider). Same switch,
@@ -183,10 +207,11 @@ set_target_properties(data_output PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/data_output
 )
 
-# controls_demo — def surface = the controls pluginlet (doc 37). One line pulls the
-# plet in from its manifest (include root + yyjson link), no hand-wiring.
+# controls_demo — def surface = the controls pluginlet (doc 37). The plet is pulled
+# in purely from controls_demo/plugin.json's "pluginlets":["controls"] — no CMake
+# knowledge of which plet or its deps.
 add_library(controls_demo SHARED controls_demo/controls_demo.cpp)
-xi_use_pluginlet(controls_demo controls)
+xi_wire_pluginlets(controls_demo controls_demo)
 set_target_properties(controls_demo PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/controls_demo
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/controls_demo

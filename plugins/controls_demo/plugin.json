@@ -4,5 +4,6 @@
   "dll": "xi-controls_demo.dll",
   "factory": "xi_plugin_create",
   "has_ui": true,
-  "json_fallback": true
+  "json_fallback": true,
+  "pluginlets": ["controls"]
 }
