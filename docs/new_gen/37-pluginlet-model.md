@@ -599,6 +599,14 @@ the sections above as describing shipped behaviour:
   changed. Naming style (dotted vs slashed) is an OPEN question.
 - **the overlay plet** — vocabulary (point/line/…/text + verdict styling), the native
   `Overlay` builder, and the generic webui renderer + custom draw hook: none written.
+- **the controls plet UI half** — `mountSchema` (ui-components/src/auto-panel.mjs)
+  now renders the `$schema` tree (tabs/grid/sections + slider/numpad/toggle/dropdown/
+  radio/text/button/readout/view/title/label/divider) with the existing xi-* widgets,
+  wired to set_instance_def like mountPanel, falling back to the flat path when no
+  `$schema` is present. Logic verified by test/schema-panel.node.mjs (4 tests, pure-
+  Node fake DOM — no build). STILL DESIGN ONLY: the real Svelte xi-* widget rendering
+  (needs `npm run build`), the touch numpad, and the live-view mount into the `view`
+  slot's `data-channel`.
 - **the controls plet** — native half `xi::pluginlet::Controls` is now **LANDED**
   (`pluginlets/controls/controls.hpp` + `contract.ts` + manifest; `test_controls`,
   8 tests: `$schema` tree emit, set_def clamp/enum-reject/absent-tolerant,
