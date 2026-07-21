@@ -51,6 +51,11 @@ export type Widget =
   | "button"    // fires `command` via exchange — NOT a bound value
   // --- output (plugin-pushed, read-only) ---
   | "readout"   // read-only output the plugin pushes; not writable via set_def
+  // --- embedded live image (composes the live-view pluginlet) ---
+  | "view"      // a live-image slot: `channel` names a live-view channel; the
+                // renderer mounts the live-view canvas here at the grid size. The
+                // plugin pushes frames to that channel via its own LiveView. The two
+                // plets compose through schema+channel, never plet-to-plet.
   // --- presentation-only (no value, no key) ---
   | "title"     // a section heading (text in `label`)
   | "label"     // a paragraph of help / body text (text in `label`)
@@ -59,8 +64,9 @@ export type Widget =
 export interface Control {
   type: "control";
   widget: Widget;
-  key?: string;                // value/readout binding key (absent for button/title/label/divider)
+  key?: string;                // value/readout binding key (absent for button/title/label/divider/view)
   command?: string;            // button only: the exchange command to fire
+  channel?: string;            // view only: the live-view channel to mount here
   label?: string;              // the control's CAPTION (every widget may carry one so
                                // the grid reserves consistent label space; absent →
                                // renderer falls back to `key`). Also the text body of

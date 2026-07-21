@@ -252,6 +252,37 @@ XI_TEST(grid_layout) {
     XI_EXPECT_EQ(s.i("z"), 40);
 }
 
+// A live-image `view` slot: sized in the grid, references a live-view channel,
+// carries no value (the frames arrive out-of-band via that channel).
+XI_TEST(live_view_slot_in_grid) {
+    Controls c;
+    c.grid(12)
+        .view("ui/cam0/preview").caption("Live").span(8).rows(6)
+        .slider("gain", 1.0, 0.1, 4.0).caption("Gain").span(4);
+
+    Json d = Json::parse(c.get_def());
+    std::string ch, cap; int sp = -1, rw = -1;
+    std::function<void(const Json&)> walk = [&](const Json& n) {
+        if (n["widget"].as_string() == "view") {
+            ch  = n["channel"].as_string();
+            cap = n["label"].as_string();
+            sp  = n["span"].as_int(-1);
+            rw  = n["rows"].as_int(-1);
+        }
+        Json kids = n["children"];
+        for (int i = 0;; ++i) { Json k = kids[i]; if (!k.valid()) break; walk(k); }
+    };
+    walk(d["$schema"]);
+    XI_EXPECT_EQ(ch, std::string("ui/cam0/preview"));
+    XI_EXPECT_EQ(cap, std::string("Live"));
+    XI_EXPECT_EQ(sp, 8);
+    XI_EXPECT_EQ(rw, 6);
+    // the view carries no value key + set_def can't touch it
+    XI_EXPECT(!d["ui/cam0/preview"].valid());
+    c.set_def(R"({"ui/cam0/preview": "x", "gain": 2.0})");
+    XI_EXPECT(c.snapshot().f("gain") > 1.99 && c.snapshot().f("gain") < 2.01);
+}
+
 // snapshot returns typed values lock-free for the caller.
 XI_TEST(snapshot_types) {
     Controls c; build(c);

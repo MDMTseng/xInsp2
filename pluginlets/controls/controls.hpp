@@ -64,7 +64,7 @@ class Controls {
         bool collapsed = false;
         int  columns = 0;                 // grid container: column count (0 = not a grid)
         std::vector<std::unique_ptr<Node>> children;
-        std::string key, command, label, widget;   // leaf
+        std::string key, command, label, widget, channel;   // leaf
         Kind kind = Kind::Float;
         double lo = 0, hi = 0;
         std::vector<std::string> options;
@@ -159,6 +159,17 @@ public:
         auto* n = add_leaf_(Kind::Readout, key, "readout");
         n->label = std::move(label);
         values_[key] = Value{Kind::Readout, 0, false, ""};
+        return *this;
+    }
+
+    // A LIVE-IMAGE slot: no value, references a live-view CHANNEL. Place it in a
+    // grid and size it with .span()/.rows() like any control; the renderer mounts
+    // the live-view canvas (the live-view pluginlet's UI half) bound to `channel`.
+    // The plugin separately runs a LiveView (or overlay plet) pushing frames to that
+    // same channel — the two plets compose through the schema + channel, host-
+    // mediated, never plet-to-plet (doc 37 composition rule).
+    Controls& view(std::string channel) {
+        add_leaf_(Kind::Static, "", "view")->channel = std::move(channel);
         return *this;
     }
 
@@ -328,6 +339,7 @@ private:
             o.set("widget", n.widget.c_str());
             if (!n.key.empty())     o.set("key", n.key.c_str());
             if (!n.command.empty()) o.set("command", n.command.c_str());
+            if (!n.channel.empty()) o.set("channel", n.channel.c_str());   // view slot
             if (!n.label.empty())   o.set("label", n.label.c_str());
             if (n.kind == Kind::Float) { o.set("min", n.lo); o.set("max", n.hi); }
             if (n.kind == Kind::Enum) {
