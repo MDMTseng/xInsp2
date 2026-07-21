@@ -181,19 +181,30 @@ function findBackendExe(context: vscode.ExtensionContext): string {
     const explicit = (cfg.get<string>('backendExe', '') || '').trim();
     if (explicit) return explicit;
 
-    const candidates = [
-        // Dev tree: vscode-extension/ is sibling of backend/
-        path.join(context.extensionPath, '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'),
-        // Packaged: exe shipped next to extension
-        path.join(context.extensionPath, 'backend', 'xinsp-backend.exe'),
+    // The exe name and the build layout are both platform-dependent: MSVC is a
+    // multi-config generator (build/<Config>/xinsp-backend.exe), the Linux/macOS
+    // Ninja build is single-config (build/xinsp-backend). Probe both, Release
+    // first — same convention as ui-components/test/backend-exe.mjs and
+    // tests/fuzz/_common.py.
+    const exe = process.platform === 'win32' ? 'xinsp-backend.exe' : 'xinsp-backend';
+    const buildDirs = (root: string) => [
+        path.join(root, 'backend', 'build', 'Release', exe),
+        path.join(root, 'backend', 'build', 'Debug', exe),
+        path.join(root, 'backend', 'build', exe),
     ];
 
-    // Also check workspace folders.
+    const candidates = [
+        // Dev tree: vscode-extension/ is sibling of backend/
+        ...buildDirs(path.join(context.extensionPath, '..')),
+        // Packaged: exe shipped next to extension
+        path.join(context.extensionPath, 'backend', exe),
+    ];
+
+    // Also check workspace folders, walking up to find the xInsp2 root.
     for (const wf of vscode.workspace.workspaceFolders ?? []) {
-        candidates.push(path.join(wf.uri.fsPath, 'backend', 'build', 'Release', 'xinsp-backend.exe'));
-        // Walk up from workspace to find xInsp2 root
-        candidates.push(path.join(wf.uri.fsPath, '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'));
-        candidates.push(path.join(wf.uri.fsPath, '..', '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'));
+        candidates.push(...buildDirs(wf.uri.fsPath));
+        candidates.push(...buildDirs(path.join(wf.uri.fsPath, '..')));
+        candidates.push(...buildDirs(path.join(wf.uri.fsPath, '..', '..')));
     }
 
     const fs = require('fs');
@@ -203,7 +214,7 @@ function findBackendExe(context: vscode.ExtensionContext): string {
             return resolved;
         }
     }
-    return 'xinsp-backend.exe';
+    return exe;
 }
 
 // Render a plugin's I/O contract (from its plugin.json `manifest` block) as a
