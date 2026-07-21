@@ -9,16 +9,19 @@
       "symbol": "xi::pluginlet::Controls",
       "include": "<controls/controls.hpp>",
       "delivery": "header — a host member; host delegates get_def/set_def to it",
-      "status": "IMPLEMENTED — test_controls (8 tests): schema tree emit, set_def clamp/enum-reject/absent-tolerant, button/readout unwritable, snapshot typing, set_def/snapshot concurrency"
+      "status": "IMPLEMENTED — test_controls (14 tests): schema tree emit, layout (tabs/grid/section/span/rows/caption), widgets (slider/numpad/stepper/range/toggle/dropdown/radio/text/file/color/button/readout/view/title/label/divider), semantic types, set_def clamp/enum-reject/absent-tolerant, snapshot typing + concurrency"
     },
     "ui": {
-      "entry": "(generic $schema renderer)",
-      "symbol": "mountControls",
-      "delivery": "TS module bundled into the webui at build time",
-      "status": "DESIGN ONLY — not written (webui build world). Landing route per doc 37 prior-art: JSON-Forms-style schema/uiSchema/tester-registry + Tweakpane blades as the widget layer + a custom touch numpad (host-owned IME)."
+      "entry": "mountSchema",
+      "symbol": "mountSchema (ui-components/src/auto-panel.mjs)",
+      "delivery": "vanilla ES module in @xinsp2/components; renders the $schema with the built xi-* custom elements, wired to set_instance_def",
+      "status": "IMPLEMENTED (renderer logic) — schema-panel.node.mjs (5 tests). Dedicated xi-stepper/xi-range/xi-color/xi-file Svelte widgets + touch numpad + live-view mount into the view slot remain (frontend build world)."
     }
   },
   "contract": "contract.ts",
+  "build": {
+    "native": { "headerOnly": true, "links": ["yyjson_plugin"] }
+  },
   "requires": {
     "hostMethods": ["get_def", "set_def", "exchange"],
     "planes": []

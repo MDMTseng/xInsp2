@@ -42,6 +42,35 @@ set(CMAKE_SHARED_LIBRARY_PREFIX "xi-")
 set(XI_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
 set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 
+# xi_use_pluginlet(<target> <name>) — pull a pluginlet into a plugin build from its
+# manifest (pluginlets/<name>/pluginlet.json). ONE line replaces the hand-written
+# include/link (doc 37 dev-UX "include the plet folder when compiling the plugin"):
+# adds the pluginlets/ include root (so `<name/name.hpp>` resolves) plus XI_INCLUDE/
+# XI_VENDOR, and links whatever `build.native.links` the manifest declares. The
+# manifest is the single source of truth — no per-plugin knowledge of the plet's deps.
+set(XI_PLUGINLETS ${CMAKE_CURRENT_SOURCE_DIR}/../pluginlets)
+function(xi_use_pluginlet target name)
+    target_include_directories(${target} PRIVATE ${XI_PLUGINLETS} ${XI_INCLUDE} ${XI_VENDOR})
+    set(_manifest ${XI_PLUGINLETS}/${name}/pluginlet.json)
+    if(NOT EXISTS ${_manifest})
+        message(WARNING "xi_use_pluginlet(${target} ${name}): no manifest at ${_manifest}")
+        return()
+    endif()
+    file(READ ${_manifest} _json)
+    string(JSON _links ERROR_VARIABLE _e GET "${_json}" build native links)
+    if(_e OR NOT _links)
+        return()   # header-only plet with no extra link deps
+    endif()
+    string(JSON _n LENGTH "${_links}")
+    if(_n GREATER 0)
+        math(EXPR _last "${_n} - 1")
+        foreach(_i RANGE ${_last})
+            string(JSON _lib GET "${_links}" ${_i})
+            target_link_libraries(${target} PRIVATE ${_lib})
+        endforeach()
+    endif()
+endfunction()
+
 # libjpeg-turbo — opt-in, MIRRORING backend/CMakeLists.txt. polaris2 ENCODE
 # eviction: turbojpeg's direct SIMD JPEG encoder LEAVES the backend/core and
 # lands in the imgcodec LIB PLUGIN (the xi.jpeg.encode provider). Same switch,
@@ -154,13 +183,10 @@ set_target_properties(data_output PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/data_output
 )
 
-# controls_demo — def surface = the controls pluginlet (doc 37). Uses xi_json
-# (yyjson) for the def marshalling and the pluginlets/ include root for
-# <controls/controls.hpp>.
+# controls_demo — def surface = the controls pluginlet (doc 37). One line pulls the
+# plet in from its manifest (include root + yyjson link), no hand-wiring.
 add_library(controls_demo SHARED controls_demo/controls_demo.cpp)
-target_link_libraries(controls_demo PRIVATE yyjson_plugin)
-target_include_directories(controls_demo PRIVATE
-    ${XI_INCLUDE} ${XI_VENDOR} ${CMAKE_CURRENT_SOURCE_DIR}/../pluginlets)
+xi_use_pluginlet(controls_demo controls)
 set_target_properties(controls_demo PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/controls_demo
     LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/controls_demo
