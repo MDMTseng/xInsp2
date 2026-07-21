@@ -65,8 +65,10 @@ class Controls {
         int  columns = 0;                 // grid container: column count (0 = not a grid)
         std::vector<std::unique_ptr<Node>> children;
         std::string key, command, label, widget, channel;   // leaf
+        std::string key2;                 // range: the HIGH-bound key (key = low)
+        std::string sem;                  // semantic type hint (threshold/gain/roi/…)
         Kind kind = Kind::Float;
-        double lo = 0, hi = 0;
+        double lo = 0, hi = 0, step = 0;
         std::vector<std::string> options;
         int  span = 0;                    // width in grid columns (0 = default/full)
         int  rows = 0;                    // height in grid rows   (0 = 1)
@@ -119,13 +121,48 @@ public:
         if (last_added_) last_added_->label = std::move(text);
         return *this;
     }
+    // Semantic type of the LAST-added control (threshold / gain / roi / angle /
+    // percent / distance / …). A HINT, orthogonal to the widget: the renderer uses
+    // it for units + formatting + which touch editor, so the same semantic looks
+    // the same across every plugin — the consistency lever (doc 37 prior-art:
+    // Blender subtype).
+    Controls& sem(std::string type) {
+        if (last_added_) last_added_->sem = std::move(type);
+        return *this;
+    }
 
     // ---- control builders (leaves) ---------------------------------------
     Controls& slider(std::string key, double def, double lo, double hi) {
-        return num_(std::move(key), def, lo, hi, "slider");
+        return num_(std::move(key), def, lo, hi, "slider", 0);
     }
     Controls& numpad(std::string key, double def, double lo, double hi) {
-        return num_(std::move(key), def, lo, hi, "numpad");   // touch numeric entry
+        return num_(std::move(key), def, lo, hi, "numpad", 0);   // touch numeric entry
+    }
+    // Integer +/- stepper: a bounded numeric with a fixed increment (touch-precise
+    // for counts — caliper count, N — where a slider is fiddly).
+    Controls& stepper(std::string key, double def, double lo, double hi, double step = 1) {
+        return num_(std::move(key), def, lo, hi, "stepper", step);
+    }
+    // A [low, high] band bound to TWO def keys (one dual-handle control). Both keys
+    // are Float params clamped to [lo, hi] — the common vision intensity/size band.
+    Controls& range(std::string key_lo, std::string key_hi,
+                    double def_lo, double def_hi, double lo, double hi) {
+        auto* n = add_leaf_(Kind::Float, key_lo, "range");
+        n->key2 = key_hi; n->lo = lo; n->hi = hi;
+        leaf_by_key_[key_hi] = n;                            // both keys validate to this node
+        values_[key_lo] = Value{Kind::Float, clampd_(def_lo, lo, hi), false, ""};
+        values_[key_hi] = Value{Kind::Float, clampd_(def_hi, lo, hi), false, ""};
+        return *this;
+    }
+    Controls& file(std::string key, std::string def = "") {
+        add_leaf_(Kind::Str, key, "file");
+        values_[key] = Value{Kind::Str, 0, false, std::move(def)};
+        return *this;
+    }
+    Controls& color(std::string key, std::string def = "#000000") {
+        add_leaf_(Kind::Str, key, "color");
+        values_[key] = Value{Kind::Str, 0, false, std::move(def)};
+        return *this;
     }
     Controls& toggle(std::string key, bool def) {
         auto* n = add_leaf_(Kind::Bool, key, "toggle");
@@ -290,9 +327,9 @@ private:
         if (!key.empty()) leaf_by_key_[key] = p;
         return p;
     }
-    Controls& num_(std::string key, double def, double lo, double hi, const char* widget) {
+    Controls& num_(std::string key, double def, double lo, double hi, const char* widget, double step) {
         auto* n = add_leaf_(Kind::Float, key, widget);
-        n->lo = lo; n->hi = hi;
+        n->lo = lo; n->hi = hi; n->step = step;
         values_[key] = Value{Kind::Float, clampd_(def, lo, hi), false, ""};
         return *this;
     }
@@ -338,10 +375,13 @@ private:
         } else {
             o.set("widget", n.widget.c_str());
             if (!n.key.empty())     o.set("key", n.key.c_str());
+            if (!n.key2.empty())    o.set("key2", n.key2.c_str());         // range high key
             if (!n.command.empty()) o.set("command", n.command.c_str());
             if (!n.channel.empty()) o.set("channel", n.channel.c_str());   // view slot
             if (!n.label.empty())   o.set("label", n.label.c_str());
-            if (n.kind == Kind::Float) { o.set("min", n.lo); o.set("max", n.hi); }
+            if (!n.sem.empty())     o.set("sem", n.sem.c_str());           // semantic type
+            if (n.kind == Kind::Float) { o.set("min", n.lo); o.set("max", n.hi);
+                                         if (n.step > 0) o.set("step", n.step); }
             if (n.kind == Kind::Enum) {
                 Json opts = Json::array();
                 for (const auto& s : n.options) opts.push(s.c_str());

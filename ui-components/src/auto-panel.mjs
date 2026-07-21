@@ -179,9 +179,13 @@ export { TAG as CONTROL_TAGS };
 // exchange command; readout is a plugin-pushed read-only value; view is a
 // live-view mount slot; title/label/divider are presentation-only.
 
+// Map a $schema widget to an existing xi-* control type. stepper/file/color have
+// no dedicated xi-* widget yet, so they degrade to the nearest one (number/text)
+// — the semantic (`sem`) + step ride along so a future xi-stepper/xi-file/xi-color
+// can pick them up without any schema change.
 const SCHEMA_WIDGET_TYPE = {
-  slider: "slider", numpad: "number", toggle: "toggle",
-  dropdown: "dropdown", radio: "radio", text: "text",
+  slider: "slider", numpad: "number", stepper: "number", toggle: "toggle",
+  dropdown: "dropdown", radio: "radio", text: "text", file: "text", color: "text",
 };
 
 // opts: { client, instance }. Reads the instance def (flat values + $schema),
@@ -298,10 +302,28 @@ export async function mountSchema(host, opts) {
       });
       applyBox(b, node); parent.appendChild(b); return;
     }
-    // wired value control (slider/numpad/toggle/dropdown/radio/text)
+    // range: one control bound to TWO keys (key = low, key2 = high) — until a
+    // dedicated xi-range exists, render two wired numeric controls.
+    if (w === "range") {
+      const wrap = doc.createElement("div"); wrap.className = "xi-range";
+      if (node.sem) wrap.dataset.sem = node.sem;
+      for (const [k, suffix] of [[node.key, "min"], [node.key2, "max"]]) {
+        if (!k) continue;
+        const el = makeControlEl(doc, { type: "number", key: k,
+          label: node.label ? `${node.label} ${suffix}` : k, min: node.min, max: node.max, step: node.step },
+          (value) => pushDef(k, value));
+        wrap.appendChild(el);
+        if (k in state) el.value = state[k];
+        bound.push({ el, key: k });
+      }
+      applyBox(wrap, node); parent.appendChild(wrap); return;
+    }
+    // wired value control (slider/numpad/stepper/toggle/dropdown/radio/text/file/color)
     const type = SCHEMA_WIDGET_TYPE[w] || "number";
     const el = makeControlEl(doc, { type, key: node.key, label: node.label,
       min: node.min, max: node.max, step: node.step }, (value) => pushDef(node.key, value));
+    if (node.sem) el.setAttribute("data-sem", node.sem);        // semantic hint for styling/units
+    if (w !== SCHEMA_WIDGET_TYPE[w]) el.setAttribute("data-widget", w);  // preserve intent (stepper/file/color)
     const wrap = doc.createElement("div"); wrap.className = "xi-control";
     wrap.appendChild(el); applyBox(wrap, node); parent.appendChild(wrap);
     if (node.options != null) el.options = node.options;

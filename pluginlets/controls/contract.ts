@@ -43,10 +43,14 @@ export type Widget =
   // --- value-bearing (bound to a def key) ---
   | "slider"    // numeric, min/max, drag
   | "numpad"    // numeric, min/max, TOUCH keypad entry (host-owned IME)
+  | "stepper"   // numeric, min/max + `step` — +/- increment (touch-precise counts)
+  | "range"     // numeric BAND: `key` = low, `key2` = high, both clamped to min/max
   | "toggle"    // boolean
   | "dropdown"  // enum, options[] — pick one, collapsed
   | "radio"     // enum, options[] — pick one, all shown (same data as dropdown)
   | "text"      // string
+  | "file"      // string path (a file/model picker)
+  | "color"     // string hex color
   // --- action ---
   | "button"    // fires `command` via exchange — NOT a bound value
   // --- output (plugin-pushed, read-only) ---
@@ -65,8 +69,13 @@ export interface Control {
   type: "control";
   widget: Widget;
   key?: string;                // value/readout binding key (absent for button/title/label/divider/view)
+  key2?: string;               // range only: the HIGH-bound def key (`key` is the low)
   command?: string;            // button only: the exchange command to fire
   channel?: string;            // view only: the live-view channel to mount here
+  sem?: string;                // semantic type hint (threshold/gain/roi/angle/percent/…),
+                               // orthogonal to `widget`: drives units/format/touch editor
+                               // so the same semantic looks the same across plugins
+  step?: number;               // slider/stepper increment
   label?: string;              // the control's CAPTION (every widget may carry one so
                                // the grid reserves consistent label space; absent →
                                // renderer falls back to `key`). Also the text body of

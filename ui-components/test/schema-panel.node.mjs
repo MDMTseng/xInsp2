@@ -137,6 +137,47 @@ test("a button fires an exchange command", async () => {
   assert.deepEqual(client.ex, [{ n: "cd", c: { command: "reset" } }], "button → exchangeInstance(reset)");
 });
 
+test("extended widgets: stepper/file/color degrade + carry sem; range → two controls", async () => {
+  const $schema = { type: "root", children: [
+    { type: "control", widget: "stepper", key: "count", label: "Count", min: 0, max: 100, step: 1, sem: "count" },
+    { type: "control", widget: "file", key: "model", label: "Model" },
+    { type: "control", widget: "color", key: "tint", label: "Tint" },
+    { type: "control", widget: "range", key: "low", key2: "high", label: "Band", min: 0, max: 255, sem: "threshold" },
+    { type: "control", widget: "slider", key: "thr", label: "Threshold", min: 0, max: 255, sem: "threshold" },
+  ] };
+  const client = {
+    def: { count: 5, model: "net.onnx", tint: "#ff8800", low: 40, high: 200, thr: 128, $schema },
+    calls: [],
+    async getInstanceDef() { return { ...this.def }; },
+    async setInstanceDef(n, d) { this.calls.push(d); },
+  };
+  const host = doc.createElement("div"); host.ownerDocument = doc;
+  await mountSchema(host, { client, instance: "cd" });
+
+  // stepper/file/color degrade to number/text but preserve intent + sem
+  const stepper = byTag(host, "xi-number").find((e) => e.attributes["data-widget"] === "stepper");
+  assert.ok(stepper, "stepper degraded to xi-number, data-widget preserved");
+  assert.equal(stepper.attributes.step, "1", "stepper step carried");
+  assert.equal(stepper.attributes["data-sem"], "count", "sem carried on the element");
+  assert.ok(byTag(host, "xi-text").some((e) => e.attributes["data-widget"] === "file"), "file → xi-text");
+  assert.ok(byTag(host, "xi-text").some((e) => e.attributes["data-widget"] === "color"), "color → xi-text");
+  assert.ok(byTag(host, "xi-slider").some((e) => e.attributes["data-sem"] === "threshold"), "slider carries sem");
+
+  // range → two numeric controls, one per key, both seeded
+  const band = byClass(host, "xi-range")[0];
+  assert.ok(band, "range wrapper");
+  assert.equal(band.dataset.sem, "threshold");
+  const nums = band.children;
+  assert.equal(nums.length, 2, "two controls for the band");
+  assert.equal(nums[0].value, 40); assert.equal(nums[1].value, 200);
+
+  // editing the high handle patches only its key
+  nums[1].dispatchEvent(new CustomEvent("change", { detail: { value: 180 } }));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(client.calls.at(-1).high, 180, "band high patched");
+  assert.equal(client.calls.at(-1).low, 40, "band low preserved");
+});
+
 test("no $schema falls back to the flat mountPanel path", async () => {
   const client = {
     def: { width: 640, streaming: true },

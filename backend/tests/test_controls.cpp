@@ -283,6 +283,64 @@ XI_TEST(live_view_slot_in_grid) {
     XI_EXPECT(c.snapshot().f("gain") > 1.99 && c.snapshot().f("gain") < 2.01);
 }
 
+// stepper / file / color widgets + a semantic-type hint on a control.
+XI_TEST(extended_widgets_and_sem) {
+    Controls c;
+    c.stepper("count", 5, 0, 100, 1).caption("Count").sem("count")
+     .file("model", "net.onnx").caption("Model")
+     .color("tint", "#ff8800").caption("Tint")
+     .slider("thr", 128, 0, 255).caption("Threshold").sem("threshold");
+
+    Json d = Json::parse(c.get_def());
+    XI_EXPECT_EQ(d["count"].as_int(-1), 5);
+    XI_EXPECT_EQ(d["model"].as_string("?"), std::string("net.onnx"));
+    XI_EXPECT_EQ(d["tint"].as_string("?"), std::string("#ff8800"));
+
+    std::string w_count, sem_count, sem_thr; double step_count = -1;
+    std::function<void(const Json&)> walk = [&](const Json& n) {
+        auto k = n["key"].as_string();
+        if (k == "count") { w_count = n["widget"].as_string(); sem_count = n["sem"].as_string(); step_count = n["step"].as_double(-1); }
+        if (k == "thr")   { sem_thr = n["sem"].as_string(); }
+        Json kids = n["children"]; for (int i = 0;; ++i) { Json ch = kids[i]; if (!ch.valid()) break; walk(ch); }
+    };
+    walk(d["$schema"]);
+    XI_EXPECT_EQ(w_count, std::string("stepper"));
+    XI_EXPECT(step_count > 0.99 && step_count < 1.01);       // stepper carries its step
+    XI_EXPECT_EQ(sem_count, std::string("count"));           // semantic hint emitted
+    XI_EXPECT_EQ(sem_thr, std::string("threshold"));
+
+    // stepper clamps like any numeric
+    c.set_def(R"({"count": 999})");
+    XI_EXPECT_EQ(c.snapshot().i("count"), 100);
+}
+
+// range: one widget bound to two def keys; both clamp to the shared [lo,hi].
+XI_TEST(range_two_keys_clamp) {
+    Controls c;
+    c.range("low", "high", 40, 200, 0, 255).caption("Intensity band").sem("threshold");
+
+    Json d = Json::parse(c.get_def());
+    XI_EXPECT_EQ(d["low"].as_int(-1), 40);
+    XI_EXPECT_EQ(d["high"].as_int(-1), 200);
+
+    bool found = false; std::string k2;
+    std::function<void(const Json&)> walk = [&](const Json& n) {
+        if (n["widget"].as_string() == "range") { found = true; k2 = n["key2"].as_string();
+            XI_EXPECT_EQ(n["key"].as_string(), std::string("low"));
+            XI_EXPECT_EQ(n["min"].as_int(-1), 0); XI_EXPECT_EQ(n["max"].as_int(-1), 255); }
+        Json kids = n["children"]; for (int i = 0;; ++i) { Json ch = kids[i]; if (!ch.valid()) break; walk(ch); }
+    };
+    walk(d["$schema"]);
+    XI_EXPECT(found);
+    XI_EXPECT_EQ(k2, std::string("high"));                   // one widget, two keys
+
+    // both keys clamp to [0,255]
+    c.set_def(R"({"low": -20, "high": 900})");
+    auto s = c.snapshot();
+    XI_EXPECT_EQ(s.i("low"), 0);
+    XI_EXPECT_EQ(s.i("high"), 255);
+}
+
 // snapshot returns typed values lock-free for the caller.
 XI_TEST(snapshot_types) {
     Controls c; build(c);
