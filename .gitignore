@@ -2,6 +2,8 @@ build/
 **/build/
 build-linux/
 **/build-linux/
+build_plugins/
+**/build_plugins/
 *.obj
 *.exe
 *.dll
