@@ -10,8 +10,12 @@ section before assuming any of it exists.
 Revision 2 (2026-07-20) folded in a review pass that overturned three positions
 from revision 1. Revision 3 (2026-07-21) adds the overlay plet, the controls plet
 (the default plugin UI), record keying, plet settings persistence, the additive
-invariant, and a prior-art survey — and overturned two more positions. See the
-**Corrections log**. Everything added in rev 3 is DESIGN ONLY (no code) per CT.
+invariant, and a prior-art survey — and overturned two more positions. Revision 4
+(2026-07-21) captures the pluginlet-as-package developer experience (see
+"Developer experience"), reflecting landed code: the controls native+webui halves,
+controls_demo (verified live), stepper/range/file/color widgets + semantic types,
+and the `xi_use_pluginlet` / `plugin.json "pluginlets"` build wiring. See the
+**Corrections log**. Items still marked DESIGN ONLY below are unbuilt.
 
 ## The observation (CT)
 
@@ -536,6 +540,91 @@ skeleton + Tweakpane blades as the widget layer + a custom touch numpad; **nativ
 ControlP5. Licenses of the borrow-from set are MIT/Apache (Tweakpane, Leva, JSON
 Forms, RJSF); ControlP5 LGPL and Blender GPL are design references only.
 
+## Developer experience: the pluginlet as a package
+
+A pluginlet is, to a plugin author, **a fixed-structure folder you pull into your
+plugin build** — and the same folder feeds the webui and the runtime. The design
+goal is that **90% of plugins never write UI code**: they declare params and get a
+consistent panel, and consistency is the free byproduct of everyone going through
+the same constrained path ("declare, don't draw").
+
+### A plet is a folder + a manifest (the manifest is the index)
+
+```
+pluginlets/<name>/
+├── pluginlet.json      the INDEX: halves / build / requires / version / contract
+├── <name>.hpp          native half (header-only, or + .cpp)
+├── <name>.ui.ts|.mjs   webui half
+├── contract.ts         the shared contract (single source of truth)
+├── assets/  (opt)      icons, or the .wasm for a logic-bridge plet
+└── test/    (opt)      plet-local tests
+```
+
+`pluginlet.json` is not documentation — tooling reads it. It carries `halves`
+(where each half's entry is), `build.native` (link deps), `requires` (capabilities/
+planes/host methods), `version`, and `contract`. The folder layout can be flat or
+nested; the manifest is what tooling resolves against.
+
+### One declaration, three consumers
+
+A plugin opts into a plet with ONE line in its `plugin.json`:
+
+```json
+"pluginlets": ["controls"]
+```
+
+That single declaration drives three separate consumers — the "one name, three
+roles" pattern again (identity / build address / bind address):
+
+| consumer | what it does with `"pluginlets"` | status |
+|---|---|---|
+| **C++ build** | `xi_wire_pluginlets(target dir)` reads it → `xi_use_pluginlet(target <name>)` per entry → applies the plet's include root + `build.native.links` from its manifest | **landed** |
+| **webui build** | bundle each plet's `ui` half + register its widgets | not built |
+| **runtime** | the host knows which plets a plugin uses → the UI auto-mounts `mountSchema` / a live-view into the `view` slot | not built |
+
+The C++ consumer is landed: `xi_use_pluginlet` / `xi_wire_pluginlets`
+(plugins/CMakeLists.txt) turn "declare the plet in plugin.json" into the only step —
+no per-plugin CMake edit, no per-plugin knowledge of the plet's deps. controls_demo
+builds purely from its `"pluginlets":["controls"]`.
+
+### The DX surface (what exists, what's missing)
+
+| DX aspect | state |
+|---|---|
+| **① one-step include** | ✅ `xi_use_pluginlet` + `plugin.json` `"pluginlets"` → `xi_wire_pluginlets` |
+| **② dependency validation** | ⚠️ manifest has `requires`; nothing checks it (warn if live-view used without expose) |
+| **③ versioning** | ⚠️ manifest `version` + runtime `$v`/`$rev`; no plugin-side pin/compat check |
+| **④ scaffold** | ❌ `xinsp2-plugin` skill should generate a Controls-based plugin (UI out of the box); a `new-pluginlet` generator |
+| **⑤ authoring loop** | ⚠️ `recompile_project_plugin` hot-reload + `$rev` structural re-render exist; no edit→rebuild→re-render watch |
+| **⑥ plet-local tests** | ⚠️ tests exist (test_controls, schema-panel.node) but live in backend/ui-components, not the plet's `test/` |
+| **⑦ vendoring** | ✅-ish by construction (self-contained folder + declaration); custom-element widgets + vanilla renderer make the UI half host-agnostic |
+| **⑧ discoverability** | ⚠️ `contract.ts` is the source of truth; no cheatsheet / `list-pluginlets` index |
+
+### The "90% kit" — consistency by construction
+
+The controls plet is the opinionated default UI kit. Consistency comes from three
+shared, non-optional things, not from a style guide:
+
+- **one renderer** (`mountSchema`) + **one theme** (vscode-theme.css) → identical
+  look, auto light/dark, touch-ready, no per-plugin CSS;
+- **a fixed widget vocabulary** (contract.ts) — no raw HTML on the happy path, so a
+  plugin *can't* drift;
+- **semantic types** (`.sem("threshold"/"gain"/"roi"/…)`, orthogonal to the widget)
+  → the same semantic renders the same units/format/touch-editor everywhere.
+
+Coverage aims at 90%-no-custom-widget: slider / numpad / stepper / range / toggle /
+dropdown / radio / text / file / color value controls, button / readout / view,
+title / label / divider, in tabs / grid / sections with span/rows/caption. The 10%
+that need more escape to a custom widget (a `.svelte` custom element) or a vanilla
+panel — a deliberately separate tier that does not dilute the default.
+
+**Framework note:** the widgets are Svelte 5 compiled to standard **custom
+elements** (`<xi-slider>` …); the renderer/orchestration layer (`mountSchema`,
+ws-client) is **vanilla ES modules**. So Svelte is an implementation detail of the
+widgets — a plet's UI half is host-agnostic and portable (any HTML/VS-Code-webview/
+React host uses `<xi-*>` without adopting Svelte). This suits "plet = distributable
+folder" better than committing the whole UI to one framework.
+
 ## Corrections log (what this doc got wrong first)
 
 Recorded because the discarded positions are attractive and will be re-proposed:
@@ -599,20 +688,21 @@ the sections above as describing shipped behaviour:
   changed. Naming style (dotted vs slashed) is an OPEN question.
 - **the overlay plet** — vocabulary (point/line/…/text + verdict styling), the native
   `Overlay` builder, and the generic webui renderer + custom draw hook: none written.
-- **the controls plet UI half** — `mountSchema` (ui-components/src/auto-panel.mjs)
-  now renders the `$schema` tree (tabs/grid/sections + slider/numpad/toggle/dropdown/
-  radio/text/button/readout/view/title/label/divider) with the existing xi-* widgets,
-  wired to set_instance_def like mountPanel, falling back to the flat path when no
-  `$schema` is present. Logic verified by test/schema-panel.node.mjs (4 tests, pure-
-  Node fake DOM — no build). STILL DESIGN ONLY: the real Svelte xi-* widget rendering
-  (needs `npm run build`), the touch numpad, and the live-view mount into the `view`
-  slot's `data-channel`.
-- **the controls plet** — native half `xi::pluginlet::Controls` is now **LANDED**
-  (`pluginlets/controls/controls.hpp` + `contract.ts` + manifest; `test_controls`,
-  8 tests: `$schema` tree emit, set_def clamp/enum-reject/absent-tolerant,
-  button/readout unwritable, snapshot typing, set_def/snapshot concurrency). Still
-  DESIGN ONLY: the `$schema` renderer + touch numpad (webui build world) and native
-  dynamic-tree `$rev` bumping (the current tree is static, `$rev` constant).
+- **the controls plet — LANDED (native + webui renderer + a live plugin).** Native
+  `xi::pluginlet::Controls` (`pluginlets/controls/controls.hpp` + `contract.ts` +
+  manifest; `test_controls`, 14 tests). Webui `mountSchema`
+  (ui-components/src/auto-panel.mjs) renders the `$schema` tree with the real built
+  xi-* Svelte custom elements, wired to set_instance_def (`schema-panel.node.mjs`,
+  5 tests + a Playwright render of both tabs). `controls_demo` (a real plugin) proves
+  get_def→`$schema` / set_def-validation / readouts live in the running backend, and
+  builds purely from its `plugin.json "pluginlets"`. Widgets: slider/numpad/stepper/
+  range/toggle/dropdown/radio/text/file/color + button/readout/view + title/label/
+  divider, with semantic types (`sem`). STILL DESIGN ONLY within it: the dedicated
+  Svelte **xi-stepper/xi-range/xi-color/xi-file** widgets (stepper→number, file/color→
+  text, range→two numbers degrade today, carrying `data-widget`/`data-sem`/`step`);
+  wiring `sem` to units/format/touch editors; the **touch numpad** (host-owned IME);
+  the **live-view mount** into the `view` slot's `data-channel`; native dynamic-tree
+  `$rev` bumping (the tree is static today, `$rev` constant).
 - **plet settings persistence** — the delegated `plet/<fqname>` def slice: convention
   only, no helper written.
 - **generalizing expose's upstream relay** from the hard-coded `viewport` to a generic
