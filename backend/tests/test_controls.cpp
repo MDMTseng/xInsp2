@@ -152,6 +152,49 @@ XI_TEST(button_and_readout_not_writable) {
     XI_EXPECT(!d["reset"].valid());                    // no value key for the button
 }
 
+// Presentation leaves (title / label / divider) appear in the schema but carry no
+// value; radio is enum data with a radio widget.
+XI_TEST(presentation_and_radio_widgets) {
+    Controls c;
+    c.title("Thresholds")
+     .radio("polarity", "rising", {"rising", "falling", "any"})
+     .divider()
+     .label("Advanced options below")
+     .slider("min_strength", 20, 0, 255);
+
+    // collect every leaf widget in the tree
+    Json d = Json::parse(c.get_def());
+    std::vector<std::string> widgets;
+    std::string radio_options_seen;
+    std::function<void(const Json&)> walk = [&](const Json& n) {
+        if (n["type"].as_string() == "control") {
+            widgets.push_back(n["widget"].as_string());
+            if (n["key"].as_string() == "polarity") radio_options_seen = n["options"][1].as_string();
+        }
+        Json kids = n["children"];
+        for (int i = 0;; ++i) { Json k = kids[i]; if (!k.valid()) break; walk(k); }
+    };
+    walk(d["$schema"]);
+
+    auto has = [&](const char* w) {
+        for (auto& x : widgets) if (x == w) return true; return false; };
+    XI_EXPECT(has("title"));
+    XI_EXPECT(has("radio"));
+    XI_EXPECT(has("divider"));
+    XI_EXPECT(has("label"));
+    XI_EXPECT_EQ(radio_options_seen, std::string("falling"));   // radio carries options
+
+    // title/label/divider have no key → no value in get_def; radio does.
+    XI_EXPECT(!d["Thresholds"].valid());
+    XI_EXPECT_EQ(d["polarity"].as_string("?"), std::string("rising"));
+
+    // radio validates like enumsel
+    c.set_def(R"({"polarity": "falling"})");
+    XI_EXPECT_EQ(c.snapshot().s("polarity"), std::string("falling"));
+    c.set_def(R"({"polarity": "sideways"})");                     // not an option
+    XI_EXPECT_EQ(c.snapshot().s("polarity"), std::string("falling"));
+}
+
 // snapshot returns typed values lock-free for the caller.
 XI_TEST(snapshot_types) {
     Controls c; build(c);

@@ -36,23 +36,31 @@ export interface Container {
 }
 
 export type Widget =
+  // --- value-bearing (bound to a def key) ---
   | "slider"    // numeric, min/max, drag
   | "numpad"    // numeric, min/max, TOUCH keypad entry (host-owned IME)
   | "toggle"    // boolean
-  | "dropdown"  // enum, options[]
+  | "dropdown"  // enum, options[] — pick one, collapsed
+  | "radio"     // enum, options[] — pick one, all shown (same data as dropdown)
   | "text"      // string
+  // --- action ---
   | "button"    // fires `command` via exchange — NOT a bound value
-  | "readout";  // read-only output the plugin pushes; not writable via set_def
+  // --- output (plugin-pushed, read-only) ---
+  | "readout"   // read-only output the plugin pushes; not writable via set_def
+  // --- presentation-only (no value, no key) ---
+  | "title"     // a section heading (text in `label`)
+  | "label"     // a paragraph of help / body text (text in `label`)
+  | "divider";  // a horizontal rule
 
 export interface Control {
   type: "control";
   widget: Widget;
-  key?: string;                // value/readout binding key (absent for buttons)
+  key?: string;                // value/readout binding key (absent for button/title/label/divider)
   command?: string;            // button only: the exchange command to fire
-  label?: string;
+  label?: string;              // control label, or the text of a title/label leaf
   min?: number;                // slider / numpad
   max?: number;
-  options?: string[];          // dropdown
+  options?: string[];          // dropdown / radio
 }
 
 /** Validation is DECLARED once (min/max/options) and enforced on BOTH sides: the

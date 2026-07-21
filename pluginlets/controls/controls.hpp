@@ -55,7 +55,8 @@ namespace xi::pluginlet {
 
 class Controls {
     // Declared first so the public Snapshot (below) can name Value.
-    enum class Kind { Float, Bool, Enum, Str, Button, Readout };
+    // Static = a presentation-only leaf (title / label / divider): no value, no key.
+    enum class Kind { Float, Bool, Enum, Str, Button, Readout, Static };
     struct Value { Kind kind = Kind::Float; double num = 0; bool b = false; std::string s; };
     struct Node {
         bool container = false;
@@ -105,11 +106,13 @@ public:
         values_[key] = Value{Kind::Bool, 0, def, ""};
         (void)n; return *this;
     }
+    // enumsel = a DROPDOWN; radio = the SAME pick-one-of-N data as a radio group
+    // (presentation differs, the contract is identical).
     Controls& enumsel(std::string key, std::string def, std::vector<std::string> options) {
-        auto* n = add_leaf_(Kind::Enum, key, "dropdown");
-        n->options = std::move(options);
-        values_[key] = Value{Kind::Enum, 0, false, std::move(def)};
-        return *this;
+        return enum_(std::move(key), std::move(def), std::move(options), "dropdown");
+    }
+    Controls& radio(std::string key, std::string def, std::vector<std::string> options) {
+        return enum_(std::move(key), std::move(def), std::move(options), "radio");
     }
     Controls& text(std::string key, std::string def) {
         add_leaf_(Kind::Str, key, "text");
@@ -132,6 +135,18 @@ public:
         values_[key] = Value{Kind::Readout, 0, false, ""};
         return *this;
     }
+
+    // ---- presentation-only leaves (no value, no key) ---------------------
+    // A section heading, a paragraph of help/body text, a horizontal rule. They ride
+    // the schema tree for the renderer but hold no config — get_def/set_def ignore
+    // them (they carry no key).
+    Controls& title(std::string text) {
+        add_leaf_(Kind::Static, "", "title")->label = std::move(text); return *this;
+    }
+    Controls& label(std::string text) {
+        add_leaf_(Kind::Static, "", "label")->label = std::move(text); return *this;
+    }
+    Controls& divider() { add_leaf_(Kind::Static, "", "divider"); return *this; }
 
     // ---- the delegated def surface ---------------------------------------
     // {<key>:<value>…, "$v":N, "$rev":R, "$schema":<tree>}
@@ -241,6 +256,13 @@ private:
         auto* n = add_leaf_(Kind::Float, key, widget);
         n->lo = lo; n->hi = hi;
         values_[key] = Value{Kind::Float, clampd_(def, lo, hi), false, ""};
+        return *this;
+    }
+    Controls& enum_(std::string key, std::string def, std::vector<std::string> options,
+                    const char* widget) {
+        auto* n = add_leaf_(Kind::Enum, key, widget);
+        n->options = std::move(options);
+        values_[key] = Value{Kind::Enum, 0, false, std::move(def)};
         return *this;
     }
 
