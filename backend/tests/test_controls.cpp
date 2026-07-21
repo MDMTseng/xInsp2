@@ -195,6 +195,31 @@ XI_TEST(presentation_and_radio_widgets) {
     XI_EXPECT_EQ(c.snapshot().s("polarity"), std::string("falling"));
 }
 
+// Every control can carry a caption (emitted as `label`) for grid layout.
+XI_TEST(caption_on_controls) {
+    Controls c;
+    c.slider("fps", 30, 1, 60).caption("Frames / s")
+     .toggle("invert", false).caption("Invert")
+     .button("run", "Run");                    // button's own label
+
+    Json d = Json::parse(c.get_def());
+    std::string cap_fps, cap_invert, cap_run;
+    std::function<void(const Json&)> walk = [&](const Json& n) {
+        auto k = n["key"].as_string();
+        if (k == "fps")    cap_fps    = n["label"].as_string();
+        if (k == "invert") cap_invert = n["label"].as_string();
+        if (n["command"].as_string() == "run") cap_run = n["label"].as_string();
+        Json kids = n["children"];
+        for (int i = 0;; ++i) { Json ch = kids[i]; if (!ch.valid()) break; walk(ch); }
+    };
+    walk(d["$schema"]);
+    XI_EXPECT_EQ(cap_fps, std::string("Frames / s"));
+    XI_EXPECT_EQ(cap_invert, std::string("Invert"));
+    XI_EXPECT_EQ(cap_run, std::string("Run"));
+    // caption is presentation only — it does not become a value key
+    XI_EXPECT_EQ(d["fps"].as_int(-1), 30);
+}
+
 // Grid: a grid container carries its column count; children carry their span/rows.
 XI_TEST(grid_layout) {
     Controls c;

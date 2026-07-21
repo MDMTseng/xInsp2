@@ -61,7 +61,10 @@ export interface Control {
   widget: Widget;
   key?: string;                // value/readout binding key (absent for button/title/label/divider)
   command?: string;            // button only: the exchange command to fire
-  label?: string;              // control label, or the text of a title/label leaf
+  label?: string;              // the control's CAPTION (every widget may carry one so
+                               // the grid reserves consistent label space; absent →
+                               // renderer falls back to `key`). Also the text body of
+                               // a title/label leaf.
   min?: number;                // slider / numpad
   max?: number;
   options?: string[];          // dropdown / radio

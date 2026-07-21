@@ -111,6 +111,14 @@ public:
     // controls pack right and wrap.
     Controls& span(int cols) { if (last_added_) last_added_->span = cols; return *this; }
     Controls& rows(int n)    { if (last_added_) last_added_->rows = n;    return *this; }
+    // Caption text on the LAST-added control (slider/toggle/dropdown/… — any leaf).
+    // Every control can carry one so the grid renderer reserves consistent label
+    // space; absent, the renderer falls back to the key. (Named `caption` to avoid
+    // colliding with the static-text `label()` builder above.)
+    Controls& caption(std::string text) {
+        if (last_added_) last_added_->label = std::move(text);
+        return *this;
+    }
 
     // ---- control builders (leaves) ---------------------------------------
     Controls& slider(std::string key, double def, double lo, double hi) {
