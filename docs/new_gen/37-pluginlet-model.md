@@ -15,7 +15,9 @@ invariant, and a prior-art survey — and overturned two more positions. Revisio
 "Developer experience"), reflecting landed code: the controls native+webui halves,
 controls_demo (verified live), stepper/range/file/color widgets + semantic types,
 and the `xi_use_pluginlet` / `plugin.json "pluginlets"` build wiring. See the
-**Corrections log**. Items still marked DESIGN ONLY below are unbuilt.
+**Corrections log**. Revision 5 (2026-07-21) inverts the frontend layering — a plet
+OWNS its UI half (source), the app depends on the plet — and records the webui build
+consumer; see "Frontend layering". Items still marked DESIGN ONLY below are unbuilt.
 
 ## The observation (CT)
 
@@ -625,6 +627,71 @@ widgets — a plet's UI half is host-agnostic and portable (any HTML/VS-Code-web
 React host uses `<xi-*>` without adopting Svelte). This suits "plet = distributable
 folder" better than committing the whole UI to one framework.
 
+## Frontend layering: a plet OWNS its UI, the app depends on the plet
+
+Revision 4 still had the UI backwards: `mountSchema` lived in the app library
+(`@xinsp2/components`) and the plet borrowed it. That makes the app a shared hub
+everything couples to. **Inverted (CT): a pluginlet is a LEAF that owns its own UI;
+the app layer — extension / HMI / core — DEPENDS ON the plet when it wants that
+UI, never the reverse.** This is the same principle the codebase already applies to
+plugins (`expose` owns its UI; core is a plugin hub), extended to plets.
+
+```
+                design tokens / theme CSS          ← the real consistency contract
+                          ▲
+   controls plet                      live-view plet          ← LEAVES; own their UI
+   ui/mount-schema.mjs                ui/live-view.ui.ts
+   ui/widgets/xi-{slider,number,      ui/widgets/xi-image-{viewer,editor}
+     toggle,radio,dropdown,text}      ui/lib/{viewport,tools}.mjs
+   ui/lib/options.mjs
+                          ▲
+   @xinsp2/components (app): dashboard cards, layout engine, XiClient,
+   vscode-shim, webapp export, xi-button/badge/trace    ← extension + HMI
+```
+
+**Plets are SOURCE, both halves.** Like the native `.hpp`, the UI half ships as
+source and the CONSUMER'S build compiles it (native → the plugin's CMake via
+`xi_use_pluginlet`; UI → the webui's vite/Svelte build). A plet never ships a
+prebuilt artifact. The honest consequence, symmetric on both sides: vendoring a
+plet requires the consumer to have the toolchain — a C++ compiler for the native
+half, a Svelte/vite build for the UI half.
+
+**The webui build is the third consumer of the manifest.** `xi-pluginlet-ui` (a
+vite plugin in `ui-components/vite.config.js`) scans every
+`toolbox/pluginlets/*/pluginlet.json` for `build.ui.widgets` and exposes them as
+one virtual module, so `src/index.js` just imports `virtual:xi-pluginlet-ui`.
+Adding or removing a plet widget needs no edit in the app — exactly mirroring
+`xi_use_pluginlet` on the native side. That closes two of the three consumers from
+"One declaration, three consumers"; only the runtime auto-mount remains.
+
+**A plet must not import upward — and the build enforces it.** Moving the widgets
+proved this concretely: `xi-image-editor` imported `../lib/viewport.mjs` from the
+app layer and the build failed loudly. Each shared lib turned out to be used by
+exactly one plet's widgets, so `options.mjs` went to controls and
+`viewport.mjs`/`tools.mjs` to live-view. A plet's upward import is now a build
+error, not a silent coupling.
+
+**Consistency does NOT come from sharing component code** — that would be
+consistency by coincidence, and it dies the moment anything is reimplemented. It
+comes from three things that survive independent implementations:
+
+1. **design tokens / theme CSS** (`vscode-theme.css`) — spacing, colour, dark/light;
+2. **the declarative contract** — `$schema` + the widget vocabulary (`contract.ts`);
+3. **semantic types** (`sem`) — the same semantic renders with the same units and
+   the same touch editor everywhere, regardless of which element draws it.
+
+**Widget authoring stays Svelte, and that is not a leak.** Each widget compiles to
+a standard custom element (`<svelte:options customElement>`), so consumers use
+`<xi-slider>` with no framework of their own; Svelte is an implementation detail
+contained by the build. A plet's UI half is therefore host-agnostic and portable,
+which is what makes "plet = distributable folder" viable.
+
+**What stays in the app layer:** anything not tied to a plet — dashboard cards, the
+layout engine, `XiClient`, the vscode shim, webapp export, and the widgets no plet
+owns (`xi-button`, `xi-badge`, `xi-trace`). The app also keeps the *chooser*
+(`mountInstancePanel`: `$schema` → the plet renderer, else the flat panel) — a plet
+never falls back, because picking a renderer is not a plet's business.
+
 ## Corrections log (what this doc got wrong first)
 
 Recorded because the discarded positions are attractive and will be re-proposed:
@@ -646,6 +713,13 @@ Recorded because the discarded positions are attractive and will be re-proposed:
    ABI change per primitive. *Overturned by:* the same "zero core change" thesis this
    doc rests on. Corrected: overlay is itself a **plet**; the vocabulary is its
    contract, a new primitive is a plet version bump.
+6. **"the UI half is a module in the app library that the plet points at"** (rev 2-4)
+   — backwards: it made `@xinsp2/components` a hub every plet coupled to, and the
+   plet folder was not self-contained. *Overturned by:* CT — a plet is a LEAF that
+   owns its UI; the app (extension/HMI/core) depends on the plet. Corrected in code:
+   mountSchema + the form widgets + their libs now live in the plets, discovered by
+   the build from each manifest. Consistency comes from tokens + `$schema` + `sem`,
+   not from sharing component code.
 5. **"live-view is the first/reference pluginlet"** (rev 1 framing) — streaming is the
    fancy ~20% case. *Reframed:* the **controls plet** (schema-driven config panel) is
    the default UI ~80%+ of plugins actually need and is simpler; if anything is built
