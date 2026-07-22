@@ -157,28 +157,27 @@ test("extended widgets: stepper/file/color degrade + carry sem; range → two co
   const host = doc.createElement("div"); host.ownerDocument = doc;
   await mountSchema(host, { client, instance: "cd" });
 
-  // stepper/file/color degrade to number/text but preserve intent + sem
-  const stepper = byTag(host, "xi-number").find((e) => e.attributes["data-widget"] === "stepper");
-  assert.ok(stepper, "stepper degraded to xi-number, data-widget preserved");
+  // every widget now has its OWN element (no degrade except numpad)
+  const stepper = byTag(host, "xi-stepper")[0];
+  assert.ok(stepper, "stepper has a dedicated xi-stepper element");
   assert.equal(stepper.attributes.step, "1", "stepper step carried");
   assert.equal(stepper.attributes["data-sem"], "count", "sem carried on the element");
-  assert.ok(byTag(host, "xi-text").some((e) => e.attributes["data-widget"] === "file"), "file → xi-text");
-  assert.ok(byTag(host, "xi-text").some((e) => e.attributes["data-widget"] === "color"), "color → xi-text");
+  assert.equal(byTag(host, "xi-file").length, 1, "file → xi-file");
+  assert.equal(byTag(host, "xi-color").length, 1, "color → xi-color");
   assert.ok(byTag(host, "xi-slider").some((e) => e.attributes["data-sem"] === "threshold"), "slider carries sem");
 
-  // range → two numeric controls, one per key, both seeded
-  const band = byClass(host, "xi-range")[0];
-  assert.ok(band, "range wrapper");
-  assert.equal(band.dataset.sem, "threshold");
-  const nums = band.children;
-  assert.equal(nums.length, 2, "two controls for the band");
-  assert.equal(nums[0].value, 40); assert.equal(nums[1].value, 200);
+  // range → ONE xi-range control bound to both keys, both ends seeded
+  const band = byTag(host, "xi-range")[0];
+  assert.ok(band, "range has a dedicated dual-handle element");
+  assert.equal(band.attributes["data-sem"], "threshold");
+  assert.equal(band.attributes.min, "0"); assert.equal(band.attributes.max, "255");
+  assert.equal(band.low, 40); assert.equal(band.high, 200, "both ends seeded");
 
-  // editing the high handle patches only its key
-  nums[1].dispatchEvent(new CustomEvent("change", { detail: { value: 180 } }));
+  // one drag emits {low,high} and patches BOTH keys in a single def write
+  band.dispatchEvent(new CustomEvent("change", { detail: { low: 60, high: 180 } }));
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(client.calls.at(-1).high, 180, "band high patched");
-  assert.equal(client.calls.at(-1).low, 40, "band low preserved");
+  assert.equal(client.calls.at(-1).low, 60, "band low patched in the same write");
 });
 
 test("the plet renderer returns null when there is no $schema (it never falls back)", async () => {

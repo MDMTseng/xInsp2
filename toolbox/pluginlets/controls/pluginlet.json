@@ -32,12 +32,17 @@
       "widgets": [
         "ui/widgets/xi-slider.svelte",
         "ui/widgets/xi-number.svelte",
+        "ui/widgets/xi-stepper.svelte",
+        "ui/widgets/xi-range.svelte",
         "ui/widgets/xi-toggle.svelte",
         "ui/widgets/xi-radio.svelte",
         "ui/widgets/xi-dropdown.svelte",
-        "ui/widgets/xi-text.svelte"
+        "ui/widgets/xi-text.svelte",
+        "ui/widgets/xi-file.svelte",
+        "ui/widgets/xi-color.svelte"
       ],
-      "note": "SOURCE form — the webui build (vite/svelte) compiles these; the plet ships no artifact."
+      "note": "SOURCE form — the webui build (vite/svelte) compiles these; the plet ships no artifact.",
+      "numpad": "ui/lib/numpad.mjs — the HOST-OWNED touch keypad surface (one per page); numeric widgets request it, they do not each embed one."
     }
   },
   "requires": {

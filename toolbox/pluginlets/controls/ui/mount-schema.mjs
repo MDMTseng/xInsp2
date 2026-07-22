@@ -18,20 +18,21 @@
 //
 // Widget vocabulary + $schema shape: ../contract.ts (the single source of truth).
 
-// $schema widget -> the custom-element tag that renders it. stepper/file/color have
-// no dedicated element yet and degrade to the nearest one; the intent rides along
-// as data-widget so a future xi-stepper/xi-file/xi-color picks it up with NO schema
-// change. `range` is handled separately (it binds TWO keys).
+// $schema widget -> the custom element that renders it. Every widget now has a
+// dedicated element except `numpad`, which is xi-number plus the host-owned numpad
+// surface (lib/numpad.mjs) rather than an element of its own. `range` is handled
+// separately below: it is ONE control bound to TWO keys.
 const WIDGET_TAG = {
   slider: "xi-slider",
-  numpad: "xi-number",
-  stepper: "xi-number",
+  numpad: "xi-number",     // + touch keypad, see the numpad attribute below
+  stepper: "xi-stepper",
   toggle: "xi-toggle",
   dropdown: "xi-dropdown",
   radio: "xi-radio",
   text: "xi-text",
-  file: "xi-text",
-  color: "xi-text",
+  file: "xi-file",
+  color: "xi-color",
+  range: "xi-range",
 };
 
 // Create ONE bound control element. Attributes only — the caller appends it and
@@ -164,31 +165,37 @@ export async function mountSchema(host, opts) {
       });
       applyBox(b, node); parent.appendChild(b); return;
     }
-    // range: one control bound to TWO keys (key = low, key2 = high) — until a
-    // dedicated xi-range exists, render two wired numeric controls.
+    // range: ONE xi-range control bound to TWO keys (key = low, key2 = high). It
+    // emits {low, high} together, so a drag patches both keys in one def write —
+    // which also keeps low <= high atomically true in the stored def.
     if (w === "range") {
-      const wrap = doc.createElement("div"); wrap.className = "xi-range";
-      if (node.sem) wrap.dataset.sem = node.sem;
-      for (const [k, suffix] of [[node.key, "min"], [node.key2, "max"]]) {
-        if (!k) continue;
-        const el = makeControlEl(doc, "xi-number", {
-          label: node.label ? `${node.label} ${suffix}` : k,
-          min: node.min, max: node.max, step: node.step }, (value) => pushDef(k, value));
-        wrap.appendChild(el);
-        if (k in state) el.value = state[k];
-        bound.push({ el, key: k });
-      }
-      applyBox(wrap, node); parent.appendChild(wrap); return;
+      const el = doc.createElement("xi-range");
+      if (node.label) el.setAttribute("label", node.label);
+      for (const [a, v] of [["min", node.min], ["max", node.max], ["step", node.step]])
+        if (v != null) el.setAttribute(a, String(v));
+      if (node.sem) el.setAttribute("data-sem", node.sem);
+      el.addEventListener("change", (e) => {
+        const { low, high } = e.detail || {};
+        if (node.key && low != null) state[node.key] = low;
+        if (node.key2 && high != null) state[node.key2] = high;
+        pushDef(node.key, state[node.key]);   // one write carries both (state is patched)
+      });
+      const wrap = doc.createElement("div"); wrap.className = "xi-control";
+      wrap.appendChild(el); applyBox(wrap, node); parent.appendChild(wrap);
+      if (node.key in state) el.low = state[node.key];
+      if (node.key2 in state) el.high = state[node.key2];
+      bound.push({ el, key: node.key, key2: node.key2, range: true });
+      return;
     }
     // wired value control (slider/numpad/stepper/toggle/dropdown/radio/text/file/color)
     const tag = WIDGET_TAG[w] || "xi-number";
     const el = makeControlEl(doc, tag, { label: node.label, min: node.min,
       max: node.max, step: node.step }, (value) => pushDef(node.key, value));
     if (node.sem) el.setAttribute("data-sem", node.sem);   // semantic hint for styling/units
-    // When the widget DEGRADES to another element (numpad/stepper→xi-number,
-    // file/color→xi-text), keep the declared intent so a future dedicated element
-    // can pick it up without a schema change.
+    // `numpad` is xi-number + the host-owned touch keypad, not its own element, so
+    // record the declared intent (and let the element opt into the keypad).
     if (tag !== `xi-${w}`) el.setAttribute("data-widget", w);
+    if (w === "numpad") el.setAttribute("numpad", "");
     const wrap = doc.createElement("div"); wrap.className = "xi-control";
     wrap.appendChild(el); applyBox(wrap, node); parent.appendChild(wrap);
     if (node.options != null) el.options = node.options;
@@ -205,6 +212,11 @@ export async function mountSchema(host, opts) {
       for (const [k, v] of Object.entries(d))
         if (k !== "$schema" && k !== "$v" && k !== "$rev") state[k] = v;
       for (const b of bound) {
+        if (b.range) {                       // one control, two keys
+          if (b.key in state) b.el.low = state[b.key];
+          if (b.key2 in state) b.el.high = state[b.key2];
+          continue;
+        }
         if (!(b.key in state)) continue;
         if (b.readout) b.el.textContent = String(state[b.key]);
         else b.el.value = state[b.key];
