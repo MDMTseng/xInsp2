@@ -1,0 +1,9 @@
+{
+  "plugin": "mock_camera",
+  "config": {
+    "width": 160,
+    "height": 120,
+    "fps": 15,
+    "gain": 0.2
+  }
+}

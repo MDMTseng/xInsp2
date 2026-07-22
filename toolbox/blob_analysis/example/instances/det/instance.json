@@ -1,0 +1,9 @@
+{
+  "plugin": "blob_analysis",
+  "config": {
+    "threshold": 128,
+    "min_area": 10,
+    "max_area": 999999,
+    "invert": false
+  }
+}

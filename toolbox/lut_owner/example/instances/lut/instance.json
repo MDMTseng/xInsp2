@@ -1,0 +1,6 @@
+{
+  "plugin": "lut_owner",
+  "config": {
+    "ring_slots": 4
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "plugin": "record_save",
+  "config": {
+    "enabled": true,
+    "output_dir": "toolbox/example/instances/saver/captures",
+    "naming_rule": "ng_{count}"
+  }
+}

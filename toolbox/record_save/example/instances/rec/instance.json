@@ -1,0 +1,8 @@
+{
+  "plugin": "record_save",
+  "config": {
+    "enabled": true,
+    "output_dir": "toolbox/record_save/example/captures",
+    "naming_rule": "cap_{count}"
+  }
+}

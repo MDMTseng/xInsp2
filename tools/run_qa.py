@@ -73,6 +73,9 @@ def test_name(drv: Path) -> str:
     qa/qa_foo/driver.py              -> "qa_foo"
     toolbox/foo/example/driver.py    -> "example_foo"   (the folder is always
     named "example", so the PLUGIN supplies the identity)
+    toolbox/example/driver.py        -> "example_toolbox" (falls out of the same
+    rule: the parent of the "example" folder IS toolbox, and that example
+    belongs to the toolbox as a whole rather than to any one plugin)
     """
     if drv.parent.name == "example":
         return f"example_{drv.parents[1].name}"
@@ -86,7 +89,10 @@ def discover(filt: str):
     has the receipts. Running toolbox/<name>/example the same way as a qa_* test
     is what keeps `toolbox/<name>/example` an actual demo instead of a claim.
     """
-    dirs = sorted(QA_DIR.glob("qa_*")) + sorted((REPO / "toolbox").glob("*/example"))
+    TOOLBOX = REPO / "toolbox"
+    dirs = (sorted(QA_DIR.glob("qa_*"))
+            + sorted(TOOLBOX.glob("*/example"))       # one plugin's own demo
+            + [TOOLBOX / "example"])                  # the cross-plugin station
     return [d / "driver.py" for d in dirs
             if (d / "driver.py").exists() and (not filt or filt in test_name(d / "driver.py"))]
 

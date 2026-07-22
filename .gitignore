@@ -57,6 +57,9 @@ qa/*/backend.log
 qa/*/backend.log.err
 qa/**/backend*.log
 toolbox/**/example/backend*.log
+# Example projects that PERSIST (record_save): captures are output the demo
+# regenerates on every run, never fixtures.
+toolbox/**/example/**/captures/
 qa/**/session*.log
 qa/**/fe*.log
 qa/**/be*.log

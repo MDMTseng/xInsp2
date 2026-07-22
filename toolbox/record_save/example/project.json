@@ -1,0 +1,10 @@
+{
+  "name": "record_save_example",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam",    "plugin": "mock_camera" },
+    { "name": "rec",    "plugin": "record_save" },
+    { "name": "expose", "plugin": "expose" }
+  ],
+  "plugins": {}
+}

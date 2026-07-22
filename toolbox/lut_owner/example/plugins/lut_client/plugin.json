@@ -1,0 +1,11 @@
+{
+  "name": "lut_client",
+  "description": "The CONSUMER side of the lut_owner example: a plugin whose pack door reaches the demo.lut type owner by capability NAME through the host funnel. It never sees the lut_owner instance, its vtable, or the table object itself — only the handle entry {type,id,gen,$v}, which it forwards verbatim so the handle can ride packs. Also reports have_cap so the script can degrade when no provider is loaded.",
+  "dll": "lut_client.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "requires": [
+    { "iface": "xi.pack", "min": 1 },
+    { "iface": "xi.cap", "min": 1 }
+  ]
+}

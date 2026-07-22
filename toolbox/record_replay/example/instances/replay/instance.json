@@ -1,0 +1,8 @@
+{
+  "plugin": "record_replay",
+  "config": {
+    "enabled": true,
+    "loop": false,
+    "dir": "toolbox/record_replay/example/recorded"
+  }
+}
