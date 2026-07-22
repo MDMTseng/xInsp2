@@ -777,11 +777,12 @@ the sections above as describing shipped behaviour:
   get_def→`$schema` / set_def-validation / readouts live in the running backend, and
   builds purely from its `plugin.json "pluginlets"`. Widgets: slider/numpad/stepper/
   range/toggle/dropdown/radio/text/file/color + button/readout/view + title/label/
-  divider, with semantic types (`sem`). STILL DESIGN ONLY within it: the dedicated
-  Svelte **xi-stepper/xi-range/xi-color/xi-file** widgets (stepper→number, file/color→
-  text, range→two numbers degrade today, carrying `data-widget`/`data-sem`/`step`);
-  wiring `sem` to units/format/touch editors; the **touch numpad** (host-owned IME);
-  the **live-view mount** into the `view` slot's `data-channel`; native dynamic-tree
+  divider, with semantic types (`sem`). The dedicated **xi-stepper / xi-range /
+  xi-color / xi-file** elements and the **host-owned touch numpad**
+  (`ui/lib/numpad.mjs`, one surface per page — Qt-Virtual-Keyboard model) are now
+  LANDED too, so nothing degrades. STILL DESIGN ONLY within it: wiring `sem` to
+  units/format/touch-editor selection (it is carried, not yet acted on); the
+  **live-view mount** into the `view` slot's `data-channel`; native dynamic-tree
   `$rev` bumping (the tree is static today, `$rev` constant).
 - **plet settings persistence** — the delegated `plet/<fqname>` def slice: convention
   only, no helper written.
