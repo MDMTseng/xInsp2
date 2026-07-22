@@ -769,9 +769,11 @@ the sections above as describing shipped behaviour:
 - **the controls plet — LANDED (native + webui renderer + a live plugin).** Native
   `xi::pluginlet::Controls` (`toolbox/pluginlets/controls/controls.hpp` + `contract.ts` +
   manifest; `test_controls`, 14 tests). Webui `mountSchema`
-  (ui-components/src/auto-panel.mjs) renders the `$schema` tree with the real built
-  xi-* Svelte custom elements, wired to set_instance_def (`schema-panel.node.mjs`,
-  5 tests + a Playwright render of both tabs). `controls_demo` (a real plugin) proves
+  (`toolbox/pluginlets/controls/ui/mount-schema.mjs` — OWNED BY THE PLET, rev 5)
+  renders the `$schema` tree with the real built xi-* Svelte custom elements, wired
+  to set_instance_def (`ui/mount-schema.test.mjs`, 6 tests + a Playwright render of
+  both tabs). The plet also owns its widgets (`ui/widgets/xi-{slider,number,toggle,
+  radio,dropdown,text}.svelte`) and `ui/lib/options.mjs`. `controls_demo` (a real plugin) proves
   get_def→`$schema` / set_def-validation / readouts live in the running backend, and
   builds purely from its `plugin.json "pluginlets"`. Widgets: slider/numpad/stepper/
   range/toggle/dropdown/radio/text/file/color + button/readout/view + title/label/
@@ -792,9 +794,10 @@ the sections above as describing shipped behaviour:
 - **prior-art landing route** (JSON-Forms skeleton + Tweakpane blades + Blender-style
   native declare) — a survey conclusion, not a commitment.
 
-The one known gap in what IS built: `live_view.ui.ts` infers full-image dimensions
-from the first frame, but the native half may already have downsampled it
+The one known gap in what IS built: `ui/live-view.ui.ts` infers full-image
+dimensions from the first frame, but the native half may already have downsampled it
 (`max_edge`), so the widget's viewport coordinate basis can be the downsampled size
 rather than true full-image pixels. Fixing it means the producer reporting true
-full-image `w,h` alongside the frame. The UI half is an unbuilt/untested TS sketch;
-only the native half and the expose relay are compiled and tested.
+full-image `w,h` alongside the frame. live-view's UI half is still an untested TS
+sketch (its widgets + viewport/tools libs now live in the plet and DO build); only
+its native half and the expose relay are compiled and tested.
