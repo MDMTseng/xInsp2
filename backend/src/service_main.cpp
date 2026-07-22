@@ -521,13 +521,44 @@ int main(int argc, char** argv) {
     // load / spurious C1852. A per-PID subdir removes the sharing entirely.
     // Per-PID dirs would otherwise accumulate (~200 MB PCH each) and fill the disk;
     // reap the ones left by dead backends before claiming ours.
-    std::filesystem::path _xi_base = std::filesystem::temp_directory_path() / "xinsp2";
+    // Both of these used to be the THROWING overloads. temp_directory_path()
+    // throws filesystem_error when TMPDIR/TEMP/TMP names a path that does not
+    // exist, and nothing here catches it — so a mistyped env var came out as
+    // "CRASH (CPP_EXCEPTION)" plus a minidump, and every caller (the FE
+    // supervisor, a QA driver, a CI job) could only report "backend exited
+    // early (-6)". A misconfigured environment is a user error and must read
+    // like one.
+    std::error_code _tmp_ec;
+    std::filesystem::path _tmp_root = std::filesystem::temp_directory_path(_tmp_ec);
+    if (_tmp_ec || _tmp_root.empty()) {
+        std::fprintf(stderr,
+            "[xinsp2] FATAL: no usable temp directory (%s).\n"
+            "  The backend needs one for its per-PID script build dir, so this is\n"
+            "  fatal rather than degraded. The location comes from TMPDIR on POSIX\n"
+            "  and TEMP/TMP on Windows; one of those most likely names a path that\n"
+            "  does not exist. Current values:\n"
+            "    TMPDIR=%s\n    TEMP=%s\n    TMP=%s\n",
+            _tmp_ec.message().c_str(),
+            std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "(unset)",
+            std::getenv("TEMP")   ? std::getenv("TEMP")   : "(unset)",
+            std::getenv("TMP")    ? std::getenv("TMP")    : "(unset)");
+        return 3;
+    }
+    std::filesystem::path _xi_base = _tmp_root / "xinsp2";
     xi::script::reap_stale_build_dirs(_xi_base);
     g_eng.work_dir = (_xi_base / std::to_string(GetCurrentProcessId())).string();
     // A reused PID may leave a stale dir from a dead process — start clean.
     std::error_code _wd_ec;
     std::filesystem::remove_all(g_eng.work_dir, _wd_ec);
-    std::filesystem::create_directories(g_eng.work_dir);
+    std::filesystem::create_directories(g_eng.work_dir, _wd_ec);
+    if (_wd_ec) {
+        std::fprintf(stderr,
+            "[xinsp2] FATAL: cannot create the script build dir\n"
+            "    %s\n"
+            "  (%s). The temp root exists but is not writable, or the disk is full.\n",
+            g_eng.work_dir.c_str(), _wd_ec.message().c_str());
+        return 3;
+    }
 
     // Probe accelerators once. Logged so the user can see what their
     // compiled scripts will inherit.
