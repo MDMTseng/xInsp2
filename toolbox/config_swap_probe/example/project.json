@@ -1,0 +1,10 @@
+{
+  "name": "config_swap_probe_example",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam",    "plugin": "mock_camera" },
+    { "name": "probe",  "plugin": "config_swap_probe" },
+    { "name": "expose", "plugin": "expose" }
+  ],
+  "plugins": {}
+}

@@ -703,7 +703,7 @@ Register it at static-init time (it runs at DLL load, before the host's first
 restore). The migrator must be **pure** w.r.t. the call — it must not read live
 `xi::kv()`, which has not been restored yet. On success the host restores the
 migrated store and emits `event:state_migrated` (also carrying `"store":"kv"`).
-Live proof: `examples/qa_kv_reload`.
+Live proof: `qa/qa_kv_reload`.
 
 ---
 
@@ -824,7 +824,7 @@ XI_INSPECT_ENTRY(t, frame) {
 
 Both clocks are `std::chrono::system_clock` microseconds, so subtraction
 is meaningful across the host/script boundary. Reading from
-`examples/multi_source_surge/`, a 200-frame surge into `queue_depth=32`
+`qa/multi_source_surge/`, a 200-frame surge into `queue_depth=32`
 with a single ~30 ms inspect produces `queue_wait_us` that grows roughly
 linearly across the surge (FIFO accumulation) while `inspect_us` stays
 near 30 ms — which is the diagnostic signature of "I need more
@@ -909,7 +909,7 @@ inspect in frame order (the same ordered-emit discipline every sink push gets);
 the ack is dropped. The sealed pack crosses the seam **untouched** — no
 re-encode, no host `$seq` stamping (a sealed pack is immutable) — so expose's
 XEX1-v3 dump of a pushed pack is byte-identical to a host-side dump of the same
-pack (`plugins/expose_script_push_test.cpp` asserts this). Routing comes from the
+pack (`toolbox/expose/tests/expose_script_push_test.cpp` asserts this). Routing comes from the
 pack's own `$channel`/`$seq` entries; without them it lands on channel
 `"default"` with seq 0, so stamp `$seq` yourself
 (`b.add_i64("$seq", (int64_t)xi::run_id())`) before you seal a pack you build.
@@ -921,7 +921,7 @@ quarantined instance.
 path shown under [`xi::use`](#xiuse--calling-plugins). A fault input
 short-circuits host-side: the plugin never runs and you get back a fault pack
 with this instance appended to `$prov`. Runnable end to end in
-`examples/pack_pilot/` (and the `examples/qa_pack_pilot/` regression).
+`examples/pack_pilot/` (and the `qa/qa_pack_pilot/` regression).
 
 ## Parallel dispatch (`parallelism.dispatch_threads`)
 
@@ -1057,7 +1057,7 @@ unlimited (full `dispatch_threads`-wide). Ignored for a non-reentrant plugin
 without throttling the rest. The three modes are: serialized (non-reentrant → 1),
 concurrent (reentrant → N), and capped (reentrant + `max_concurrency: 1` → 1). The
 non-reentrant-serialized vs reentrant-races split is proven by
-`backend/tests/test_set_def_race.cpp`; `examples/qa_reentrancy/` demonstrates all
+`backend/tests/test_set_def_race.cpp`; `qa/qa_reentrancy/` demonstrates all
 three end-to-end under a live 4-thread dispatch pool (a probe plugin reports the
 max concurrency it observed per instance).
 
@@ -1201,7 +1201,7 @@ the full path and sidesteps search rules entirely.
 - [`docs/reference/ws-protocol.md`](../reference/ws-protocol.md) — the WS commands a UI client
   sends to drive a script (`run` / `set_param` / `compile_and_load` /
   …).
-- [`examples/`](../../examples/) — working scripts:
+- [`qa/`](../../qa/) — working scripts:
   `defect_detection.cpp`, `use_demo.cpp`, `user_with_instance.cpp`.
 
 ---

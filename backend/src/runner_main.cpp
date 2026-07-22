@@ -281,6 +281,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--certify-plugin") {
             const char* dir = (i + 1 < argc) ? argv[i + 1] : nullptr;
+            xi::crash::install_minidump_writer();   // Breakpad when built in
             xi::crash::install();   // a crashed certify still yields a minidump
             int code = dir ? xi::certify::certify_in_process(dir)
                            : xi::certify::kExitAbiMismatch;
@@ -344,8 +345,10 @@ int main(int argc, char** argv) {
             if (fs::exists(p / "include" / "xi" / "xi.hpp")) {
                 include_dir = (p / "include").string();
             }
-            if (fs::exists(p / "plugins")) {
-                plugins_dir = (p / "plugins").string();
+            // "plugins" = the runtime/bundle name (probed first, never moves);
+            // "toolbox" = the same folder's name in this source tree.
+            for (const char* name : {"plugins", "toolbox"}) {
+                if (fs::exists(p / name)) { plugins_dir = (p / name).string(); break; }
             }
             if (!include_dir.empty() && !plugins_dir.empty()) break;
             if (!p.has_parent_path() || p.parent_path() == p) break;

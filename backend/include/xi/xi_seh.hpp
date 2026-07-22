@@ -130,7 +130,15 @@ inline unsigned int posix_seh_code_(int sig, int si_code, void* addr) {
     }
 }
 
+// The address of the most recent hardware fault on THIS thread, stashed by the
+// handler right before it throws (a single async-signal-safe pointer store). The
+// crash-forensics layer (xi_crash_dump.hpp) reads it on the faulting thread when
+// an uncaught seh_exception reaches std::terminate, to dladdr-blame the module —
+// the throw has unwound the stack by then, so the fault site is otherwise lost.
+inline void*& last_fault_addr() { thread_local void* a = nullptr; return a; }
+
 inline void posix_seh_handler_(int sig, siginfo_t* info, void* /*ucontext*/) {
+    last_fault_addr() = info ? info->si_addr : nullptr;
     throw seh_exception(posix_seh_code_(sig, info ? info->si_code : 0,
                                         info ? info->si_addr : nullptr));
 }

@@ -148,7 +148,7 @@ endif()
 option(XINSP2_HAS_IPP        "Link Intel IPP for JPEG encode acceleration" OFF)
 # NOTE: libjpeg-turbo is NOT a backend concern. Post-CUT the JPEG encoder lives in
 # the imgcodec LIB PLUGIN, so turbojpeg detection/linking is owned entirely by
-# plugins/CMakeLists.txt (and the JPEG bench moved there too). The shared header
+# toolbox/CMakeLists.txt (and the JPEG bench moved there too). The shared header
 # xi/xi_jpeg.hpp still has an #ifdef XINSP2_HAS_TURBOJPEG turbo path, but ONLY the
 # plugin ever defines it — the backend build never sets or looks for turbojpeg.
 
@@ -198,7 +198,7 @@ if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
 endif()
 find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
 # OpenCV is an OPT-IN dependency, NOT part of xi_core (completes OQ-9 for the
-# backend, matching plugins/CMakeLists.txt which already decoupled it). The core
+# backend, matching toolbox/CMakeLists.txt which already decoupled it). The core
 # runtime does NO image processing — the umbrella xi.hpp / xi_image.hpp / xi_jpeg.hpp
 # are OpenCV-free — so xinsp_backend/xinsp_runner must not link opencv_world.dll.
 # cv:: lives only behind the opt-in <xi/xi_cv.hpp>; the few targets that include it
@@ -249,6 +249,30 @@ add_test(NAME xi_core COMMAND test_xi_core)
 add_executable(test_mp tests/test_mp.cpp)
 target_include_directories(test_mp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME mp COMMAND test_mp)
+
+# xi::Derived<Out> reactive cell (xi/xi_reactive.hpp) — the demand-gate / dedup /
+# stats contract. The Derived CORE is dependency-free (functional/string only),
+# so like test_mp this links nothing but the include dir. (UiView, the cap/pack
+# application, is behind XI_REACTIVE_UIVIEW and not exercised here — it needs a
+# live host; the gate/dedup logic it rides is what this test pins.)
+add_executable(test_reactive tests/test_reactive.cpp)
+target_include_directories(test_reactive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME reactive COMMAND test_reactive)
+
+# controls pluginlet native half (toolbox/pluginlets/controls/controls.hpp) — the default
+# plugin UI: declare params → get_def/set_def/$schema tree/thread-safe snapshot.
+# Uses xi_json (yyjson) for the def marshalling, so it links yyjson like
+# test_mp_fixtures; needs the toolbox/pluginlets include root for <controls/controls.hpp>.
+add_executable(test_controls tests/test_controls.cpp)
+target_link_libraries(test_controls PRIVATE yyjson)
+target_include_directories(test_controls PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../toolbox/pluginlets)
+if(NOT MSVC)
+    target_link_libraries(test_controls PRIVATE pthread)
+endif()
+add_test(NAME controls COMMAND test_controls)
 
 # Canonical msgpack GOLDEN fixtures (protocol/fixtures/canonical) — the
 # cross-implementation lockstep with the sibling TS/Python codecs. Drives the
@@ -936,6 +960,38 @@ add_test(NAME capability_handshake COMMAND test_capability_handshake)
 # <<< lv2-capability-handshake end.
 
 
+# ---- Optional Google Breakpad — real POSIX minidumps -----------------------
+# OFF by default: the text-backtrace crash sidecar in xi_crash_dump.hpp covers the
+# standard build. Build Breakpad's client lib separately (see docs/roadmap/
+# linux-port.md) and configure with -DXINSP2_HAS_BREAKPAD=ON -DBREAKPAD_ROOT=<checkout>.
+# Only the two processes that WRITE dumps (backend + runner) link it, via
+# _xinsp_add_breakpad(); the single Breakpad TU is src/crash_breakpad.cpp, so the
+# rest of the tree (and every test) stays Breakpad-free.
+option(XINSP2_HAS_BREAKPAD "Link Google Breakpad for real minidumps (POSIX)" OFF)
+set(BREAKPAD_ROOT "" CACHE PATH "Google Breakpad checkout root (contains src/)")
+set(XINSP2_BREAKPAD_READY OFF)
+if(XINSP2_HAS_BREAKPAD AND NOT WIN32)
+    find_path(BREAKPAD_INCLUDE_DIR client/linux/handler/exception_handler.h
+        HINTS ${BREAKPAD_ROOT}/src)
+    find_library(BREAKPAD_CLIENT_LIB NAMES breakpad_client
+        HINTS ${BREAKPAD_ROOT}/src/client/linux)
+    if(BREAKPAD_INCLUDE_DIR AND BREAKPAD_CLIENT_LIB)
+        set(XINSP2_BREAKPAD_READY ON)
+        message(STATUS "xinsp2: Breakpad enabled (${BREAKPAD_CLIENT_LIB})")
+    else()
+        message(WARNING "XINSP2_HAS_BREAKPAD=ON but Breakpad not found under "
+            "BREAKPAD_ROOT=${BREAKPAD_ROOT}; using the text-backtrace crash sidecar")
+    endif()
+endif()
+function(_xinsp_add_breakpad tgt)
+    if(XINSP2_BREAKPAD_READY)
+        target_sources(${tgt} PRIVATE src/crash_breakpad.cpp)
+        target_compile_definitions(${tgt} PRIVATE XINSP2_HAS_BREAKPAD=1)
+        target_include_directories(${tgt} PRIVATE ${BREAKPAD_INCLUDE_DIR})
+        target_link_libraries(${tgt} PRIVATE ${BREAKPAD_CLIENT_LIB})
+    endif()
+endfunction()
+
 add_executable(xinsp_backend
     src/service_main.cpp
     src/service_sinks.cpp
@@ -961,6 +1017,7 @@ set_target_properties(xinsp_backend PROPERTIES OUTPUT_NAME "xinsp-backend")
 target_compile_definitions(xinsp_backend PRIVATE
     XINSP2_VERSION="${XINSP2_VERSION}"
     XINSP2_COMMIT="${XINSP2_COMMIT}")
+_xinsp_add_breakpad(xinsp_backend)
 # PCH: xinsp_backend is the one big MULTI-TU target (14 .cpp all pulling the same
 # heavy STD headers), so a per-target PCH is parsed once and reused across all 14 —
 # a real win here (unlike the ~70 single-TU test exes, where a PCH would only add
@@ -987,6 +1044,7 @@ set_target_properties(xinsp_runner PROPERTIES OUTPUT_NAME "xinsp-runner")
 target_compile_definitions(xinsp_runner PRIVATE
     XINSP2_VERSION="${XINSP2_VERSION}"
     XINSP2_COMMIT="${XINSP2_COMMIT}")
+_xinsp_add_breakpad(xinsp_runner)
 
 # Frontend supervisor. Spawns + monitors xinsp-backend.exe, records crash
 # forensics on backend death, respawns it (rate-limited). (Driving the line to a
@@ -1014,7 +1072,7 @@ target_compile_definitions(xinsp_fe PRIVATE
 # line-safe case is handled by a comms plugin's own sidecar process, not the
 # core/FE. See docs/internals/comms-sidecar.md.)
 
-# bench_jpeg / perf_jpeg MOVED to plugins/CMakeLists.txt — the JPEG encoder (and its
+# bench_jpeg / perf_jpeg MOVED to toolbox/CMakeLists.txt — the JPEG encoder (and its
 # turbojpeg dependency) lives in the imgcodec plugin post-CUT, so its benchmark lives
 # there too. The backend build no longer references turbojpeg at all.
 
@@ -1111,7 +1169,7 @@ endif()
 
 # [v12 THE CUT — the xinsp_backend target no longer links libjpeg-turbo: the
 #  in-core JPEG encoder was evicted, encode is capability-only (xi.jpeg.encode).
-#  turbojpeg now lives ONLY in the imgcodec lib plugin (plugins/imgcodec).]
+#  turbojpeg now lives ONLY in the imgcodec lib plugin (toolbox/imgcodec).]
 
 # ---- Runtime DLL deployment --------------------------------------------
 # Copy accelerator DLLs next to the exe so end users / CI don't need a
@@ -1130,7 +1188,7 @@ function(_xinsp_deploy_dlls tgt)
     # turbojpeg.dll is NOT deployed here. Post-CUT (v12) the backend exe does not
     # link libjpeg-turbo — only the imgcodec LIB PLUGIN does. The plugin owns and
     # deploys its own turbojpeg.dll (next to xi-imgcodec.dll, see
-    # plugins/CMakeLists.txt), and the loader resolves it from there because
+    # toolbox/CMakeLists.txt), and the loader resolves it from there because
     # load_plugin_dll_ loads with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (searches the
     # plugin DLL's own directory for its dependencies). The backend build no longer
     # references turbojpeg at all (the JPEG bench moved to the plugins tree too).
@@ -1325,7 +1383,7 @@ if(Python3_Interpreter_FOUND)
     # per-plugin artifacts from contract/plugins/*.decl.json into a tmp dir and
     # (a) byte-compares vs the committed generated/plugins/ (stale = fail);
     # (c) proves the generated _keys.gen.h, the decl, AND the hand-written
-    # plugins/<p>/<p>_keys.h all carry the identical key-constant set + schema
+    # toolbox/<p>/<p>_keys.h all carry the identical key-constant set + schema
     # version (drift either way = fail); (e) WARNs (non-fatal) for any plugin
     # shipping a hand-written *_keys.h with no decl (the coverage ratchet). Pure
     # stdlib, so like contract_baseline it runs whenever Python is present.
@@ -1425,7 +1483,7 @@ add_test(NAME template_selfcheck
 set_tests_properties(template_selfcheck PROPERTIES LABELS "sdk")
 
 # ---- Examples compile gate -------------------------------------------------
-# "Exemplars are tests" (adoption-map item 4). The examples/ script tree is the
+# "Exemplars are tests" (adoption-map item 4). The qa/ script tree is the
 # first thing a new user runs; once, 32 of its inspect.cpp files carried 181
 # calls to the removed VAR() macro and none compiled on the current backend
 # (review 11, F grade). This gate compiles EVERY example script the same way the
@@ -1437,12 +1495,12 @@ set_tests_properties(template_selfcheck PROPERTIES LABELS "sdk")
 #
 # The source list is DERIVED (glob + CONFIGURE_DEPENDS) so a new example is
 # gated automatically — no hand-maintained list to rot. It is every *.cpp under
-# examples/ that is a SCRIPT: we exclude the co-located example PLUGINS
+# qa/ that is a SCRIPT: we exclude the co-located example PLUGINS
 # (*/plugins/* — those force-include a DIFFERENT support header and are covered
 # elsewhere), vendored third-party sources (*/vendor/*), and the standalone M0
 # executable demo_async (its own add_executable, not a JIT script).
 file(GLOB_RECURSE _examples_scripts CONFIGURE_DEPENDS
-     ${CMAKE_CURRENT_SOURCE_DIR}/../examples/*.cpp)
+     ${CMAKE_CURRENT_SOURCE_DIR}/../qa/*.cpp)
 list(FILTER _examples_scripts EXCLUDE REGEX "/plugins/")
 list(FILTER _examples_scripts EXCLUDE REGEX "/vendor/")
 list(FILTER _examples_scripts EXCLUDE REGEX "/demo_async\\.cpp$")

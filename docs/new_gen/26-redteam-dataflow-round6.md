@@ -810,7 +810,7 @@ collapses the window to zero and removes the ETAKEN-shadow detour.
 
 ## N2 — resource-handle convention: the "five rules" omit the ONE rule that makes the demo safe (the resolve-time pin), and tells the next owner to copy the lease "verbatim" → seeds a cross-lane UAF into future type-owner plugins — **P3 (doc/spec defect); CONFIRMED**
 `docs/new_gen/14-lib-plugin-capability-plane.md:349-373` (the five rules) vs
-`plugins/lut_owner/lut_owner.cpp:367-385` (`resolve_` pins a `shared_ptr` copy under
+`toolbox/lut_owner/lut_owner.cpp:367-385` (`resolve_` pins a `shared_ptr` copy under
 `mu_`, atomically with the gen check) and `:386-408` (the `gpu.buf` extrapolation).
 
 `lut_owner` itself is **sound** — I refuted every UAF/torn/ABA candidate: `resolve_`
@@ -866,7 +866,7 @@ defeats the codec's own documented DoS-safety guarantee and the fix is one line:
 `seen.reserve(std::min<size_t>(e.len, remaining()));`.
 
 ## N4 — `qa_pack_stream` example: an UNBOUND consumer binds its stream identity from a FAULT → a foreign fault delivered first kills the wrong stream (reintroduces the F3 contamination in the unbound window) — **P3 (example / teaching-pattern defect); CONFIRMED**
-`examples/qa_pack_stream/inspect.cpp:137-140` (the F3 fault branch).
+`qa/qa_pack_stream/inspect.cpp:137-140` (the F3 fault branch).
 
 The core does **not** reassemble streams — `$stream/$part/$eof` is a pure convention
 (`xi_pack_contract.hpp:63-72`); reassembly lives entirely in the script, so the

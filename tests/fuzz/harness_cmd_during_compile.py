@@ -28,8 +28,8 @@ from _common import BackendProc, WS_URL, REPO_ROOT, fuzz_iters  # noqa: E402
 from xinsp2 import Client, ProtocolError  # noqa: E402
 
 ITERS = fuzz_iters(10)
-INSPECT = REPO_ROOT / "examples" / "multi_source_surge" / "inspect.cpp"
-PROJECT = REPO_ROOT / "examples" / "multi_source_surge"
+INSPECT = REPO_ROOT / "qa" / "multi_source_surge" / "inspect.cpp"
+PROJECT = REPO_ROOT / "qa" / "multi_source_surge"
 
 
 def main() -> int:

@@ -340,6 +340,7 @@ inline int PluginManager::compile_project_plugins(const std::string& project_fol
 // and no cache exists. mu_ MUST be held.
 inline certify::Verdict PluginManager::certify_folder_locked_(const std::string& folder,
                                                               const PluginInfo& info) {
+    // info.dll_name is already the platform module file (parse_manifest mapping).
     auto dll_path = (std::filesystem::path(folder) / info.dll_name).string();
     std::string hash = xi::sha256::sha256_file(dll_path);
     if (hash.empty()) return certify::Verdict::unknown;   // source-only / unbuilt — nothing to certify
@@ -369,6 +370,7 @@ inline certify::Verdict PluginManager::certify_folder_locked_(const std::string&
 inline void PluginManager::precertify_folder_(const std::string& folder,
                                               const PluginInfo& info,
                                               const std::string& certify_exe) {
+    // info.dll_name is already the platform module file (parse_manifest mapping).
     auto dll_path = (std::filesystem::path(folder) / info.dll_name).string();
     std::string hash = xi::sha256::sha256_file(dll_path);
     if (hash.empty()) return;                       // source-only / unbuilt — nothing to certify

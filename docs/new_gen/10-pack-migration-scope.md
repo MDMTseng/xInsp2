@@ -94,15 +94,15 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    frame order for sink targets). Measured against the examples tree via the
    re-measured parity matrix (doc 12, 2026-07-03): 17 of 29 pattern rows
    GREEN on live QA evidence, 4 GREEN-composition at verdict time — ALL FOUR
-   since delivered 2026-07-03: **`examples/qa_pack_record_replay`** (record →
+   since delivered 2026-07-03: **`qa/qa_pack_record_replay`** (record →
    save(.xex1) → replay → verify as ONE live graph, disk == recorded wire ==
    replayed wire pixel-byte identical; E1/E2/E3 GREEN) and
-   **`examples/qa_pack_config_swap`** (drives the probe's pack door under live
+   **`qa/qa_pack_config_swap`** (drives the probe's pack door under live
    mock_camera traffic while the driver runs `prepare_instance` →
    `commit_group` mid-run, verdicts on the run_result plane, zero
    `xi::Record`; F1 GREEN) — no composition rows remain (doc 12 scorecard:
    24 GREEN with U1's B3/B4 and U3's C3 since flipped), 4+H N/A
-   control-plane. Flagship evidence: **`examples/qa_use_pack_door`** —
+   control-plane. Flagship evidence: **`qa/qa_use_pack_door`** —
    build → door → push in ONE script, no `xi::Record` anywhere, pixels and
    nested entries byte-checked off the XEX1-v3 wire; `qa_pack_pilot`'s last
    Record leg deleted the same day; `python tools/run_qa.py pack` 4/4.
@@ -117,7 +117,7 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
      never runs; reason + `$seq` carried; hop appended to the chain). The
      ERROR-PATH patterns of fixturing_demo/io_stress/graph_demo are no
      longer gated — matrix rows B3/B4 GREEN (`use_pack_door_test` §7–§10,
-     `examples/qa_pack_fault_path`). Still open, narrowed OUT of U1 and
+     `qa/qa_pack_fault_path`). Still open, narrowed OUT of U1 and
      gating nothing above: `_io`-style TYPED pack build/extract helpers
      (codegen gap #2 remains Record-shaped).
    - **U3 — ordered-sink semantics. ✅ RESOLVED 2026-07-03**
@@ -130,7 +130,7 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
      Record host-stamp; `use().process()` on a sink target is REJECTED
      fail-loud (rc −5 → empty pack + once-per-name log naming `push()`),
      closing the documented v0 inline gap by doctrine. qa_result_order's
-     pattern ported: `examples/qa_pack_order` (live, arrival zero-inversion /
+     pattern ported: `qa/qa_pack_order` (live, arrival zero-inversion /
      completion reorders) — matrix row C3 flipped GREEN.
    Both P2 residuals are RESOLVED; neither's leftover (U1's typed-IO
    narrowing) gates any shipping example pattern — wave-2 planning inputs
@@ -142,7 +142,7 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    `xi_script_kv_*` exports, typed `xi::set_kv_migrate` code_change hook;
    decision record `16-script-state-shape.md`, which also lists the exact
    Record-channel edits the cut makes. Evidence: `test_kv` +
-   `test_kv_migrate` ctests, live QA `examples/qa_kv_reload`. Record
+   `test_kv_migrate` ctests, live QA `qa/qa_kv_reload`. Record
    deletion is no longer blocked on any named semantic decision — THE CUT's
    remaining precondition is app-team cutover-train coordination only; at
    the cut, execute doc 16 §What THE CUT deletes.)
@@ -164,7 +164,7 @@ break in the VAR-hard-delete tradition, not a drift into permanence:
    gate: flipping expose's default wire to v3 rides the cutover train
    (below), and the graph-level "route a recorded run through a full
    project" example — parked here under gate P2's umbrella — LANDED as
-   `examples/qa_pack_record_replay` (QA green 2026-07-03; doc 12 rows
+   `qa/qa_pack_record_replay` (QA green 2026-07-03; doc 12 rows
    E1/E2/E3 flipped GREEN on it).
 4. **THE CUT (one event, with the app team)**: ABI v12 — recommended as the
    synthesis §3 pure-door ABI (delete the monolith struct in the same

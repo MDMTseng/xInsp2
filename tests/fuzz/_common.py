@@ -50,16 +50,21 @@ def _find_backend_exe() -> Path:
     override = os.environ.get("XINSP_BACKEND_EXE")
     if override:
         return Path(override)
+    exe = "xinsp-backend" + (".exe" if os.name == "nt" else "")
     base = REPO_ROOT / "backend" / "build"
     for cfg in ("Release", "Debug"):
-        cand = base / cfg / "xinsp-backend.exe"
+        cand = base / cfg / exe
         if cand.exists():
             return cand
+    # the Linux/POSIX port builds single-config to backend/build-linux
+    linux_cand = REPO_ROOT / "backend" / "build-linux" / exe
+    if linux_cand.exists():
+        return linux_cand
     # last resort: anything under the build tree
-    for cand in base.rglob("xinsp-backend.exe"):
+    for cand in base.rglob(exe):
         return cand
     # default path (will raise a clear FileNotFoundError at spawn time)
-    return base / "Release" / "xinsp-backend.exe"
+    return base / "Release" / exe
 
 
 BACKEND_EXE = _find_backend_exe()

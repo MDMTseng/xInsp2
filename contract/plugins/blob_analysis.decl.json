@@ -1,5 +1,5 @@
 {
-  "$comment": "ONE declaration per plugin — the single source of truth the wave-3 codegen turns into <plugin>_keys.gen.h + _schema.gen.h + _io.gen.h + TS/Py types + a docs keys table. TRANSCRIBED from the hand-written plugins/blob_analysis/blob_analysis_keys.h + _io.h (the headers are today's truth). A decl stays in the constrained field family the repo governs: object with typed fields, required/optional, ranges, nested shapes for arrays — no combinators/conditionals. See contract/codegen/README.md and docs/new_gen/02-plugin-data-contract.md.",
+  "$comment": "ONE declaration per plugin — the single source of truth the wave-3 codegen turns into <plugin>_keys.gen.h + _schema.gen.h + _io.gen.h + TS/Py types + a docs keys table. TRANSCRIBED from the hand-written toolbox/blob_analysis/blob_analysis_keys.h + _io.h (the headers are today's truth). A decl stays in the constrained field family the repo governs: object with typed fields, required/optional, ranges, nested shapes for arrays — no combinators/conditionals. See contract/codegen/README.md and docs/new_gen/02-plugin-data-contract.md.",
   "plugin": "blob_analysis",
   "namespace": "xi::blob",
   "schema_version": 1,

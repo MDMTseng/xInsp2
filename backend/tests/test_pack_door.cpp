@@ -24,7 +24,7 @@
 //
 // The plugin-side door (blob_analysis's pack-in/pack-out) + the real end-to-end
 // mock_camera->blob_analysis flow are exercised in the PLUGIN test
-// (plugins/.../pack_pilot_test) against the actually-built DLLs.
+// (toolbox/.../pack_pilot_test) against the actually-built DLLs.
 //
 #include <xi/xi_pack_abi.hpp>    // PackRegistry, pack_v1_iface, install_pack_abi
 #include <xi/xi_image_pool.hpp>   // ImagePool::make_host_api / cumulative().live_now

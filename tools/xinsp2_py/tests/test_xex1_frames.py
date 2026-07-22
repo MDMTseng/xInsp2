@@ -1,9 +1,9 @@
 """Cross-implementation test of the XEX1 binary frame decoder against the C++
 encoder's golden frames.
 
-The XEX1 frame is encoded in C++ (plugins/expose/src/xex1_encode.hpp) and decoded,
-independently, by the expose plugin's webUI (plugins/expose/ui/index.html) and by
-examples/lib/xex1.py — the decoder under test here. This loads every golden .bin
+The XEX1 frame is encoded in C++ (toolbox/expose/src/xex1_encode.hpp) and decoded,
+independently, by the expose plugin's webUI (toolbox/expose/ui/index.html) and by
+qa/lib/xex1.py — the decoder under test here. This loads every golden .bin
 under protocol/fixtures/binary/ and asserts the decoded content matches the
 committed manifest, the same manifest the JS test (ui-components/test/xex1-golden.mjs)
 checks. Regenerate the goldens with the expose plugin's `xex1_fixtures_test --regen`.
@@ -11,7 +11,7 @@ checks. Regenerate the goldens with the expose plugin's `xex1_fixtures_test --re
     pytest tools/xinsp2_py/tests/test_xex1_frames.py
 
 Runs without a live backend or the xinsp2 package — it imports the standalone
-decoder from examples/lib/xex1.py directly.
+decoder from qa/lib/xex1.py directly.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ import pytest
 # repo root is four levels up: tools/xinsp2_py/tests/test_xex1_frames.py -> repo root
 REPO = Path(__file__).resolve().parents[3]
 FIX = REPO / "protocol" / "fixtures" / "binary"
-sys.path.insert(0, str(REPO / "examples" / "lib"))
+sys.path.insert(0, str(REPO / "qa" / "lib"))
 
 from xex1 import decode_xex1, is_xex1, _mp  # noqa: E402
 

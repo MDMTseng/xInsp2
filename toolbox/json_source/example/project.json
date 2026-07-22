@@ -1,0 +1,15 @@
+{
+  "name": "json_source_example",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "instances": [
+    { "name": "src", "plugin": "json_source" },
+    { "name": "expose", "plugin": "expose" }
+  ],
+  "plugins": {}
+}

@@ -60,7 +60,7 @@ python tools/gate.py
 
 It runs, in order: the derive-from-source **doc** guards → **build**
 (backend Release + shipped plugins) → the full **ctest** suite → the
-protocol **fixture** round-trip (`pytest`) → the `examples/qa_*` **regression
+protocol **fixture** round-trip (`pytest`) → the `qa/qa_*` **regression
 sweep** → the black-box **fuzz smoke**. This is exactly what CI runs on
 `windows-latest` (`.github/workflows/ci.yml` just provisions the toolchain and
 calls this script), so a local green and a CI green mean the same thing.
@@ -80,7 +80,7 @@ it.
 green.
 
 The **qa** stage honors a quarantine of pre-existing broken examples
-(`examples/qa_known_failing.txt`): those run but fail non-fatally as a loud
+(`qa/qa_known_failing.txt`): those run but fail non-fatally as a loud
 `KNOWN-FAIL`, so the gate still catches *new* breakage. If you fix a quarantined
 example, delete its line — a quarantined test that starts passing fails the gate
 on purpose. See [`docs/ci-gate-known-failures.md`](docs/ci-gate-known-failures.md).

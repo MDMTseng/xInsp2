@@ -5,7 +5,7 @@
 // polaris2 v12 (THE CUT): this is NO LONGER an in-core backend engine. The
 // backend's compress path (compress_sink) is capability-only and never calls
 // encode_jpeg. This header survives because the imgcodec LIB PLUGIN
-// (plugins/imgcodec, which keeps its OWN XINSP2_HAS_TURBOJPEG) consumes
+// (toolbox/imgcodec, which keeps its OWN XINSP2_HAS_TURBOJPEG) consumes
 // xi::encode_jpeg as its encoder, and bench_jpeg / cap_jpeg_encode_host_test
 // reference it. It is NOT deleted; it is simply no longer wired into the
 // backend target. Do not add new backend callers.

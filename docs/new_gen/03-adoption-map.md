@@ -31,7 +31,7 @@ schedule.
 | 1 | One dispatch shell (change #4) | Top-level `try`/`catch` around `handle_command`; structured `rsp` error; malformed-envelope correlated error + reject counter | **NOW** | — | 09 headline |
 | 2 | Diagnostics as safe as hot path (change #4) | Fix `ImagePool::stats()` / `stats_by_owner()` UAF; WS `client_` teardown under lock | **NOW** | — | 08 top findings |
 | 3 | Gates as day-1 infra (change #5) | Stand up CI: ctest + run_qa + fixture round-trip + fuzz smoke, build-breaking | **NOW** | — | 07 headline |
-| 4 | Exemplars are tests (change #5) | `examples/` compile gate; fix or delete the 32 dead-API scripts; retire `vars_mixed.json` orphan | **NOW** | 3 | 11 F-grade, 07 |
+| 4 | Exemplars are tests (change #5) | `qa/` compile gate; fix or delete the 32 dead-API scripts; retire `vars_mixed.json` orphan | **NOW** | 3 | 11 F-grade, 07 |
 | 5 | Plugin data contract, stage 1 (02) | Builder/extractor + key-constants headers for `mock_camera`, `blob_analysis` first (most-copied, worst hygiene), then the rest; fail-loud required inputs; schema-version stamp | **NOW** (additive headers) | — | 11 findings 2–3 |
 | 6 | One template spine (change #5) | Collapse `easy`/`medium`/`expert` into one base-class skeleton with layered opt-ins | **CARVE** (SDK surface) | 5 (patterns settled) | 11 finding 3 |
 | 7 | Contract-first schemas (change #1) | Spike the constrained JSON-Schema subset; describe the *current* wire as-is (non-breaking); generate fixtures from it | **CARVE** | schema-language decision | 06, 07, 10 |
@@ -101,5 +101,5 @@ docs / build / ctest / fixtures / qa / fuzz).
   the wire-visible halves (hello `abi` bump) still ride the app-team cutover.
 - **Still open:** item 16 (schema-published `describe()` codegen, stage 2);
   the qa flaky/behavioral quarantine (4 entries in
-  `examples/qa_known_failing.txt`) and the `ws_teardown_race` stress-test
+  `qa/qa_known_failing.txt`) and the `ws_teardown_race` stress-test
   flake — the 07#8 deflake pass owns both.

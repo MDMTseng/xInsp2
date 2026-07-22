@@ -55,6 +55,7 @@ import contextlib
 import json
 import os
 import socket
+import tempfile
 import subprocess
 import sys
 import threading
@@ -66,8 +67,25 @@ CONTRACT = ROOT / "contract"
 SCHEMA_DIR = CONTRACT / "schemas"
 MAP_PATH = CONTRACT / "live-wire-map.json"
 ALLOWLIST_PATH = CONTRACT / "live-allowlist.json"
-BACKEND = ROOT / "backend" / "build" / "Release" / "xinsp-backend.exe"
-PROJECT = ROOT / "examples" / "qa_recipe_script_instance"
+def _backend_exe() -> Path:
+    """The built backend, cross-platform + build-layout aware.
+
+    `.exe` only on Windows; probe the gate's multi-config Release/Debug dirs
+    and the Linux single-config build-linux tree. XINSP_BACKEND_EXE overrides
+    (CI / non-default build dirs). Returns the first that exists, else the
+    canonical Release candidate so a missing build raises a clear error."""
+    override = os.environ.get("XINSP_BACKEND_EXE")
+    if override:
+        return Path(override)
+    suf = ".exe" if os.name == "nt" else ""
+    base = ROOT / "backend"
+    cands = [base / b / f"xinsp-backend{suf}"
+             for b in ("build/Release", "build/Debug", "build-linux", "build")]
+    return next((c for c in cands if c.exists()), cands[0])
+
+
+BACKEND = _backend_exe()
+PROJECT = ROOT / "qa" / "qa_recipe_script_instance"
 
 REQUIRE = bool(os.environ.get("XINSP2_REQUIRE_SCHEMA_GATE"))
 
@@ -176,11 +194,17 @@ def _free_port() -> int:
 @contextlib.contextmanager
 def spawn_backend():
     port = _free_port()
-    # Isolate TEMP so a parallel gate run's build cache/state doesn't collide.
-    iso = Path(os.environ.get("LOCALAPPDATA", os.environ.get("TEMP", "."))) / "Temp" / "xi_contract_live"
+    # Isolate the temp dir so a parallel gate run's build cache/state doesn't
+    # collide. This used to be Path(LOCALAPPDATA or TEMP or ".") / "Temp" / ...
+    # which on POSIX (neither var set) resolved to a RELATIVE "./Temp/..." —
+    # created relative to THIS process's cwd, then handed to a backend spawned
+    # with cwd=ROOT. It only ever worked because a stray <repo>/Temp/ happened to
+    # exist; delete that and the backend aborts on the missing dir. Absolute, and
+    # TMPDIR too, since that is the POSIX knob (TEMP/TMP are the Windows ones).
+    iso = Path(tempfile.gettempdir()) / "xi_contract_live"
     iso.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
-    env["TEMP"] = env["TMP"] = str(iso)
+    env["TMPDIR"] = env["TEMP"] = env["TMP"] = str(iso)
     proc = subprocess.Popen(
         [str(BACKEND), f"--port={port}", "--host=127.0.0.1"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(ROOT), env=env,

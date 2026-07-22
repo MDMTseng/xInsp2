@@ -1,0 +1,9 @@
+{
+  "name": "synced_stereo_example",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "stereo", "plugin": "synced_stereo" },
+    { "name": "expose", "plugin": "expose" }
+  ],
+  "plugins": {}
+}

@@ -8,7 +8,7 @@ grounded in a close reading of `polaris_master`.*
 | **Date** | 2026-07-02 |
 | **Author** | Independent architect C |
 | **Basis** | `polaris_master` @ HEAD (worktree xr-09) |
-| **Method** | Direct source read of `backend/include/xi`, `backend/src`, `contract/`, `plugins/`, `sdk`, the client fleet, and the gate tooling. `docs/new_gen/` and `docs/ext_review/` deliberately unread — this is meant to be an unanchored second opinion. |
+| **Method** | Direct source read of `backend/include/xi`, `backend/src`, `contract/`, `toolbox/`, `sdk`, the client fleet, and the gate tooling. `docs/new_gen/` and `docs/ext_review/` deliberately unread — this is meant to be an unanchored second opinion. |
 
 ---
 
@@ -274,7 +274,7 @@ plugin declares its produces/consumes contract *once* (the `_keys.h` +
 validator from that one declaration. The schemaless bag survives only as an
 explicit `xi::AnyRecord` escape hatch for genuinely dynamic data (a passthrough
 logger, a debug dump). This is not a new idea I am imposing — it is the pattern
-`plugins/blob_analysis` *already invented*. I am promoting it from convention to
+`toolbox/blob_analysis` *already invented*. I am promoting it from convention to
 primitive, and generating the boilerplate the plugin author currently writes
 three times by hand.
 
@@ -380,7 +380,7 @@ share by construction. The extension's 3,000-line god-file
 **Keep** the deliberate decision the whole fleet already shares: the WS layer is
 *generic transport only*; all vars/image/preview decoding lives in each plugin's
 own webUI. This is why the "Variable Window" is gone from the extension and why
-`expose` (`plugins/expose/plugin.json`) is a *plugin* that JPEG-encodes
+`expose` (`toolbox/expose/plugin.json`) is a *plugin* that JPEG-encodes
 subscribed channels and pushes them as one atomic XEX1 binary frame via
 `emit_binary`. That is the philosophy working: the core knows nothing about
 "vars," a plugin owns the data-out surface, and the client just renders what the

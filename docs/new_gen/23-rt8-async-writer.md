@@ -141,8 +141,8 @@ memcpy-scale price versus a 1.5 s lane stall.
   (a temporary sync-send path, not in the tree) yields `max_call_ms=1505.92`,
   `calls_in_1s=3` — the assertions A/B fail, capturing the exact RT8 stall.
 
-- **End-to-end qa** — `examples/qa_slow_consumer/` (`driver.py`), discovered by
-  `tools/run_qa.py`'s `examples/qa_*` glob. A continuous lane (`max_parallel>1`)
+- **End-to-end qa** — `qa/qa_slow_consumer/` (`driver.py`), discovered by
+  `tools/run_qa.py`'s `qa/qa_*` glob. A continuous lane (`max_parallel>1`)
   emits modest raw previews via `expose`; a raw slow-draining WS client throttles
   its reads. Asserts: LANE LIVENESS (backend `cmd:metrics` `frames_total` advances
   far faster than the client drains — pre-fix it tracks the drain), WIRE ORDER
@@ -186,7 +186,7 @@ current connection (raw-preview lanes that need the kernel to stream ahead of th
 chunk loop). The boost is tracked against `conn_epoch_` (`sndbuf_boosted_for_epoch_`,
 under `tx_mu_`) so a reconnect re-arms it. This keeps BOTH the raw-preview
 throughput win AND the old small-frame wedge-drop sharpness. The qa driver
-(`examples/qa_slow_consumer/driver.py`) also grew a 50s socket recv timeout that
+(`qa/qa_slow_consumer/driver.py`) also grew a 50s socket recv timeout that
 converts a stalled lane/handoff into a clean phase-named `WsError` instead of the
 opaque 360s TIMEOUT. Do NOT restore an unconditional accept-time SNDBUF without
 re-running qa_slow_consumer solo AND inside a full gate.

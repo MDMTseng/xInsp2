@@ -8,7 +8,7 @@ const { sleep, makeShooter, clearOldShots } = require('./journey_helpers.cjs');
 
 const slash = (s) => s.split('\\').join('/');
 const REPO  = path.resolve(__dirname, '..', '..', '..');
-const PROJECT = path.join(REPO, 'examples', 'graph_demo');
+const PROJECT = path.join(REPO, 'qa', 'graph_demo');
 
 const screenshotDir = path.join(REPO, 'screenshot');
 const shot = makeShooter(screenshotDir, 'show_icon');

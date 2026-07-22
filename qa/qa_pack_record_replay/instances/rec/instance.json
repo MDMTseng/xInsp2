@@ -1,0 +1,8 @@
+{
+  "plugin": "record_save",
+  "config": {
+    "enabled": true,
+    "output_dir": "qa/qa_pack_record_replay/instances/rec/captures",
+    "naming_rule": "cap_{count}"
+  }
+}

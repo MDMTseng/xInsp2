@@ -99,7 +99,7 @@ stop and ask if genuinely blocked. Each item records **the default I am proceedi
   required. i.e. stb default → turbojpeg optional accel → OpenCV optional.
 - **DONE (2026-07-01, on v11):** `as_cv_mat`/`from_cv_mat` moved to opt-in `xi_cv.hpp` as free functions;
   `xi.hpp` + `xi_image.hpp` are OpenCV-free; 21 call-sites migrated; `find_package(OpenCV)` dropped from
-  `plugins/CMakeLists.txt`. **Proof:** all 10 in-tree plugin DLLs build with **OpenCV absent** (plugins
+  `toolbox/CMakeLists.txt`. **Proof:** all 10 in-tree plugin DLLs build with **OpenCV absent** (plugins
   CMakeCache has zero OpenCV); backend 31/31 ctest green; freeze guard unchanged. turbojpeg **kept** (only
   real codec caller is `xi_jpeg.hpp`; the rest is optional toolchain plumbing — see below).
 - **Process note:** the OQ-9 agent branched off a stale `1bdc092`/v9 base and didn't re-root — its clean 30

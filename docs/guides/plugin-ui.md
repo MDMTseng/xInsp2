@@ -63,7 +63,7 @@ Higher-level helpers (also exported): `mountPanel` (auto-UI from a descriptor),
 > `onPreview` / `subscribeImage` flow below relied on have been **removed** from
 > the backend. Control wiring (params via `set_instance_def` / `exchange_instance`)
 > and `status` are unaffected and remain the live path. **Output surfacing for a
-> plugin UI now goes through the shipped `expose` plugin** (`plugins/expose`,
+> plugin UI now goes through the shipped `expose` plugin** (`toolbox/expose`,
 > `sink:true`): its live contract is the `subscribe` / `unsubscribe` / `get` /
 > `list_channels` exchange commands plus one atomic `XEX1` binary frame per
 > channel pushed via the ABI v8 `emit_binary` host call. See
@@ -78,7 +78,7 @@ Higher-level helpers (also exported): `mountPanel` (auto-UI from a descriptor),
 A viewer drives the `expose` instance over `exchange_instance` (subscription +
 pull) and receives a live binary push. Output is organised by string **channel
 id** (created implicitly on first send); a channel is the unit of subscription and
-of the UI tab. From `plugins/expose/plugin.json` + `src/expose.cpp`:
+of the UI tab. From `toolbox/expose/plugin.json` + `src/expose.cpp`:
 
 | Command | Args | Returns |
 |---|---|---|

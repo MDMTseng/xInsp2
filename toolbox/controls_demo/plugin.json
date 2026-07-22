@@ -1,0 +1,9 @@
+{
+  "name": "controls_demo",
+  "description": "Reference plugin whose def surface is the controls pluginlet (doc 37): declares its params as a $schema UI tree and delegates get_def/set_def to xi::pluginlet::Controls.",
+  "dll": "xi-controls_demo.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": true,
+  "json_fallback": true,
+  "pluginlets": ["controls"]
+}

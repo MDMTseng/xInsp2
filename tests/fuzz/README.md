@@ -6,7 +6,7 @@ drops a command under malformed / concurrent input.
 
 This is **Tier 0 item T0.2** from `docs/internals/core_fix_plan.md`
 (Part IV §23, §25): salvage the still-valid r7/r8 fuzz harnesses, drop
-the obsolete ones, and promote them from one-shot `examples/` surveys
+the obsolete ones, and promote them from one-shot `qa/` surveys
 into a maintained, reduced-iteration smoke that can be wired into CI as a
 build-breaking net (Invariant §27.4).
 
@@ -103,7 +103,7 @@ against the current core. It is carried here only as provenance.
 
 The harnesses were de-drifted to run against the current backend:
 
-- **Single `_common.py`.** The originals lived in two `examples/`
+- **Single `_common.py`.** The originals lived in two `qa/`
   folders; r8's `_common.py` imported r7's by path. Merged into one
   module under `tests/fuzz/`.
 - **`next_vars` removed → `drain_events`.** The per-event VAR model was

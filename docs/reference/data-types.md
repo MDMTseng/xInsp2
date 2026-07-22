@@ -140,7 +140,7 @@ slots with typed accessors, and a plugin's published key constants (e.g.
 in-process container, and `ScriptTypedPack` — key-based over the opaque
 `xi_pack_v1` ABI — lives on unchanged.) See
 [`../internals/pack-plane.md`](../internals/pack-plane.md) and
-`examples/qa_pack_walk`.
+`qa/qa_pack_walk`.
 
 ## See also
 

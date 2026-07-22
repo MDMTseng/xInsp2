@@ -59,7 +59,7 @@ moved from typed Record views to the sealed pack:
 - **By declared keyset (compile-checked slots).** `xi::ScriptTypedPack<Schema>`
   (`xi_use.hpp`) wraps a `ScriptPack` with a schema of key **slots**:
   `get_i64<Schema::kSeq>()` resolves the slot to its key constant at compile time,
-  so a mistyped slot is a build error, not a runtime miss (`examples/qa_pack_walk`
+  so a mistyped slot is a build error, not a runtime miss (`qa/qa_pack_walk`
   is the reference). This is the pack analogue of the retired declared-keyset
   Record views. (Note: `ScriptTypedPack` is key-based over the opaque
   `xi_pack_v1` ABI and needs only `Schema::keys`; it is unrelated to the

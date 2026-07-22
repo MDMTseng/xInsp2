@@ -55,7 +55,8 @@ You write three things:
 | `<name>.cpp`          | One class inheriting `xi::Plugin`; `XI_PLUGIN_IMPL(Class)` + `XI_PLUGIN_PACK_DOOR(Class)` for a data-plane plugin |
 | `ui/index.html` (opt) | Webview HTML+JS that posts messages to/from the plugin |
 
-That's it. Drop the folder into `plugins/` and the host scans it on startup.
+That's it. Drop the folder into the host's `plugins/` folder (or any dir on
+`xinsp2.extraPluginDirs`) and it is scanned on startup.
 
 ---
 
@@ -451,7 +452,7 @@ sdk/
 │   ├── medium/         ← Layer 1: + config/params (xi::Json) + status() + image op + UI
 │   ├── expert/         ← Layer 2: + source worker (xi::spawn_worker) emitting via emit() + UI
 │   └── _shared/        ← reusable HTML snippets (image_viewer_widget.html)
-└── examples/
+└── qa/
     ├── hello/          ← 1 file, no state, no UI — the "hello world"
     ├── counter/        ← persistent state + minimal UI (xi::Json)
     ├── invert/         ← image-in → image-out
@@ -486,7 +487,7 @@ Two ways to start a new plugin:
    Adds CMakeLists + README so it builds on its own. Same templates as
    the in-project path; output is byte-identical for shared files.
 
-The `examples/` folder shows what to look at for specific patterns
+The `qa/` folder shows what to look at for specific patterns
 (state, image ops, trigger source). Read them in order — each adds one
 capability.
 

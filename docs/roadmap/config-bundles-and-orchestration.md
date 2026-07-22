@@ -75,7 +75,7 @@ exchange-convention path (open question #4) before any first-class ABI promotion
   one no-process window → resume at prior fps. Reuses the same
   `quiesce_dispatch_for_lifecycle_op_` primitive recompile/rebuild rely on.
   (`reference/ws-protocol.md`.)
-- **`plugins/config_swap_probe/`** — reference plugin implementing the double-slot
+- **`toolbox/config_swap_probe/`** — reference plugin implementing the double-slot
   `prepare`/`commit` via `exchange()`: `active_`/`staged_` as
   `std::atomic<shared_ptr<const Resource>>`, `process()` reads the live slot
   lock-free, `prepare` stages in the background, `commit` is the atomic swap. Doc-

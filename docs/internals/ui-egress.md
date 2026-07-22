@@ -76,7 +76,7 @@ nothing — the "idle channels are literally free" refinement), then per channel
    - unknown `"t"` (or a non-u8 image) → a **metadata card** (the descriptor
      rides; the UI shows a labelled card).
 4. **Build the wire frame** through the SHARED encoder
-   (`plugins/expose/src/xex1_encode.hpp`) — the WS-preview arm
+   (`toolbox/expose/src/xex1_encode.hpp`) — the WS-preview arm
    `[BLOB,{preview:{w,h,c,enc,q,data}}]` for a jpeg, or the verbatim
    self-describing buffer for the raw / metadata cases.
 5. **Hand to expose** — `xi.ui.sink` with `$channel` + bin `frame`.
@@ -123,7 +123,7 @@ consumer needs it.
 
 ## Tests
 
-- **`plugins/cap_ui_egress_test.cpp`** (ctest unit) drives the WHOLE pipeline in
+- **`toolbox/ui_egress/tests/cap_ui_egress_test.cpp`** (ctest unit) drives the WHOLE pipeline in
   process against the three REAL DLLs (ui_egress + imgcodec + expose) through the
   real cap plane, observed only through the `stats` / `get` / `subscribe`
   exchanges. Because a push does NOT force an early flush (the flusher's wake CV
@@ -134,7 +134,7 @@ consumer needs it.
   `dedup_hits` climbs), **latest-wins** (a burst collapses to the LAST frame —
   the superseded ones do zero encode work), **LRU eviction** (`lru_entries` caps
   at `lru_max`), and unregister-on-teardown + pack balance.
-- **`examples/qa_ui_egress`** (python e2e) proves the wall-clock behaviour the
+- **`qa/qa_ui_egress`** (python e2e) proves the wall-clock behaviour the
   ctest cannot: a 30fps `mock_camera` (`ui_preview=on`) is **rate-capped** to the
   egress `fps` at a real WS client (delivered ≪ pushed) carrying a full-res jpeg
   preview; the **no-subscriber** window shows `encodes==0`/`dropped_no_sub>0`; and

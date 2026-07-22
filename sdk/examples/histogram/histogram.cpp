@@ -61,7 +61,7 @@ public:
 
         // Scalars ride as typed entries; the counts[256] array rides as one
         // nested canonical-msgpack entry (tag XI_PACK_TAG_MP). A consumer
-        // decodes it with xi::mp::Reader — see plugins/blob_analysis for the
+        // decodes it with xi::mp::Reader — see toolbox/blob_analysis for the
         // read side of this pattern.
         out.i64("pixels",     pixels);
         out.f64("mean",       mean);

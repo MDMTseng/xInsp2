@@ -5,7 +5,8 @@
 // Output layout:
 //   release/xinsp2-<version>-win-x64/
 //     bin/                xinsp-backend.exe + DLLs
-//     plugins/            built plugins
+//     plugins/            built plugins   (runtime name — the backend
+//                         auto-scans <cwd>/plugins; the SOURCE tree is toolbox/)
 //     sdk/                template + examples + cmake module
 //     extension/          xinsp2-<version>.vsix
 //     docs/               FRAMEWORK / NewDeal / protocol
@@ -98,11 +99,11 @@ if (!NO_REBUILD || !existsSync(exePath)) {
 }
 
 // ---- 2. Build plugins (lib only — DLLs already land next to plugin.json) ----
-const pluginsBuild = join(ROOT, 'plugins', 'build');
+const pluginsBuild = join(ROOT, 'toolbox', 'build');
 if (!NO_REBUILD || !existsSync(pluginsBuild)) {
     if (!existsSync(pluginsBuild)) mkdirSync(pluginsBuild, { recursive: true });
-    sh(`cmake -S plugins -B plugins/build -A x64`);
-    sh(`cmake --build plugins/build --config Release`);
+    sh(`cmake -S toolbox -B toolbox/build -A x64`);
+    sh(`cmake --build toolbox/build --config Release`);
 }
 
 // ---- 3. Build VS Code extension (esbuild bundle) and package as VSIX ----
@@ -136,10 +137,16 @@ for (const f of readdirSync(binSrc)) {
     }
 }
 
-// plugins/ — copy each plugin folder (skip build dirs)
-for (const p of readdirSync(join(ROOT, 'plugins'))) {
-    const ps = join(ROOT, 'plugins', p);
-    if (!statSync(ps).isDirectory() || p === 'build') continue;
+// toolbox/ (source) -> plugins/ (bundle): the backend auto-scans <cwd>/plugins,
+// so the shipped folder keeps the runtime name. Skip build dirs.
+// Not every folder under toolbox/ is a plugin. `tests` is the cross-plugin ctest
+// suite and `pluginlets` is a compile-time source library that plugin authors
+// #include — neither is something the backend should find while scanning
+// <cwd>/plugins, and neither belongs in a customer bundle.
+const NOT_A_PLUGIN = new Set(['build', 'tests', 'pluginlets']);
+for (const p of readdirSync(join(ROOT, 'toolbox'))) {
+    const ps = join(ROOT, 'toolbox', p);
+    if (!statSync(ps).isDirectory() || NOT_A_PLUGIN.has(p)) continue;
     copyDir(ps, join(STAGE, 'plugins', p));
 }
 

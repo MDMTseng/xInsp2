@@ -13,7 +13,7 @@ try {
         vscodeExecutablePath: existsSync(localVSCode) ? localVSCode : undefined,
         extensionDevelopmentPath: resolve(__dirname, '..'),
         extensionTestsPath: resolve(__dirname, 'e2e', 'index.cjs'),
-        launchArgs: [resolve(__dirname, '..', '..', 'examples'), '--disable-extensions'],
+        launchArgs: [resolve(__dirname, '..', '..', 'qa'), '--disable-extensions'],
     });
     console.log('Graph Multi E2E PASSED');
 } catch (err) {

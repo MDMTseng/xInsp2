@@ -3,7 +3,7 @@
 > **Status: Phase 1 + Phase 2 shipped.** 2026-06-05.
 > Phase 1 (`RESULT` API + `run_result` event + `XI_SYS_DROPPED` at the drop site)
 > and Phase 2 (per-group `result_order` via a per-lane `EmitGate`) are both built +
-> regression-tested (`examples/qa_run_result/` + `qa_dispatch_groups` Test E).
+> regression-tested (`qa/qa_run_result/` + `qa_dispatch_groups` Test E).
 
 ## Goal
 
@@ -168,7 +168,7 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
    `bind:{result:true}` (or no `var`); the demo dashboard + `hmi/demo` use it.
 6. **PLC / MES integration** — deferred; a plugin handles forwarding the result to
    external systems. Direct gateway consumption of `run_result` is v1.1.
-7. **Test + docs** — `examples/qa_run_result/` (ok/ng/unset → assert
+7. **Test + docs** — `qa/qa_run_result/` (ok/ng/unset → assert
    `run_result.code`; a `queue_depth:1` flooded project → assert `XI_SYS_DROPPED`);
    update `write-a-script.md` (`VAR` vs `RESULT`).
 

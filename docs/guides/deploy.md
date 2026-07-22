@@ -78,7 +78,7 @@ project plugins are **pre-compiled on the dev box** (via a throwaway dev backend
 and shipped as DLLs; the target backend loads them with **`--aot`** (a `.dll`
 `script` path is loaded directly; project plugins load the newest `build/*.dll`
 instead of compiling), so the target never runs `cl.exe`. Proven by
-`examples/qa_export_bundle/` (runs the bundle with a stripped PATH — no `cl.exe`
+`qa/qa_export_bundle/` (runs the bundle with a stripped PATH — no `cl.exe`
 reachable — and still inspects).
 
 ```
@@ -156,7 +156,7 @@ On a crash, the FE supervisor respawns the backend with the **same** flags; the
 settings rather than reverting to the pristine project — settings survive the
 crash. The FE forwards `--working-copy` (CLI or `fe.json` `"working_copy": true`)
 to every backend it spawns, including respawns. Proven by
-`examples/qa_working_copy/driver_fe.py` (FE seeds the scratch, an edit is saved,
+`qa/qa_working_copy/driver_fe.py` (FE seeds the scratch, an edit is saved,
 the backend is hard-killed, the FE respawns it and the backend resumes the
 scratch with the uncommitted edit intact).
 
@@ -171,5 +171,5 @@ scratch with the uncommitted edit intact).
   workspace edits the scratch files). A truly remote backend would need the
   scratch on the backend host — out of scope today.
 
-Regression: `examples/qa_working_copy/` drives the whole lifecycle (seed →
+Regression: `qa/qa_working_copy/` drives the whole lifecycle (seed →
 isolation → crash-resume → commit → discard) against an on-disk `kv` instance.

@@ -1,0 +1,9 @@
+{
+  "name": "imgcodec_example",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "codec", "plugin": "imgcodec" },
+    { "name": "view",  "plugin": "expose" }
+  ],
+  "plugins": {}
+}

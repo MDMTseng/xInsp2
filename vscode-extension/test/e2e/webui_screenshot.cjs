@@ -23,7 +23,7 @@ const assert = require('assert');
 const { sleep, makeShooter, clearOldShots } = require('./journey_helpers.cjs');
 
 const REPO    = path.resolve(__dirname, '..', '..', '..');
-const PROJECT = path.join(REPO, 'examples', 'blob_tracker');
+const PROJECT = path.join(REPO, 'qa', 'blob_tracker');
 const INSTANCE = 'det';
 const PLUGIN   = 'blob_centroid_detector';
 

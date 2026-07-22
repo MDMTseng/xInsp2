@@ -1,0 +1,14 @@
+{
+  "name": "data_output_example",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "instances": [
+    { "name": "out", "plugin": "data_output" }
+  ],
+  "plugins": {}
+}

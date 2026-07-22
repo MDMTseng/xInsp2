@@ -41,7 +41,7 @@ tools/xinsp2_py/tests`) → **live** (`contract/live_conformance.py`, the third
 contract leg — live WS bytes vs schemas + the `contract/live-allowlist.json`
 ratchet — run under the gate's own python with
 `XINSP2_REQUIRE_SCHEMA_GATE=1`, so a missing dep fails instead of skipping) →
-**qa** (the `examples/qa_*` sweep) → **fuzz** (the black-box fuzz smoke,
+**qa** (the `qa/qa_*` sweep) → **fuzz** (the black-box fuzz smoke,
 `tests/fuzz/run_smoke.py`).
 
 This is the single source of truth for "what must pass," and CI is a thin
@@ -52,7 +52,7 @@ drift. `--only` / `--skip` select stages; `--list` shows them; `--port` sets the
 fuzz WS port (defaults to 7824 so it dodges the VS Code extension on a dev box).
 
 The **qa** stage honors a quarantine
-([`examples/qa_known_failing.txt`](../examples/qa_known_failing.txt)) so the gate
+([`qa/qa_known_failing.txt`](../qa/qa_known_failing.txt)) so the gate
 is usable on a base that still has pre-existing broken examples: a quarantined
 test runs but its failure is a loud, non-fatal `KNOWN-FAIL`, while a quarantined
 test that *passes* is fatal (the list can't rot green). `run_qa.py --strict`
@@ -371,7 +371,7 @@ Precise wording so the baselines aren't over-read:
   `ext_add(2,3)==5`.
 - **Phase G stress + race** (#92; see
   `docs/archive/fe-be-split-test-plan.md` "Phase G"). Beyond the `test_qa_fault` /
-  `test_qa_race` units above: `examples/qa_recover/` proves the **recover-and-clear** transition
+  `test_qa_race` units above: `qa/qa_recover/` proves the **recover-and-clear** transition
   (a backend that crashes a few times then heals → FE clears `down` back to
   `healthy`, never hits the cap — the `crash_then_heal` plugin counts crashes in a
   respawn-surviving marker). (The `qa_soak` full-stack FE+BE+gateway soak was
@@ -384,7 +384,7 @@ Precise wording so the baselines aren't over-read:
   itself). `backend/tests/test_prepare_concurrency.cpp` adds the ABI v7 staging
   contract (`prepare` ungated, `commit` gated). Guards against a regression that
   lets a `set_def` into a non-reentrant instance while `process()` is in flight.
-  `examples/qa_reentrancy/` demonstrates the same model end-to-end (`python
+  `qa/qa_reentrancy/` demonstrates the same model end-to-end (`python
   driver.py` → VERDICT: PASS) — a 4-thread pool pokes serial / parallel / capped
   probe instances and asserts max concurrency 1 / ≥2 / 1.
 - **Plugin dependency-DLL base-name clash** — `examples/dll_version_clash/`
@@ -392,7 +392,7 @@ Precise wording so the baselines aren't over-read:
   proves the Windows loader's one-module-per-base-name rule across three load
   modes (full-path → no clash, by-name same-name → clash, by-name distinct → no
   clash).
-- **Per-worker watchdog** — `examples/qa_watchdog/` proves the inspect watchdog
+- **Per-worker watchdog** — `qa/qa_watchdog/` proves the inspect watchdog
   now fires under `dispatch_threads > 1` (it tracks a deadline slot per worker,
   not one global slot) and that a hard trip (inspect still wedged after the
   grace window — the cooperative soft-cancel phase is retired)
@@ -400,7 +400,7 @@ Precise wording so the baselines aren't over-read:
   `TerminateThread` a worker (which would leak the per-instance lock). The N=1
   path + WS contract is covered by `vscode-extension/test/runWatchdog.mjs`.
   Windows-only; skip on non-`nt`.
-- **Project working copy** — `examples/qa_working_copy/` proves the
+- **Project working copy** — `qa/qa_working_copy/` proves the
   transactional `<project>/.xinsp_work` scratch (`open_project working_copy:true`
   + `commit_working_copy` / `discard_working_copy`). Drives the full lifecycle on
   an on-disk `kv` instance: seed → edits isolated to the scratch (canonical
@@ -424,14 +424,14 @@ Precise wording so the baselines aren't over-read:
   group only runs on its core mask), `qa_min_interval` (rate cap 20/s→10/s),
   `qa_runtime_settings` (live `set_timer_fps`/`set_process_priority` + the
   `project.json` `runtime` block applied on open).
-- **Per-run Result** — `examples/qa_run_result/` proves the `run_result` event
+- **Per-run Result** — `qa/qa_run_result/` proves the `run_result` event
   (verdict code + message, dropped→`XI_SYS_DROPPED`, reserved-band warning).
-- **local_image_source auto mode** — `examples/qa_local_auto/` proves the reused
+- **local_image_source auto mode** — `qa/qa_local_auto/` proves the reused
   "local" source self-emitting a folder on a timer (auto-update).
-- **BE-served dashboard** — `examples/qa_get_dashboard/` proves `cmd:get_dashboard`
+- **BE-served dashboard** — `qa/qa_get_dashboard/` proves `cmd:get_dashboard`
   serves `<project>/dashboard[.<name>].json` (missing → found:false; path traversal
   blocked) so the HMI needs only the WS URL.
-- **Export bundle (AOT, no toolchain)** — `examples/qa_export_bundle/` exports a
+- **Export bundle (AOT, no toolchain)** — `qa/qa_export_bundle/` exports a
   project via `tools/export_bundle.py`, then runs the bundle backend with `--aot`
   and a **stripped PATH** (no `cl.exe`) and still inspects — proving prebuilt
   plugin/script DLLs load with no compiler on the target.
@@ -455,9 +455,9 @@ Precise wording so the baselines aren't over-read:
 
 ---
 
-## Running the `examples/qa_*` suite
+## Running the `qa/qa_*` suite
 
-`python tools/run_qa.py [filter]` runs every `examples/qa_*/driver.py`
+`python tools/run_qa.py [filter]` runs every `qa/qa_*/driver.py`
 sequentially, aggregates `VERDICT: PASS|FAIL|SKIP`, and exits non-zero on any
 failure (CI-gate usable). `python tools/run_qa.py group` runs only the
 folder-name matches; `--list` lists without running; `--timeout=N` caps each.

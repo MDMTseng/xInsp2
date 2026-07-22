@@ -1,0 +1,14 @@
+{
+  "name": "lut_owner_example",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "lut",    "plugin": "lut_owner" },
+    { "name": "grader", "plugin": "lut_client" }
+  ],
+  "plugins": {
+    "lut_client": {
+      "path": "lut_client",
+      "compile": true
+    }
+  }
+}

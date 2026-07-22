@@ -3,8 +3,8 @@
 Status: **pilot LANDED on the polaris2 line** (pre-v12, 2026-07-03; design
 maintainer-settled 2026-07-03). The plane is live code: host registry + funnel
 + reentrancy guard (`xi_cap_abi.hpp` / `xi_cap_guard.hpp`), the first official
-lib plugin `plugins/imgcodec`, ctest `cap_plane_test` + `cap_imgcodec_test`,
-and QA `examples/qa_cap_imgcodec` — all green. Zero ABI slots were spent (see
+lib plugin `toolbox/imgcodec`, ctest `cap_plane_test` + `cap_imgcodec_test`,
+and QA `qa/qa_cap_imgcodec` — all green. Zero ABI slots were spent (see
 the ABI bill below); v12 may still formalize the surface, the pilot proves the
 shape. See "The pilot implementation" at the end. **V3 (machine-level autoload —
 a provider available with NO per-project instance) also LANDED pre-v12** as a
@@ -228,7 +228,7 @@ sibling) + `xi_cap_guard.hpp` (leaf thread-local state):
 - Published by `install_cap_plane()` next to `install_pack_abi()`
   (default_host_api, certify, tests) through ImagePool slot bridges.
 
-**The first lib plugin** — `plugins/imgcodec` (`"lib": true` marker in
+**The first lib plugin** — `toolbox/imgcodec` (`"lib": true` marker in
 plugin.json, informational): registers `xi.jpeg.encode` (image + quality →
 JPEG; content-keyed dedup memo cache — pool-handle identity is not exposed
 across the ABI pre-v12, so FNV-1a content hash + params is the key, same
@@ -251,7 +251,7 @@ fallback, self-serve reentrancy refusal (the decoder is never served by
 itself — funnel −5 → stb; its decode counter does not move), decoder-fault
 (quarantine −3) clean fallback with the fault still attributed to the lib
 instance, and identical fail modes on corrupt/null; QA
-`examples/qa_cap_imgcodec` (live service: script → consumer pack door →
+`qa/qa_cap_imgcodec` (live service: script → consumer pack door →
 host-forwarded capability, encode counter pinned at 1 across every run).
 
 ### V3: machine-level autoload (LANDED pre-v12)
@@ -325,8 +325,8 @@ the pack plane real identity for things it currently only names".
 ## Appendix: the resource-handle convention (type-owner lib plugins)
 
 Status: **maintainer-settled; demo landed on the polaris2 line** (pre-v12).
-Executable reference: `plugins/lut_owner` (the `demo.lut` type owner), ctest
-`cap_lut_owner_test`, QA `examples/qa_resource_handle` — all green. `demo.lut`
+Executable reference: `toolbox/lut_owner` (the `demo.lut` type owner), ctest
+`cap_lut_owner_test`, QA `qa/qa_resource_handle` — all green. `demo.lut`
 is exemplar-grade, not a roster member.
 
 Some plugins own **heavy custom data types** — build-once-query-many

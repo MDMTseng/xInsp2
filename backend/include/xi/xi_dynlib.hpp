@@ -170,3 +170,27 @@ inline DWORD GetModuleFileNameA(HMODULE mod, char* buf, DWORD size) {
 }
 
 #endif // _WIN32
+
+#include <string>
+
+// Map a plugin manifest's Windows-convention module name ("xi-<name>.dll") to the
+// platform's actual shared-object file. Plugin manifests (plugin.json "dll") and
+// the toolbox/ CMake share the SAME "xi-" prefix on every platform
+// (CMAKE_SHARED_LIBRARY_PREFIX="xi-"), so only the SUFFIX differs: .dll on
+// Windows, .so on Linux, .dylib on macOS. A path that already carries the native
+// suffix (e.g. a JIT-compiled script/plugin .so) is returned unchanged, so this
+// is safe to apply at every module-load site. Use it wherever a manifest-derived
+// module path is handed to the loader (load_plugin_dll_, the certify child).
+inline std::string platform_module_path(const std::string& path) {
+#if defined(_WIN32)
+    return path;   // manifests already name the .dll
+#else
+    if (path.size() > 4 && path.compare(path.size() - 4, 4, ".dll") == 0)
+#  if defined(__APPLE__)
+        return path.substr(0, path.size() - 4) + ".dylib";
+#  else
+        return path.substr(0, path.size() - 4) + ".so";
+#  endif
+    return path;
+#endif
+}

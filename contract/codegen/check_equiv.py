@@ -13,13 +13,13 @@ Python interpreter is present -- like the contract_baseline gate.
   (c) DRIFT (the equivalence core): for each decl, extract the key-constant map
       {kName -> "value"} + kSchemaVersion from the generated _keys.gen.h and from
       the decl itself; they must agree exactly (the generator must emit precisely
-      the decl's key set). If a hand-written plugins/<p>/<p>_keys.h is STILL
+      the decl's key set). If a hand-written toolbox/<p>/<p>_keys.h is STILL
       present (a plugin declared but not yet swapped), it is ALSO compared so the
       pending swap is proven a true drop-in. Post-swap (docs/new_gen/08 Wave 3)
       that hand-written header is deleted and the plugin includes _keys.gen.h
       directly, so the decl<->generated leg is the whole proof and an absent
       hand-written header is the swapped state, not a failure.
-  (e) COVERAGE RATCHET (WARN, non-fatal): list every plugin under plugins/ that
+  (e) COVERAGE RATCHET (WARN, non-fatal): list every plugin under toolbox/ that
       ships a hand-written *_keys.h but has no decl in contract/plugins/. This
       makes the ratchet direction visible without blocking -- the covered-plugin
       set only grows.
@@ -40,7 +40,7 @@ import gen_contract as gc  # sibling module
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-PLUGINS = REPO / "plugins"
+PLUGINS = REPO / "toolbox"
 COMMITTED = HERE / "generated" / "plugins"
 
 # inline constexpr const char* kName = "value";
@@ -102,7 +102,7 @@ def check_drift(decl: dict) -> list[str]:
         problems.append(f"{plugin}: generated kSchemaVersion {gen_ver} != decl {decl['schema_version']}")
 
     # decl <-> hand-written (OPPORTUNISTIC). Post-swap (docs/new_gen/08 Wave 3)
-    # the plugin has DELETED its hand-written plugins/<p>/<p>_keys.h and consumes
+    # the plugin has DELETED its hand-written toolbox/<p>/<p>_keys.h and consumes
     # the generated _keys.gen.h directly, so the decl is the sole source of truth
     # and the decl<->generated leg above is the whole drop-in proof. While a plugin
     # is still pre-swap (a hand-written keys.h present alongside a fresh decl), this

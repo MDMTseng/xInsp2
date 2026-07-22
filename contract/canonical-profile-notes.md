@@ -311,7 +311,7 @@ for that discriminator is a BARE `type` str entry, NOT `$type`:
   (`$fault: "unsupported_version"` + `$versions`). A missing `type` on a door
   that requires one is the ordinary `missing_input`.
 
-Reference example: `examples/qa_pack_poly_door` (the bundled `poly_door`
+Reference example: `qa/qa_pack_poly_door` (the bundled `poly_door`
 plugin: `type="measure"` → image stats, `type="annotate"` → derived overlay
 entry, anything else → `unsupported_type` + `types`).
 ### Doc-18 addendum: streaming via chunking (docs/new_gen/18)
@@ -332,7 +332,7 @@ pack travels as a SEQUENCE of ordinary sealed packs on one lane.
 The CONSUMER owns the (bounded) reassembly window; the host never buffers or
 stamps. A `$fault` pack carrying the stream's `$stream` id poisons the WHOLE
 stream (the doc-15 one-poison-marker rule: abort, discard partials, drop
-stragglers). Worked example: `examples/qa_pack_stream/`.
+stragglers). Worked example: `qa/qa_pack_stream/`.
 
 ### E2 addendum: the XEX1-v3 `preview` image sub-entry (expose WS-SEND only)
 
@@ -340,7 +340,7 @@ The expose plugin's live WS wire (XEX1-v3, magic `'XEX1'` + a canonical map
 `{v:3, channel, seq, frame:{key:[tag, value]}}`) gained an OPTIONAL compressed
 substitution for image entries. It is a WIRE convention on expose's SEND path
 ONLY — never on disk. `record_save` and every replay file keep the raw image
-descriptor via the SHARED `plugins/expose/src/xex1_pack_dump.hpp::encode_pack_v3`,
+descriptor via the SHARED `toolbox/expose/src/xex1_pack_dump.hpp::encode_pack_v3`,
 so the memory ≈ disk identity and record→replay byte-equality are unchanged.
 
 - The v3 image tag is UNTOUCHED. An image entry is still
@@ -359,5 +359,5 @@ so the memory ≈ disk identity and record→replay byte-equality are unchanged.
 - The DISK/replay v3 image descriptor stays the frozen 4-key `{w,h,c,px}`;
   `xex1_pack_parse.hpp` refuses any other image-descriptor shape (a `preview`
   key on a replay file is a corrupt/foreign artifact). Worked example +
-  cross-decoder deltas: `examples/qa_jpeg_preview/`, `examples/lib/xex1.py`,
-  `plugins/expose/ui/index.html`.
+  cross-decoder deltas: `qa/qa_jpeg_preview/`, `qa/lib/xex1.py`,
+  `toolbox/expose/ui/index.html`.

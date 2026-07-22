@@ -66,7 +66,7 @@ public:
     // that override the pack door). A source that ALSO wants an in-band
     // control door — closed-loop actuation from a script, effective on the
     // next emitted frame — overrides the door on top and adds the macro; see
-    // plugins/mock_camera for that pattern.
+    // toolbox/mock_camera for that pattern.
 
     // Control channel. The UI posts { command: "start" | "stop" |
     // "set_interval"(value) | "set_size"(width,height) | "get_status" }.

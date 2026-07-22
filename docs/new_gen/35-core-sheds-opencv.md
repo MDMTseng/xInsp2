@@ -2,7 +2,7 @@
 
 Status: **LANDING** on `exp/core-shed-opencv` (branched off `polaris2_main`,
 2026-07). Completes OQ-9 for the backend: the plugins build already decoupled
-OpenCV (`plugins/CMakeLists.txt`: "OpenCV — NO LONGER a mandatory dependency"); the
+OpenCV (`toolbox/CMakeLists.txt`: "OpenCV — NO LONGER a mandatory dependency"); the
 backend's `xi_core` was the last target still forcing it onto everything.
 
 ## What OpenCV actually did in the core (nothing)

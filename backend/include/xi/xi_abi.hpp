@@ -875,7 +875,12 @@ private:
 extern "C" XI_EXPORT                                               \
 void* xi_plugin_create(const xi_host_api* host, const char* name) {            \
     try { return new ClassName(host, name); }                                   \
-    catch (...) { return nullptr; }                                             \
+    catch (const std::exception& e) {                                           \
+        std::fprintf(stderr, "[xinsp2] plugin create() threw: %s\n", e.what()); \
+    } catch (...) {                                                             \
+        std::fprintf(stderr, "[xinsp2] plugin create() threw (non-std)\n");     \
+    }                                                                          \
+    return nullptr; /* fail-loud: the host logs a skipped instance either way */ \
 }                                                                              \
                                                                                \
 extern "C" XI_EXPORT                                               \

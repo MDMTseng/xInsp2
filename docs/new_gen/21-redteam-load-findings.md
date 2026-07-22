@@ -33,7 +33,7 @@ consumer would then time out (or worse, accept stragglers) instead of aborting.
 **Fix.** Copy `kStream`/`kPart` (i64) and `kEof` (bool) forward when present,
 exactly as `$seq` is carried. Cheap, presence-gated, no payload copied.
 
-**Test.** `plugins/use_pack_door_test.cpp` §8b: a fault sealed with
+**Test.** `toolbox/tests/use_pack_door_test.cpp` §8b: a fault sealed with
 `$stream=1002/$part=2/$eof` short-circuits a hop; assert all three survive on the
 propagated fault (and the door never ran).
 
@@ -41,7 +41,7 @@ propagated fault (and the door never ran).
 
 ### RT2 / F3 — stream consumer poisoned by a FOREIGN fault  · Med · CLEAR
 
-**Where.** `examples/qa_pack_stream/inspect.cpp` consumer state machine.
+**Where.** `qa/qa_pack_stream/inspect.cpp` consumer state machine.
 
 **Repro.** Deliver a `$fault` tagged for stream A to a consumer reassembling
 stream B (a shared lane carries faults for every stream on it). The consumer
@@ -58,7 +58,7 @@ for another stream, or a stream-less fault, is ignored (reassembly untouched). A
 first-seen fault still binds the consumer's id (so a stream that opens with its
 own poison still aborts).
 
-**Test.** `examples/qa_pack_stream` stream 1004: mid-flight it receives a fault
+**Test.** `qa/qa_pack_stream` stream 1004: mid-flight it receives a fault
 for stream 1002 and a stream-less fault, then completes normally with both
 features found exactly once. Surfaced as `s4_foreign_fault_ignored` and asserted
 by `driver.py`.
@@ -67,8 +67,8 @@ by `driver.py`.
 
 ### RT3 / F5 — `record_replay` injects `$channel/$seq` unconditionally  · Med · CLEAR
 
-**Where.** `plugins/record_replay/record_replay.cpp` + the XEX1-v3
-encoder/parser (`plugins/expose/src/xex1_encode.hpp`, `xex1_pack_dump.hpp`,
+**Where.** `toolbox/record_replay/record_replay.cpp` + the XEX1-v3
+encoder/parser (`toolbox/expose/src/xex1_encode.hpp`, `xex1_pack_dump.hpp`,
 `xex1_pack_parse.hpp`).
 
 **Repro.** Record a pack that carries **no** `$channel`/`$seq`, replay it, compare
@@ -88,7 +88,7 @@ The parser signals `ParsedFrame::has_channel`/`has_seq`; record_replay injects
 each only when the file carried it. A frame with both present is still the
 `map(4)` `{v,channel,seq,frame}` shape — unchanged bytes.
 
-**Test.** `plugins/record_replay_pack_test.cpp` §G: save a 3-entry pack with no
+**Test.** `toolbox/record_replay/tests/record_replay_pack_test.cpp` §G: save a 3-entry pack with no
 `$channel/$seq`, replay, assert neither key was injected and
 `replayed.size() == original.size()`.
 
@@ -155,7 +155,7 @@ R1.
 — resume (default) on scope exit so continuous streaming for the remaining
 instances comes back.
 
-**Test.** `examples/qa_remove_under_load/` — mock_camera (PACK MODE) self-drives a
+**Test.** `qa/qa_remove_under_load/` — mock_camera (PACK MODE) self-drives a
 continuous stream; the inspect script chains every trigger pack into a churned
 `victim` instance's door (keeping its refs in the dispatch flow) while the driver
 hammers `remove_instance`/`create_instance` on `victim` under load. Asserts
@@ -325,11 +325,11 @@ audit trail is complete:
 
 | Finding | Regression test |
 |---|---|
-| RT1 / F1 | `plugins/use_pack_door_test.cpp` §8b (stream identity survives a hop) |
-| RT2 / F3 | `examples/qa_pack_stream` (`s4_foreign_fault_ignored`, driver-asserted) |
-| RT3 / F5 | `plugins/record_replay_pack_test.cpp` §G (no `$channel/$seq` injected) |
+| RT1 / F1 | `toolbox/tests/use_pack_door_test.cpp` §8b (stream identity survives a hop) |
+| RT2 / F3 | `qa/qa_pack_stream` (`s4_foreign_fault_ignored`, driver-asserted) |
+| RT3 / F5 | `toolbox/record_replay/tests/record_replay_pack_test.cpp` §G (no `$channel/$seq` injected) |
 | RT4 / B1 | `backend/tests/test_cap_provider_refcount.cpp` (shadow promotion) |
-| RT5 | `examples/qa_remove_under_load/` (remove under continuous load) |
+| RT5 | `qa/qa_remove_under_load/` (remove under continuous load) |
 | RT6 / A1·A2 | `backend/tests/test_cap_reinit_race.cpp` (funnel vs reinit) |
 | RT7 / P1 | `backend/tests/test_emit_gate.cpp` §P1 (verdict⇔actuation coupling) |
 | P2 | design note only (this doc §P2 / doc 19 RT8) |
