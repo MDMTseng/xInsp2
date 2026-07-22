@@ -46,3 +46,22 @@ qa_recover
 #     and every cap call returns rc=-99 (empirically flaked here at jobs=4). ---
 qa_cap_imgcodec
 qa_cap_imgcodec_autoload
+
+# --- added 2026-07-22 after flaking at --jobs=2 on a 4-core aarch64 host ---
+#     Two have a confirmed mechanism; the third is here on this file's own
+#     conservative rule (it flaked in parallel, and being wrongly-serial only
+#     costs wall-time).
+#
+#     qa_func: AS-I1 waits for the backend's 'autostart: ready' log line inside
+#       PORT_UP_BUDGET. Under load the FE+BE pair plus a JIT compile miss it.
+#       Reproduced: fails with "backend never reached 'autostart: ready'".
+#     qa_jpeg_preview: phase2 recompiles the script while a second backend and
+#       the imgcodec provider are live. Reproduced: compile_and_load itself
+#       returns "compile failed" — g++ starved, same class as the qa_cap_imgcodec
+#       entry above.
+#     qa_param_state_isolation: observed failing in a full --jobs=2 run, but NOT
+#       reproduced when run 3-way concurrent by hand, so the mechanism is
+#       unconfirmed. Listed rather than argued about.
+qa_func
+qa_jpeg_preview
+qa_param_state_isolation
