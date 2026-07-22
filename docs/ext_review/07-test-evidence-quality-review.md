@@ -98,9 +98,9 @@ that runs them is a human at a keyboard.
 
 The gap is sharpest for fuzz, which was *written* to be enforced.
 `tests/fuzz/README.md:10-12` describes the smoke as promoted "from one-shot
-`examples/` surveys into a maintained, reduced-iteration smoke that can be wired
+`qa/` surveys into a maintained, reduced-iteration smoke that can be wired
 into CI as a build-breaking net," and `run_smoke.py:1-13` repeats the intent —
-but nothing invokes it. `tools/run_qa.py` runs only `examples/qa_*/driver.py`
+but nothing invokes it. `tools/run_qa.py` runs only `qa/qa_*/driver.py`
 and never touches the fuzz smoke; the C++ fuzz targets are gated OFF (finding 5).
 
 #### Consequence

@@ -121,9 +121,9 @@ Checked against the tree:
   (`client.py:841-853`).
 
 The code that actually exists is elsewhere and named differently: the JS decoder
-is `decodeXEX1` + `restoreNonFinite` in `plugins/expose/ui/index.html:156,178`;
+is `decodeXEX1` + `restoreNonFinite` in `toolbox/expose/ui/index.html:156,178`;
 the Python decoder is `decode_xex1` + `_restore_nonfinite` in
-`examples/lib/xex1.py:93,83`.
+`qa/lib/xex1.py:93,83`.
 
 #### Consequence
 
@@ -135,15 +135,15 @@ handles it and calls `json.loads` / `JSON.parse` on the expose `json` string
 directly. A non-finite measurement then reads back as the literal string `"NaN"`:
 a JS threshold compare silently misfires, a Python compare raises `TypeError`
 (`ws-protocol.md:118-127`, the project's own description of the failure). The doc
-points them straight past the two files (`plugins/expose/ui/index.html`,
-`examples/lib/xex1.py`) that would have shown them the pattern.
+points them straight past the two files (`toolbox/expose/ui/index.html`,
+`qa/lib/xex1.py`) that would have shown them the pattern.
 
 #### Recommendation
 
 Correct the three file references in `ws-protocol.md` to the real locations, and
 state plainly what is true: **the shipped SDK (`client.py`) and the shim
 (`ws-client.mjs`) are transport-generic and do *not* decode or restore** — the
-reference decoders are the expose plugin's own webUI and `examples/lib/xex1.py`. A
+reference decoders are the expose plugin's own webUI and `qa/lib/xex1.py`. A
 consumer that decodes expose frames itself owns the restore. This is a Bucket-A
 truth-correction; it costs nothing and removes an active trap.
 
@@ -328,9 +328,9 @@ rewriting it.
 The expose preview frame is encoded and decoded by three independent, hand-rolled
 partial-msgpack implementations:
 
-- Encoder: `plugins/expose/src/expose.cpp:46-79` (`mp_uint`/`mp_str`/`mp_bin`/…).
-- JS decoder: `plugins/expose/ui/index.html:108-153` (`MsgpackReader`).
-- Python decoder: `examples/lib/xex1.py:33-60` (`_mp`).
+- Encoder: `toolbox/expose/src/expose.cpp:46-79` (`mp_uint`/`mp_str`/`mp_bin`/…).
+- JS decoder: `toolbox/expose/ui/index.html:108-153` (`MsgpackReader`).
+- Python decoder: `qa/lib/xex1.py:33-60` (`_mp`).
 
 I checked them against each other by type: the encoder emits only `fixmap`,
 `fixarray`/`array16`/`array32`, `fixstr`/`str8`/`str16`/`str32`, `bin8/16/32`, and

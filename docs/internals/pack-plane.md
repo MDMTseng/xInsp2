@@ -179,7 +179,7 @@ stored scalars raw. The walk API:
   package's contract).
 
 The identity "memory == wire" is pinned by
-`plugins/xex1_v2_identity_test.cpp`: **`raw_at(i)` == `canonical_value` == an
+`toolbox/xex1_v2_identity_test.cpp`: **`raw_at(i)` == `canonical_value` == an
 independent `xi::mp::Writer` re-encode == the XEX1-v3 encoder's wire bytes ==
 disk** — a *structural* identity, not a walker convention. `raw_at(i)` returns
 the entry's stored canonical bytes for every inline entry (empty for EXTERN
@@ -369,10 +369,10 @@ The wire/disk form of a pack is the XEX1-v3 frame:
 `[tag, value]` pair, so the stored type is recovered exactly from the on-wire
 `XI_PACK_TAG_*`, never guessed by shape (the v2 draft's image-descriptor
 ambiguity is unrepresentable). One generic encoder walk
-(`plugins/expose/src/xex1_pack_dump.hpp` → `encode_pack_v3`) is shared by every
+(`toolbox/expose/src/xex1_pack_dump.hpp` → `encode_pack_v3`) is shared by every
 pack sink (expose wire-push, `record_save` disk dumps); the parser
 (`xex1_pack_parse.hpp`) gates magic + version and runs every entry through the
-ingress canonicalizer (disk is untrusted). `plugins/record_replay` closes the
+ingress canonicalizer (disk is untrusted). `toolbox/record_replay` closes the
 loop: it re-emits `.xex1` dumps as sealed packs, and re-dumping reproduces the
 file bytes exactly — record → save → replay is byte-lossless. Pre-v3 (tagless
 draft) files are refused with a sealed `$fault` pack

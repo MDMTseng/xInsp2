@@ -43,7 +43,7 @@ plugin's own buffer becomes the only real queue, and let the plugin pace itself:
 - The plugin **paces emits off completion feedback** (`run_result`) or the
   back-pressure of `overflow:block` — there is no separate push-back signal.
 
-Worked exemplar: **`examples/qa_plugin_queue_sim/`** (LANDED) — a `queue_source`
+Worked exemplar: **`qa/qa_plugin_queue_sim/`** (LANDED) — a `queue_source`
 plugin holding its own deep `std::deque` (backlog 500) and pacing its emits purely
 off the core lane's back-pressure, over a `depth=0` (rendezvous, group `rv`) and a
 `depth=1` (pipeline, group `pipe`) lane. Measured: both lossless (emitted==processed,
@@ -102,7 +102,7 @@ Landed as: `service_internal.hpp` (`GroupLane::taken_count`), `service_dispatch.
 the `depth==0` rendezvous branch that runs BEFORE the block/push/drop logic and
 returns before any drop path), `xi_pm_project.hpp` (queue_depth clamp min 0 + the
 "depth 0 requires overflow:block, else warn+clamp to 1" validation at both project
-and group scope), `xi_project_model.hpp` (field docs). Test: `examples/
+and group scope), `xi_project_model.hpp` (field docs). Test: `qa/
 qa_plugin_queue_sim/` (run_qa `qa_*` glob; strict PASS x2).
 
 ## 4. Admission ⇄ envelope — the two valves (the reusable pattern)

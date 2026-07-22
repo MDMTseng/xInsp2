@@ -1,5 +1,5 @@
 {
-  "$comment": "TRANSCRIBED from plugins/mock_camera/mock_camera_keys.h + _io.h. mock_camera is a SOURCE: no process() input Record — its script/UI-facing contract is its CONFIG (get_def/set_def), its COMMANDS (exchange), and the OUTPUT frame it emits. See contract/codegen/README.md.",
+  "$comment": "TRANSCRIBED from toolbox/mock_camera/mock_camera_keys.h + _io.h. mock_camera is a SOURCE: no process() input Record — its script/UI-facing contract is its CONFIG (get_def/set_def), its COMMANDS (exchange), and the OUTPUT frame it emits. See contract/codegen/README.md.",
   "plugin": "mock_camera",
   "namespace": "xi::mock_camera",
   "schema_version": 1,

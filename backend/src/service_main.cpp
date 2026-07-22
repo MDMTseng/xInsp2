@@ -540,12 +540,22 @@ int main(int argc, char** argv) {
                  g_eng.ipp_root.empty()       ? "no" : g_eng.ipp_root.c_str());
 
     // Find and scan plugins directory (sibling of backend/)
+    //
+    // TWO names, deliberately. "plugins" is the RUNTIME name: a shipped bundle
+    // lays down <bundle>/plugins/ and tools/build_release.mjs stages into it, so
+    // it must keep working and is probed first. "toolbox" is the SOURCE-tree name
+    // of the same folder in this repo — the in-tree plugins the dev backend loads
+    // when it is run straight out of backend/build/. Probing only "plugins" left
+    // g_eng.plugins_dir empty after the rename and every plugin-dependent test
+    // failed at exchange_instance.
     {
         std::filesystem::path p = xi::cli::get_exe_dir();
-        for (int i = 0; i < 6; ++i) {
-            if (std::filesystem::exists(p / "plugins")) {
-                g_eng.plugins_dir = (p / "plugins").string();
-                break;
+        for (int i = 0; i < 6 && g_eng.plugins_dir.empty(); ++i) {
+            for (const char* name : {"plugins", "toolbox"}) {
+                if (std::filesystem::exists(p / name)) {
+                    g_eng.plugins_dir = (p / name).string();
+                    break;
+                }
             }
             if (!p.has_parent_path() || p.parent_path() == p) break;
             p = p.parent_path();

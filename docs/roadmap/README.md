@@ -20,7 +20,7 @@ re-describing other docs.
 | `xi::state` / `xi::async` / hot-reload / script DLL versioning | [`../guides/write-a-script.md`](../guides/write-a-script.md) |
 | Replay (buffer_replay plugin), interactive viewer, remote mode | [`../guides/extend-the-ui.md`](../guides/extend-the-ui.md) |
 
-7 plugins shipped under `plugins/`; SDK demo plugins under `sdk/examples/`. Full
+7 plugins shipped under `toolbox/`; SDK demo plugins under `sdk/examples/`. Full
 test surface: [`../../docs/testing.md`](../../docs/testing.md) (→ `testing.md` after cutover).
 
 ## Removed (don't look for these)

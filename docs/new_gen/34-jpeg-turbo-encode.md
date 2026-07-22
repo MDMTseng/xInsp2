@@ -48,7 +48,7 @@ OpenCV. This change makes the flag **AUTO-DETECT** (same pattern as `OpenCV_DIR`
   existing build dir keeps its value — a fresh configure (or a one-time `-D…=ON`)
   picks up the new default.
 
-turbojpeg is owned **entirely by `plugins/CMakeLists.txt`** — the backend build does
+turbojpeg is owned **entirely by `toolbox/CMakeLists.txt`** — the backend build does
 not reference it at all. Post-CUT the JPEG encoder lives in the **imgcodec lib
 plugin** (`xi.jpeg.encode`), which the preview egress (`expose` / `ui.egress`) calls,
 so the detection + link live where the encoder does. This turns the real preview
@@ -73,7 +73,7 @@ same image both ways); the absolute fps on real imagery will be somewhat lower.
 ## Reproduce
 
 ```
-cmake -S plugins -B plugins/build            # auto-detects libjpeg-turbo
-cmake --build plugins/build --config Release --target bench_jpeg
+cmake -S toolbox -B toolbox/build            # auto-detects libjpeg-turbo
+cmake --build toolbox/build --config Release --target bench_jpeg
 ./plugins/build/Release/bench_jpeg.exe 40 2448 2048     # 5 MP
 ```

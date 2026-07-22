@@ -1,7 +1,7 @@
 # 18 — Streaming via chunking: the `$stream` / `$part` / `$eof` convention
 
 Status: **DECIDED** (maintainer-settled convention; NO host mechanism).
-Worked, QA-gated example: `examples/qa_pack_stream/`.
+Worked, QA-gated example: `qa/qa_pack_stream/`.
 Reserved keys recorded where every other `$`-key lives:
 `xi::pack_contract` (`backend/include/xi/xi_pack_contract.hpp` —
 `kStream`/`kPart`/`kEof`), prose registry
@@ -136,7 +136,7 @@ strip case, generalizes to any axis):
 - **Cross-lane ordering.** The convention rides one lane's arrival-order
   contract. A stream split across lanes has no ordering story — don't.
 
-## 6. The worked example (`examples/qa_pack_stream/`)
+## 6. The worked example (`qa/qa_pack_stream/`)
 
 A 32×64 virtual strip travels as 4 overlapping chunk packs (stride 16,
 overlap 4, `y0`/`own_h` placement) built with `ScriptPackBuilder`; an

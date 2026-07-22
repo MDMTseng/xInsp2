@@ -23,7 +23,7 @@
 // A PURE source like this one has no per-call data plane, so it neither
 // overrides process(PackIn&, PackOut&) nor publishes XI_PLUGIN_PACK_DOOR. A
 // source that ALSO wants an in-band control door (closed-loop actuation from
-// a script) adds both on top — see plugins/mock_camera for that pattern.
+// a script) adds both on top — see toolbox/mock_camera for that pattern.
 //
 
 #include <xi/xi_abi.hpp>    // xi::Plugin, xi::PackOut, xi::Image, new_pack()/emit()

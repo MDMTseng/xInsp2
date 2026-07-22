@@ -118,7 +118,7 @@ Per-item fields:
   must restore the sentinel back to a real number**: a top-level `kind: "number"`
   string value, *and* — because a `Record` can hold a non-finite field at any
   depth — recursively inside a `kind: "record"` `data` object/array. The
-  reference implementation is `_restore_nonfinite` in `examples/lib/xex1.py`
+  reference implementation is `_restore_nonfinite` in `qa/lib/xex1.py`
   (recursive; applied when decoding `expose` frames — see below). Any consumer
   that reads a non-finite field must apply the same restore itself; one that
   skips it reads the literal string `"NaN"`, so a threshold compare silently
@@ -405,7 +405,7 @@ body = {
 #### msgpack widths the frame uses
 
 The body is hand-rolled msgpack (fixed shape, no library). Multi-byte integers
-are **big-endian**. The encoder (`plugins/expose/src/xex1_encode.hpp`) can emit,
+are **big-endian**. The encoder (`toolbox/expose/src/xex1_encode.hpp`) can emit,
 and every decoder must handle, exactly this subset:
 
 | Type | Opcodes | Reached by |
@@ -425,8 +425,8 @@ the encoder. Unknown top-level keys are ignored, so the frame is forward-compati
 The shipped SDK (`tools/xinsp2_py/xinsp2/client.py`) and the browser shim
 (`ui-components/src/ws-client.mjs`) are transport-generic and do **not** decode
 XEX1. The reference decoders are the `expose` plugin's own webUI
-(`plugins/expose/ui/index.html`, `decodeXEX1` + `restoreNonFinite`) and
-`examples/lib/xex1.py` (`decode_xex1` + `_restore_nonfinite`); a consumer that
+(`toolbox/expose/ui/index.html`, `decodeXEX1` + `restoreNonFinite`) and
+`qa/lib/xex1.py` (`decode_xex1` + `_restore_nonfinite`); a consumer that
 decodes expose frames itself owns the non-finite restore.
 
 The C++ encoder and both decoders are pinned against committed golden frames under
@@ -437,7 +437,7 @@ the goldens; the JS (`ui-components/test/xex1-golden.mjs`) and Python
 assert the manifest. Regenerate after an intentional frame change:
 
 ```
-cmake --build plugins/build --config Release --target xex1_fixtures_test
+cmake --build toolbox/build --config Release --target xex1_fixtures_test
 XINSP2_FIXTURES=protocol/fixtures ./plugins/build/Release/xex1_fixtures_test --regen
 ```
 
@@ -987,7 +987,7 @@ then swaps them in across the group. The expensive load happens off the barrier,
 so the barrier is one in-flight run (~ms), not a stall. See
 [`roadmap/config-bundles-and-orchestration.md`](../roadmap/config-bundles-and-orchestration.md)
 for the full model, [`c-abi.md`](./c-abi.md) §1 for the ABI, and
-`plugins/config_swap_probe/` for the reference plugin.
+`toolbox/config_swap_probe/` for the reference plugin.
 
 ### `save_project` / `load_project` / `open_project`
 `args: { "path": "project.json" }` → `ok: true`
@@ -1082,7 +1082,7 @@ are blocked …"`. Two guarantees protect the on-disk bytes:
   with it) — the corruption is contained, never propagated as data loss.
 
   To recover: fix (or restore from `project.json.corrupt-<ts>`) the JSON on disk
-  and `open_project` again. See [`examples/qa_corrupt_project_json`](../../examples/qa_corrupt_project_json).
+  and `open_project` again. See [`qa/qa_corrupt_project_json`](../../qa/qa_corrupt_project_json).
 
 **IntelliSense config.** The `.vscode/c_cpp_properties.json` that lets the
 Microsoft C/C++ extension resolve `<xi/...>` and OpenCV is written by the **VS
@@ -1092,7 +1092,7 @@ C++ standard, and force-included support header into the *canonical* project
 folder, plus a `.vscode/extensions.json` recommending `ms-vscode.cpptools`. The
 generated file is stamped `"_generated_by": "xinsp2"` and only files carrying that
 stamp are overwritten (delete the stamp to take manual ownership). Both files
-embed machine-specific absolute paths and are git-ignored under `examples/`.
+embed machine-specific absolute paths and are git-ignored under `qa/`.
 
 **External script dependencies.** `project.json` may carry two optional arrays
 that feed the script compile: `"include_dirs"` (extra `cl /I` paths) and

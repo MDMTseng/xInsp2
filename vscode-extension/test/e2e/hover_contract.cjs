@@ -29,7 +29,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // repo/examples/blob_tracker — this file sits at vscode-extension/test/e2e/.
 const REPO       = path.resolve(__dirname, '..', '..', '..');
-const PROJECT    = path.join(REPO, 'examples', 'blob_tracker');
+const PROJECT    = path.join(REPO, 'qa', 'blob_tracker');
 const SCRIPT     = path.join(PROJECT, 'inspect.cpp');
 
 // Find the position of the instance name inside the first xi::use("name")

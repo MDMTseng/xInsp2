@@ -345,8 +345,10 @@ int main(int argc, char** argv) {
             if (fs::exists(p / "include" / "xi" / "xi.hpp")) {
                 include_dir = (p / "include").string();
             }
-            if (fs::exists(p / "plugins")) {
-                plugins_dir = (p / "plugins").string();
+            // "plugins" = the runtime/bundle name (probed first, never moves);
+            // "toolbox" = the same folder's name in this source tree.
+            for (const char* name : {"plugins", "toolbox"}) {
+                if (fs::exists(p / name)) { plugins_dir = (p / name).string(); break; }
             }
             if (!include_dir.empty() && !plugins_dir.empty()) break;
             if (!p.has_parent_path() || p.parent_path() == p) break;

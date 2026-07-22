@@ -5,7 +5,7 @@
 | **Date** | 2026-07-02 |
 | **Reviewer** | Claude (external advisory) |
 | **Status** | Advisory |
-| **Scope** | The shipped `plugins/`, the `examples/` scripts, and `sdk/templates` + `sdk/examples` — reviewed **as exemplars**: the de-facto teaching surface a plugin/script author copy-pastes from |
+| **Scope** | The shipped `toolbox/`, the `qa/` scripts, and `sdk/templates` + `sdk/examples` — reviewed **as exemplars**: the de-facto teaching surface a plugin/script author copy-pastes from |
 
 ## Scope
 
@@ -13,12 +13,12 @@ This review judges the shipped artifacts by one question: **when a new author
 copies this, do they learn the current, safe, blessed pattern — or a retired /
 fragile / unsafe one?** It covers three surfaces, ranked by copy-likelihood:
 
-1. **`plugins/`** — the ~10 shipped plugins (`expose`, `blob_analysis`,
+1. **`toolbox/`** — the ~10 shipped plugins (`expose`, `blob_analysis`,
    `mock_camera`, `data_output`, `json_source`, `record_save`, `synced_stereo`,
    `config_swap_probe`, `cache`/buffer_replay, `record_load`). Checked for ABI
    v11 conformance, error handling at the C boundary, threading discipline,
    refcount/pool discipline, and JSON-parsing hygiene.
-2. **`examples/`** — the user-script examples (`inspect.cpp` pipelines plus the
+2. **`qa/`** — the user-script examples (`inspect.cpp` pipelines plus the
    top-level `defect_detection.cpp`, `use_demo.cpp`, `cancel_aware_script.cpp`,
    …). Checked for current-API usage (`XI_INSPECT_ENTRY` / `xi::use` / `xi::result`
    vs the retired `VAR` surface) and whether they compile.
@@ -35,7 +35,7 @@ below was re-verified against those headers.
 This is a sibling to the already-triaged reviews. Where a finding overlaps a
 triaged item it is referenced, not re-litigated. Review 02 P0 (the *generated
 scaffold* taught the retired API) is **Bucket A**; this review asks the follow-on
-the triage explicitly left open — *does `examples/` have the same rot?* It does,
+the triage explicitly left open — *does `qa/` have the same rot?* It does,
 at scale.
 
 ## Executive Summary
@@ -46,7 +46,7 @@ histogram, trigger_source, comm) — and every plugin author should be routed th
 first. Against that high bar, the rest of the surface has three real problems a
 copying author will hit:
 
-- **The entire `examples/` *script* tree is compiled against a dead API.** 32
+- **The entire `qa/` *script* tree is compiled against a dead API.** 32
   `inspect.cpp` files carry **181** calls to the removed `VAR()` macro, including
   the README-advertised `defect_detection.cpp`. None of these compile on a current
   backend. This is the single highest-impact finding: the script examples are the
@@ -79,7 +79,7 @@ to copy from.
 |-----------|:---:|---|
 | ABI v11 conformance (plugins compile & load) | **B+** | All plugins build against v11 (DLLs present); boundary is exception-safe. Compiled `record_load` ships with no source. |
 | `sdk/examples/` (plugin learning path) | **A−** | Clean, current, consistent — all inherit `xi::Plugin`, use `xi::Json`; `counter` is the canonical parse exemplar. The set to copy. |
-| `examples/` script currency | **F** | 32 `inspect.cpp` (181 `VAR` uses) + `defect_detection.cpp` compile against the removed `VAR` API. |
+| `qa/` script currency | **F** | 32 `inspect.cpp` (181 `VAR` uses) + `defect_detection.cpp` compile against the removed `VAR` API. |
 | `sdk/templates` consistency | **C−** | Three templates, three base-class styles; `medium`/`expert` abandon `xi::Plugin` and its helpers. |
 | Plugin JSON-parsing hygiene | **C** | `expose`/`record_save`/`config_swap_probe`/`json_source` do it right; the two most-copied (`mock_camera`, `blob_analysis`) + `data_output` hand-roll `cmd.find`+`std::stoi`. |
 | Threading & refcount discipline | **B−** | Source workers follow the blessed `start/stop` (and `expert` uses `spawn_worker`); `blob_analysis` has a latent member-field race under parallel dispatch. |
@@ -89,7 +89,7 @@ to copy from.
 
 Ranked by what a copying author actually gets wrong first.
 
-### 1. (P0) The `examples/` script tree teaches the removed `VAR()` API — nothing in it compiles
+### 1. (P0) The `qa/` script tree teaches the removed `VAR()` API — nothing in it compiles
 
 `VAR` was removed in v9. It is defined nowhere on the script compile path:
 `xi.hpp:27` states it plainly, and `xi_script_support.hpp` (force-included into
@@ -98,7 +98,7 @@ every script DLL via `cl.exe /FI`) only carries a tombstone comment
 script that uses `VAR` fails to compile with an undefined-identifier error at the
 backend's JIT step.
 
-Yet the script examples are saturated with it. A count over `examples/**/inspect.cpp`:
+Yet the script examples are saturated with it. A count over `qa/**/inspect.cpp`:
 
 - **32 files, 181 `VAR(...)` occurrences.** The worst offenders:
   `golden_defect/inspect.cpp` (24), `io_stress/inspect.cpp` (21),
@@ -140,7 +140,7 @@ entry macro.
 
 #### Recommendation
 
-Treat this as the `examples/`-tree twin of the Bucket-A scaffold fix. Two tiers:
+Treat this as the `qa/`-tree twin of the Bucket-A scaffold fix. Two tiers:
 
 1. **Mechanical migration** of every `VAR(name, expr)` to
    `xi::use("expose").process(xi::Record().set("$channel", "name")…)` (numbers/strings)
@@ -149,9 +149,9 @@ Treat this as the `examples/`-tree twin of the Bucket-A scaffold fix. Two tiers:
 2. Or, if these examples are **historical** and not meant to compile, move them to
    `docs/archive/` and delete the README repo-map reference to
    `defect_detection`. Do not leave non-compiling scripts in the advertised
-   `examples/` root. A one-line CI step (JIT-compile every `examples/**/inspect.cpp`
+   `qa/` root. A one-line CI step (JIT-compile every `qa/**/inspect.cpp`
    against the current backend) would keep this from recurring — right now nothing
-   compiles them (`examples/CMakeLists.txt` builds only the single M0 `demo_async`).
+   compiles them (`qa/CMakeLists.txt` builds only the single M0 `demo_async`).
 
 ### 2. (P1) The two most-copied plugins teach hand-rolled JSON parsing the SDK's own docs warn against
 
@@ -259,7 +259,7 @@ Two naming/provenance drifts that will confuse an author hunting for an exemplar
 
 - The record/replay reference plugin is implemented as `buffer_replay.cpp`
   (class `BufferReplay`) but its manifest names it **`cache`**
-  (`plugins/cache/plugin.json:2`, dll `xi-cache.dll`). Every doc calls it
+  (`toolbox/cache/plugin.json:2`, dll `xi-cache.dll`). Every doc calls it
   `buffer_replay`: README §Recording&replay ("The **buffer_replay** plugin…"),
   `sdk/README.md` ("the **buffer_replay** plugin captures…"), and the example is
   `examples/buffer_replay_demo/`. An author who reads the docs and looks for a
@@ -279,7 +279,7 @@ author is told to look for and the name on disk disagree.
 
 Rename the `cache` manifest to `buffer_replay` (or update all docs+example to say
 `cache` — but the docs are more numerous, so rename the plugin). Restore
-`record_load`'s source, or move its DLL out of `plugins/` if it is a build
+`record_load`'s source, or move its DLL out of `toolbox/` if it is a build
 artifact rather than a shipped exemplar.
 
 ### 5. (Praise) The genuinely good exemplars — name these to authors
@@ -293,17 +293,17 @@ explicitly:
   test (`counter/tests/test_counter.cpp`). The whole `sdk/examples/` set (hello,
   invert, histogram, trigger_source, comm) is clean, current, and uniformly
   inherits `xi::Plugin`.
-- **`plugins/expose`** — the best *shipped* plugin exemplar: `xi::Json` throughout,
+- **`toolbox/expose`** — the best *shipped* plugin exemplar: `xi::Json` throughout,
   all state mutex-guarded (`expose.cpp:103`, `:124`, `:162`), images encoded via
   the SDK `compress()` wrapper with the correct `-needed`/retry convention
   (`:210-223`), and a clean self-describing binary frame format. This is the one
   to hold up as "what a good plugin looks like."
-- **`plugins/config_swap_probe`** — the reference for the ABI-v7 frame-perfect
+- **`toolbox/config_swap_probe`** — the reference for the ABI-v7 frame-perfect
   config swap: `std::atomic<std::shared_ptr<const Resource>>` double-slot,
   `prepare()` touches only the staging slot, `commit()` is a single atomic swap
   (`config_swap_probe.cpp:120-141`), opted in with `XI_PLUGIN_STAGED`. Exactly
   the contract the `xi_abi.hpp` comments describe.
-- **`plugins/record_save`** and **`cache`/buffer_replay** — both use `xi::Json`/
+- **`toolbox/record_save`** and **`cache`/buffer_replay** — both use `xi::Json`/
   proper yyjson, join their worker in the destructor, and (buffer_replay)
   demonstrate the correct "snapshot under lock, emit outside lock" discipline
   (`buffer_replay.cpp:81-107`).
@@ -317,10 +317,10 @@ explicitly:
 ## Prioritized Roadmap
 
 ### Phase 1 — Stop teaching dead code (P0)
-- Migrate or archive every `examples/**/inspect.cpp` using `VAR` (32 files) and
+- Migrate or archive every `qa/**/inspect.cpp` using `VAR` (32 files) and
   the top-level `defect_detection.cpp` / `cancel_aware_script.cpp`. Use
   `parallel_inspect_demo` as the template.
-- Add a CI job that JIT-compiles every advertised `examples/**/inspect.cpp`
+- Add a CI job that JIT-compiles every advertised `qa/**/inspect.cpp`
   against the current backend, so this cannot regress.
 - Fix `sdk/README.md:281-282` (and the `xi_use.hpp:143-150, 276-284` header
   comments) which still show `VAR(...)` / `void xi_inspect_entry(int)`.
@@ -340,7 +340,7 @@ explicitly:
 
 ## Decision Checklist
 
-- [ ] Are the `examples/` scripts meant to compile? If yes → migrate off `VAR`.
+- [ ] Are the `qa/` scripts meant to compile? If yes → migrate off `VAR`.
       If no → move to `docs/archive/` and drop the README reference.
 - [ ] Should the shipped plugins be held to the SDK's own `xi::Json` guidance?
       (Recommended yes — they are the walkthrough's first touchpoint.)
@@ -356,10 +356,10 @@ clean, consistent, current set that any author can safely copy. The framework
 knows what a good exemplar looks like; `expose`, `config_swap_probe`, and
 `counter` prove it.
 
-The problem is that the **most-visible** artifacts — the `examples/` scripts a new
+The problem is that the **most-visible** artifacts — the `qa/` scripts a new
 user runs first, and the `mock_camera`/`blob_analysis` plugins the README
 walkthrough centers on — have drifted behind the API and the SDK's own stated best
-practices. The `examples/` script rot (P0) is the one that will actually bite: it
+practices. The `qa/` script rot (P0) is the one that will actually bite: it
 does not compile, and it is linked from the README. None of these are hard fixes —
 the correct patterns are all in-tree — but until they land, the teaching surface
 tells a new author to write code the framework deleted a version ago. For an SDK

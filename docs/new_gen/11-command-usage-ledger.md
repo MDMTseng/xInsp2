@@ -14,7 +14,7 @@ set against **their own** scripts before anyone retires a command.
   none in-tree do that.
 - Consumer set searched (exactly the brief's set):
   `vscode-extension/src`, `ui-components/src` + `hmi`, `tools/xinsp2_py`,
-  `examples/**` (drivers) + `tools/run_qa.py` + `tools/gate.py` + `tests/fuzz`,
+  `qa/**` (drivers) + `tools/run_qa.py` + `tools/gate.py` + `tests/fuzz`,
   `contract/live_conformance.py`.
 - `docs/reference/ws-protocol.md` documents **all 55** (verified) — it is the
   contract surface, so it is not counted as a "caller".

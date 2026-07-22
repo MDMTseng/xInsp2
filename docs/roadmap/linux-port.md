@@ -7,7 +7,7 @@
 > supervisor, and the Phase-3 crash-forensics **stop-gap** are done and validated
 > end-to-end. The Phase-4 watchdog needed NO port work — the design already
 > evolved off `TerminateThread` to cooperative-cancel + `std::_Exit` (portable);
-> it is validated on Linux via `examples/qa_watchdog` (real g++-JIT'd runaway
+> it is validated on Linux via `qa/qa_watchdog` (real g++-JIT'd runaway
 > script → cooperative cancel → HARD trip → exit). Real **Breakpad** minidumps
 > are now wired as an opt-in (`-DXINSP2_HAS_BREAKPAD=ON`); the default build keeps
 > the text-backtrace sidecar. The headless Linux backend is functionally complete.
@@ -32,7 +32,7 @@
 > - **Watchdog (`service_main.cpp`):** already portable — `std::thread` monitor,
 >   atomic per-worker deadlines, Phase-1 cooperative cancel via the script's
 >   `set_global_cancel` thunk, Phase-2 hard trip = `std::_Exit(WATCHDOG_EXIT_CODE)`
->   for FE respawn. No `TerminateThread`. `examples/qa_watchdog/driver.py` is now
+>   for FE respawn. No `TerminateThread`. `qa/qa_watchdog/driver.py` is now
 >   cross-platform (was `nt`-only because the JIT compile was) and PASSES on Linux.
 >   (Note: `std::_Exit(0x5744)` truncates to `0x44` on POSIX — exit codes are 8-bit;
 >   the FE records it either way, and does not branch on the value.)
@@ -114,7 +114,7 @@ next round has a record:
   Windows `build/Release` layout, and the `docs`/`sdk` stages need `node` on
   PATH (absent on the Pi). The Linux batches are validated with `ninja` +
   the full `ctest` (which also runs the doc-coverage / retired-terms gates) +
-  the relevant `examples/qa_*` e2e driver. Making `gate.py` platform-aware
+  the relevant `qa/qa_*` e2e driver. Making `gate.py` platform-aware
   (build-linux layout, skip/soft-fail node stages when node is absent) is the
   port item so the ONE authoritative gate covers Linux too.
 - **FE↔backend Job-Object orphan parity.** `killpg` covers clean + signalled FE
@@ -128,7 +128,7 @@ next round has a record:
 - **Per-thread dispatch affinity/scheduling** (`service_dispatch.cpp`) stays a
   no-op. Process-level priority (`setpriority`) is done; thread affinity
   (`pthread_setaffinity_np` / `cpu_set_t`) + per-worker scheduling are not.
-- **`examples/qa_*/driver.py` e2e drivers — 39 ported + passing on Linux.**
+- **`qa/qa_*/driver.py` e2e drivers — 39 ported + passing on Linux.**
   Recipe: `ports.backend_exe()`/`fe_exe()` + drop the `os.name != "nt"` skip +
   `LOCALAPPDATA/Temp` → `tempfile.gettempdir()` (env `TMPDIR`); Windows process
   tooling (`taskkill`/`tasklist`/PowerShell) → POSIX (`os.kill`/`/proc/<pid>/fd`).
@@ -231,7 +231,7 @@ the port itself; it's a record so we know what to expect.
 
 | Mechanism | Why hard |
 |---|---|
-| ~~`TerminateThread` watchdog~~ **(RESOLVED — ports as-is; validated on Linux)** | **Update 2026-07-11 (`93de38b`): the cooperative-cancel layer was retired.** The watchdog no longer kills threads or soft-cancels — it is one phase: overrun → grace → hard `std::_Exit(WATCHDOG_EXIT_CODE)` + FE respawn. `_Exit` is POSIX, so the mechanism ports as-is; the only Linux work is the supervisor-respawn side (`fe_main.cpp` row above, now done). Validated on Linux via `examples/qa_watchdog` (a g++-JIT'd runaway script hard-trips and the FE respawns). The old sketches (cooperative-checkpoint API, `SIGUSR`+longjmp) are obsolete. |
+| ~~`TerminateThread` watchdog~~ **(RESOLVED — ports as-is; validated on Linux)** | **Update 2026-07-11 (`93de38b`): the cooperative-cancel layer was retired.** The watchdog no longer kills threads or soft-cancels — it is one phase: overrun → grace → hard `std::_Exit(WATCHDOG_EXIT_CODE)` + FE respawn. `_Exit` is POSIX, so the mechanism ports as-is; the only Linux work is the supervisor-respawn side (`fe_main.cpp` row above, now done). Validated on Linux via `qa/qa_watchdog` (a g++-JIT'd runaway script hard-trips and the FE respawns). The old sketches (cooperative-checkpoint API, `SIGUSR`+longjmp) are obsolete. |
 | Plugin DLL versioning (`stem_vN.dll` per `xi_script_compiler.hpp`) | Exists only because Windows holds a load lock on the previous DLL until unload completes. Linux `dlclose` has no such lock, so this whole hack can be deleted on the Linux build. Make sure to keep it conditional, not retroactively rip it out from Windows. |
 
 ## Outside the backend
@@ -247,7 +247,7 @@ the port itself; it's a record so we know what to expect.
 
 | Addition | Notes |
 |---|---|
-| `examples/multi_source_surge/` (FL r6) | Pure `<thread>` + `<chrono>` + `<atomic>` + the `xi_*` portable headers. No Win32 calls in plugins or inspect. Builds via the same `cl.exe` path the rest of the SDK uses; on Linux it'll go through whatever the script compiler abstracts to. |
+| `qa/multi_source_surge/` (FL r6) | Pure `<thread>` + `<chrono>` + `<atomic>` + the `xi_*` portable headers. No Win32 calls in plugins or inspect. Builds via the same `cl.exe` path the rest of the SDK uses; on Linux it'll go through whatever the script compiler abstracts to. |
 | `dispatch_stats` watchdog warning log on `cmd:start` (FL r6) | Pure C++; lives in service_main.cpp's existing log-emission path which is already non-Win-specific. |
 | `examples/cross_proc_trigger/` (Task #74 validation) | C++ plugin source + Python driver use only `<chrono>`, `<cstdint>`, `<atomic>`, `<thread>`, the portable `xi_*` headers, and Python stdlib. No Win32. (Note: the cross-process path this validated was removed 2026-05; the example no longer exercises a live feature.) |
 | `examples/fl_r7_fuzz/evil_worker.cpp` (FL r7) | **Retired 2026-05 — no longer built.** This was a fuzz harness for the host-side IPC reader, mimicking `xinsp-worker.exe` on the wire (named-pipe client). The `evil_worker` CMake target was removed and the worker IPC it fuzzed is gone with the SHM/process-isolation removal, so the harness is dead code; not a Linux port concern. |

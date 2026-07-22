@@ -120,7 +120,7 @@ Two ctests, both label `contract`, wired in `backend/CMakeLists.txt`:
    dir and (a) byte-compares against the committed `generated/plugins/` (stale =
    fail); (c) extracts the `{kName -> "value"}` + `kSchemaVersion` set from the
    generated `_keys.gen.h` and the decl and fails if they disagree — the generator
-   must emit exactly the decl's key set. If a hand-written `plugins/<p>/<p>_keys.h`
+   must emit exactly the decl's key set. If a hand-written `toolbox/<p>/<p>_keys.h`
    is **still present** (a plugin declared but not yet swapped) it is ALSO compared,
    so the pending swap is proven a true drop-in; once swapped, that header is gone
    and the decl↔generated leg is the whole proof (an absent hand-written header is
@@ -144,7 +144,7 @@ promise, mechanised.
 ## Swap-in (EXECUTED — wave-2 exit, docs/new_gen/08 Wave 3)
 
 The wave-2 pilot (pack door) has landed and the accessor convention is stable,
-so the swap is done. **Mechanism chosen: include-path add** — `plugins/CMakeLists.txt`
+so the swap is done. **Mechanism chosen: include-path add** — `toolbox/CMakeLists.txt`
 puts `contract/codegen/generated/plugins/` on the plugin build's include path
 (directory scope, so plugin DLLs and their contract-test exes both see it) and
 each consumer's `#include "<p>_keys.h"` / `"<p>_io.h"` became `"<p>_keys.gen.h"` /

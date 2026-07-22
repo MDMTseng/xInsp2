@@ -223,7 +223,7 @@ violate the opacity that makes this boundary safe.
   boundary bytes; B hook-present migrate on schema mismatch; C hook-absent
   decline ⇒ drop; D grow-and-retry on a >64 KiB store; E JSON-era self-seed
   (Record channel restored → script seeds kv → kv carries).
-- `examples/qa_kv_reload` — live-service QA: v1 counts frames in `xi::kv()`
+- `qa/qa_kv_reload` — live-service QA: v1 counts frames in `xi::kv()`
   through real hot reloads, v2 bumps `XI_KV_SCHEMA` + migrates via
   `set_kv_migrate`, driver asserts carry + migration + the `"store":"kv"`
   event off the live WS wire.

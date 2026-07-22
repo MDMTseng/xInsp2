@@ -1,13 +1,13 @@
 // xex1-golden.mjs — cross-implementation test of the expose plugin's XEX1 decoder
 // against the C++ encoder's golden frames.
 //
-// The XEX1 binary frame is encoded in C++ (plugins/expose/src/xex1_encode.hpp) and
+// The XEX1 binary frame is encoded in C++ (toolbox/expose/src/xex1_encode.hpp) and
 // decoded, independently and hand-rolled, by the expose plugin's webUI
-// (plugins/expose/ui/index.html) and by examples/lib/xex1.py. This test loads the
+// (toolbox/expose/ui/index.html) and by qa/lib/xex1.py. This test loads the
 // EXACT decoder shipped in index.html — the region between the `// <XEX1-DECODER>`
 // markers — and decodes every golden .bin under protocol/fixtures/binary/, asserting
 // the decoded content matches the committed manifest. Regenerate the goldens with:
-//   cmake --build plugins/build --config Release --target xex1_fixtures_test
+//   cmake --build toolbox/build --config Release --target xex1_fixtures_test
 //   ./plugins/build/Release/xex1_fixtures_test --regen   (with XINSP2_FIXTURES set)
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,7 +18,7 @@ import path from "node:path";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
 const FIX = path.join(REPO, "protocol", "fixtures", "binary");
-const HTML = path.join(REPO, "plugins", "expose", "ui", "index.html");
+const HTML = path.join(REPO, "toolbox", "expose", "ui", "index.html");
 
 // Extract the shipped decoder verbatim and evaluate it, so we test the exact code
 // the webUI runs (not a copy that could drift).

@@ -1,6 +1,6 @@
 # `cache` plugin — frame ring buffer + replay
 
-The `cache` plugin (class `BufferReplay`, `plugins/cache/src/cache.cpp`) is the
+The `cache` plugin (class `BufferReplay`, `toolbox/cache/src/cache.cpp`) is the
 plugin-side **capture/replay store**. It buffers the last *N* incoming sealed
 packs (images + metadata entries) in a bounded ring and re-emits a buffered one
 on command, so a script can re-inspect a frame it already saw **without the

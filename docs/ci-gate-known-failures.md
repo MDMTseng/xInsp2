@@ -4,7 +4,7 @@
 
 `tools/gate.py` is the day-1 pre-merge gate. When it was first stood up it did
 exactly what a gate is for: it ran the whole enforced surface and found that the
-`examples/qa_*` regression suite was **already red on master** — 13 of 25 tests
+`qa/qa_*` regression suite was **already red on master** — 13 of 25 tests
 failing — before any of this branch's changes. The CI-gate branch does not own
 those examples, so the failures are quarantined rather than fixed here.
 
@@ -16,7 +16,7 @@ a mute.
 
 ## How it works (mechanism, not a list)
 
-The live list is **[`examples/qa_known_failing.txt`](../examples/qa_known_failing.txt)**
+The live list is **[`qa/qa_known_failing.txt`](../qa/qa_known_failing.txt)**
 (`<qa_dir>: <reason>` per line). Do not duplicate it here — that copy would rot.
 
 `tools/run_qa.py` reads it and:

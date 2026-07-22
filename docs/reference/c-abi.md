@@ -73,7 +73,7 @@ T>>` that `process()` reads lock-free, `prepare()` builds a new one, `commit()`
 swaps the pointer. A plugin that omits these falls back to gated `set_def`
 (prepare) / no-op (commit), so simple plugins need neither. The orchestrator
 drives them via `prepare_instance` + `commit_group` → `reference/ws-protocol.md`,
-`roadmap/config-bundles-and-orchestration.md`, and `plugins/config_swap_probe/`.
+`roadmap/config-bundles-and-orchestration.md`, and `toolbox/config_swap_probe/`.
 
 *(THE CUT (v12) also deleted the optional `xi_plugin_record_schema` export —
 the OQ-7b static Record field contract went with the Record plane and
@@ -111,7 +111,7 @@ code (`contract/canonical-profile-notes.md` § "Pack-shaped fail-loud"), not
 vtables (incl. the capability plane that rides the same door) are in **§6**
 below; see also `docs/new_gen/07-uniform-keyed-buffer-plane.md`,
 `docs/new_gen/08-polaris2-main-plan.md` (Wave 2), and the pilot pair
-`plugins/mock_camera` (pack-mode emit) + `plugins/blob_analysis` (pack door).
+`toolbox/mock_camera` (pack-mode emit) + `toolbox/blob_analysis` (pack door).
 
 ### Lifecycle
 
@@ -210,7 +210,7 @@ carved `get_interface` interfaces, not new struct fields (§6).
 | Logging | `log(level, msg)` | 0=debug … 3=error → backend stderr. Any thread. SDK: `xi::Plugin::log_debug/log_info/log_warn/log_error(msg)` cover all four levels. |
 | Status | `set_status(source, text)` | Push a status line to the FE status channel → `reference/ws-protocol.md`. |
 | Instance | `instance_folder(name, buf, len)` | Per-instance scratch dir, created before `create()`; never auto-deleted. |
-| Binary push (v8) | `emit_binary(data, len)` | Push an opaque binary frame straight to connected WS clients. The host is a dumb byte pipe — the **frame format is the plugin's contract with its UI** (self-describe: channel/key + payload). Intended for the `expose` plugin shipping one atomic `XEX1` frame (values + JPEG images) per channel (no base64, no poll). Thread-safe from a worker; null on a pre-v8 host. SDK: `xi::Plugin::emit_binary(...)`. See `plugins/expose`. |
+| Binary push (v8) | `emit_binary(data, len)` | Push an opaque binary frame straight to connected WS clients. The host is a dumb byte pipe — the **frame format is the plugin's contract with its UI** (self-describe: channel/key + payload). Intended for the `expose` plugin shipping one atomic `XEX1` frame (values + JPEG images) per channel (no base64, no poll). Thread-safe from a worker; null on a pre-v8 host. SDK: `xi::Plugin::emit_binary(...)`. See `toolbox/expose`. |
 | Compress cache (v9) | `compress_image(px, w, h, c, quality, out, cap)` | JPEG-encode an image **through a host-side N-rotate cache** keyed by a content hash: the same frame compressed by several plugins (or repeatedly) is encoded ONCE globally. Lets the `expose` plugin avoid linking opencv/turbojpeg and gives free global dedup. Returns bytes written / `-needed` / 0. Pair with `emit_binary` to push the result. |
 | Capability door (v10) | `get_interface(id, version)` | Resolve a carved, independently-frozen interface (`xi.pack` / `xi.imaging` / `xi.imaging_rw` / `xi.emit` / `xi.log` / `xi.preview` @1, plus the `xi.pack`@4 self-describing blob supplement — §6.1b; the retired `@3` answers NULL) or the capability planes (§6). The v12 data plane + dispatch verb both ride this door, not a struct field. |
 
@@ -224,7 +224,7 @@ helper: `xi::Plugin::emit(std::move(pack))` (fills `name()` for you). →
 
 **Image decode is no longer a host slot.** THE CUT (v12) evicted the v1
 `read_image_file` field; decoding an image file is now the `xi.image.decode`
-capability (provider: `plugins/imgcodec`, stb_image behind it), reached through
+capability (provider: `toolbox/imgcodec`, stb_image behind it), reached through
 the `xi.cap` funnel (§6.2). The dead `shm_*` block (v6 placeholders) and the
 in-process yyjson doc slots (`doc_chunk_*`, `doc_retain`/`release`/`refcount`)
 were removed at v11 and v12 respectively.
@@ -276,7 +276,7 @@ gate only refuses a plugin asking for a *newer* ABI than the host. History:
 | 3 | in-process doc allocator `doc_chunk_*` (γ) |
 | 4 | in-process doc refcount `doc_retain`/`doc_release`/`doc_refcount` (γ-4) |
 | 5 | `emit_trigger_record` — trigger metadata doc (superseded by v6) |
-| 6 | dispatch collapsed to a single record-emit host verb (deleted at v12 → `xi_pack_v1::emit_pack`); `emit_trigger`, `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` REMOVED (no v4 compat — rebuild all plugins). Multi-cam = gathering plugin; replay = the `cache` plugin (`plugins/cache`, class `BufferReplay`; demo `examples/buffer_replay_demo`). |
+| 6 | dispatch collapsed to a single record-emit host verb (deleted at v12 → `xi_pack_v1::emit_pack`); `emit_trigger`, `emit_resource`, `fetch_resource`, `fetch_image`, `emit_dispatch` REMOVED (no v4 compat — rebuild all plugins). Multi-cam = gathering plugin; replay = the `cache` plugin (`toolbox/cache`, class `BufferReplay`; demo `examples/buffer_replay_demo`). |
 | 7 | optional plugin exports `xi_plugin_prepare(inst,def,folder)` + `xi_plugin_commit(inst)` for frame-perfect config swap (opt in via `XI_PLUGIN_STAGED`; prepare ungated, commit gated). PLUGIN exports, not host-api fields — no struct shift, older plugins still load. |
 | 8 | `emit_binary(data, len)` appended to `xi_host_api` — plugin→WS binary push (e.g. the `expose` plugin's live `XEX1` frames). Additive (last field); v6/v7 plugins still load on a v8 host. |
 | 9 | `compress_image(px,w,h,c,q,out,cap)` appended — host-side JPEG encode through an N-rotate content-hash cache (global dedup). Additive; older plugins still load on a v9 host. |
@@ -610,7 +610,7 @@ typedef xi_pack_handle (*xi_cap_handler_fn)(void* self, xi_pack_handle input);
 
 - Cross-thread concurrency is deliberately *not* flagged by the reentrancy
   stack (providers contract to be thread-safe); only same-thread cycles are.
-- Exemplar: `plugins/imgcodec` — the first lib plugin (`"lib": true`,
+- Exemplar: `toolbox/imgcodec` — the first lib plugin (`"lib": true`,
   `reentrant: true`, `on_fault: refuse`), registering `xi.jpeg.encode` +
   `xi.image.decode` in its constructor and unregistering in its destructor.
 

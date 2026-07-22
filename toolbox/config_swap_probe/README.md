@@ -1,0 +1,89 @@
+# config_swap_probe
+
+Reference plugin for the orchestrator config-swap design
+([docs/roadmap/config-bundles-and-orchestration.md](../../docs/roadmap/config-bundles-and-orchestration.md)).
+It demonstrates the **double-slot (prepare/commit)** pattern a heavy-resource
+plugin uses so its config can be swapped frame-perfectly without stalling the
+pipeline while assets load: `prepare()` builds the (simulated heavy) resource in
+a background staging slot, and `commit()` swaps staging → live in one atomic
+pointer store.
+
+Its `process()` is a no-op (it only records what value the live slot held), so it
+has **no process input/output contract**. Its script/UI-facing surface is its
+**config** (`{value}`), its `get_status` **command**, and the **status** object
+that command returns — and that status is the only way the double-slot behaviour
+is observable. It follows the plugin data contract on those surfaces.
+
+## Keys — one source of truth
+
+Every key name is declared **once** in
+[`../../contract/plugins/config_swap_probe.decl.json`](../../contract/plugins/config_swap_probe.decl.json),
+from which `contract/codegen/gen_contract.py` generates `config_swap_probe_keys.gen.h`
+(the `keys::` constants) **and** `config_swap_probe_io.gen.h` (the typed
+`Config`/`Command`/`Status` view). The `Status` reply reader is the decl's
+`"replies"` family (a typed extractor over the `get_status` exchange() reply —
+the polaris2 codegen-gap-#2 extension), so this plugin is now a **full swap**:
+the hand-written `_io.h` is deleted and every consumer includes the generated
+header (see `contract/codegen/README.md`, "Coverage").
+
+| Surface | Key | Type | Notes |
+|---------|-----|------|-------|
+| config  | `value`        | int | the loaded resource value (set_def / prepare) |
+| command | `command`      | string | `get_status` |
+| status  | `active`       | int | value in the LIVE slot |
+| status  | `staged`       | bool | is a resource staged? |
+| status  | `staged_value` | int | value in the STAGING slot (`-1` if none) |
+| status  | `last_seen`    | int | value the last `process()` observed |
+| status  | `proc`         | int | `process()` call count |
+
+Schema version: `xi::config_swap_probe::kSchemaVersion` (currently **1**). A
+config or `prepare` def built against a different version is rejected (`set_def`
+returns false, `prepare` returns non-zero) and the live slot is left untouched.
+A def with no `_schema` stamp is tolerated (legacy persisted `instance.json`).
+
+There are **no required process inputs** to fail loud on; the schema-skew
+rejection above is this plugin's structured-error surface.
+
+## Bilingual — the `xi.pack@1` door (polaris2 wave-2, doc 10 gate P1)
+
+The plugin is **bilingual**: alongside the Record `process()` it publishes the
+`xi.pack@1` pack-in/pack-out door (`XI_PLUGIN_PACK_DOOR`), so the host can drive
+it with either currency. Because this probe's `process()` is a **no-op
+observation** step (read the live slot into `last_seen`, bump the call counter,
+return empty), the pack door is an **exact mirror**: it performs the identical
+observation and returns an **empty pack** — the pack analogue of the Record
+path's empty `{}`. The probe emits no output data in *either* currency; its real
+surface stays the config/prepare/commit control plane observed through
+`get_status`, which both drive paths reach identically. It has no input
+contract, so — like the Record path — there are **no required-input faults** and
+unknown pack entries are ignored. (Emitting the status/counter keys on the pack
+path would make it dishonestly richer than the untouched Record path it mirrors.)
+
+## Using it from a driver
+
+```cpp
+#include "config_swap_probe_io.gen.h"
+
+host.set_def(p, xi::config_swap_probe::Config().value(42));            // tier-1 immediate
+host.prepare(p, xi::config_swap_probe::Config().value(99), folder);   // stage in background
+host.commit_group(...);                                               // frame-perfect swap
+
+auto s = xi::config_swap_probe::Status{
+    host.exchange(p, xi::config_swap_probe::Command::get_status()) };
+assert(s.active() == 99 && !s.has_staged());
+```
+
+## Tests
+
+`tests/test_config_swap_probe.cpp` asserts: the `Config`/`Command`/`Status`
+happy path including the full `prepare`→`commit` double-slot (staged value
+visible while the live slot is unchanged, then swapped on commit); and a config
+schema skew → `set_def` rejects it, leaving the live value unchanged. Run via
+`ctest -C Release -R config_swap_probe_test` from `toolbox/build`.
+
+`tests/test_config_swap_probe_pack.cpp` proves the bilingual door end to end
+against the real built DLL through the host adapter: the capability probe
+(`xi.pack@1` published), **Record-vs-pack parity** (drive each path an equal
+number of times, `get_status` identical field-for-field), unknown-entry
+tolerance, and that the two-phase `prepare`/`commit` observability is unchanged
+by the door. Run via `ctest -C Release -R config_swap_probe_pack_test`.

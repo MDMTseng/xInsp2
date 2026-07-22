@@ -104,7 +104,7 @@ try {
         ],
         extensionTestsEnv: {
             XINSP2_PLUGIN_FOLDER: pluginFolder,
-            // Backend will scan this dir in addition to the in-tree plugins/
+            // Backend will scan this dir in addition to the in-tree toolbox/
             XINSP2_EXTRA_PLUGIN_DIRS: dirname(pluginFolder),
         },
     });

@@ -321,7 +321,7 @@ resolution.
 
 ### RB4 — `qa_semaphore_queue`: a 2nd `source` instance corrupts the process-global `g_sem` (reseed + cross-abort) · P3 · **PLAUSIBLE · example-only**
 
-**Where:** `examples/qa_semaphore_queue/plugins/sem_queue/src/plugin.cpp` — `g_sem`
+**Where:** `qa/qa_semaphore_queue/plugins/sem_queue/src/plugin.cpp` — `g_sem`
 is a file-scope static shared across instances. Two `source` instances (nothing
 enforces one): B's `start_()`→`seed(N)` resets `permits_/max_inflight_` while A
 runs (clobbers the in-flight invariant, >N can be admitted); stopping either

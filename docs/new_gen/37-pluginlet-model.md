@@ -583,7 +583,7 @@ roles" pattern again (identity / build address / bind address):
 | **runtime** | the host knows which plets a plugin uses → the UI auto-mounts `mountSchema` / a live-view into the `view` slot | not built |
 
 The C++ consumer is landed: `xi_use_pluginlet` / `xi_wire_pluginlets`
-(plugins/CMakeLists.txt) turn "declare the plet in plugin.json" into the only step —
+(toolbox/CMakeLists.txt) turn "declare the plet in plugin.json" into the only step —
 no per-plugin CMake edit, no per-plugin knowledge of the plet's deps. controls_demo
 builds purely from its `"pluginlets":["controls"]`.
 

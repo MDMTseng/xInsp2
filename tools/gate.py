@@ -29,7 +29,7 @@ STAGES (in order; stop on first failure unless --keep-going)
               template (easy/medium/expert incl. their UI panels)
     ctest     the full C++ ctest suite (unit + integration + the perf gates
               + script_selfcheck; also re-runs doc_coverage/retired_terms) from
-              backend/build, THEN the plugins/build pack suite (~16 tests incl.
+              backend/build, THEN the toolbox/build pack suite (~16 tests incl.
               the red-team regressions use_pack_door_test / record_replay_pack_
               test — built by `build` but never previously run). contract_live
               is excluded here — the `live` stage below runs it under THIS
@@ -39,7 +39,7 @@ STAGES (in order; stop on first failure unless --keep-going)
     live      contract/live_conformance.py — the third contract leg (live WS
               bytes vs schemas + the live-allowlist ratchet); spawns its own
               backend; a missing dep is a FAILURE here, never a skip
-    qa        tools/run_qa.py — the examples/qa_* regression sweep
+    qa        tools/run_qa.py — the qa/qa_* regression sweep
     fuzz      tests/fuzz/run_smoke.py — the black-box fuzz smoke, build-breaking
 
 The `docs` stage is intentionally also covered by `ctest` (as the
@@ -91,7 +91,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 BACKEND = REPO / "backend"
 BACKEND_BUILD = BACKEND / "build"
-PLUGINS = REPO / "plugins"
+PLUGINS = REPO / "toolbox"
 PLUGINS_BUILD = PLUGINS / "build"
 
 # On a developer box the VS Code extension auto-grabs the single-client WS slot
@@ -286,14 +286,14 @@ def stage_ctest(_args) -> None:
          may self-skip if that interpreter lacks jsonschema/websocket-client).
          The session cold-compiles a script via cl.exe, so unlike the doc gates
          this overlap is NOT cheap — run it once.
-      2. plugins/build — the ~16-test plugin pack suite (cap_imgcodec_test,
+      2. toolbox/build — the ~16-test plugin pack suite (cap_imgcodec_test,
          expose_pack_test, pack_order_gate_test, record_save_pack_test, ...).
          These are BUILT by the build stage but were never RUN by the gate, so
          the red-team pack regressions — use_pack_door_test (§8b/F1: the
          use-after-swap door) and record_replay_pack_test (§G/F5) — rode a green
          gate untested. Run them here so any plugins ctest failure fails the
          gate. The plugins suite has no quarantine/exclusions of its own (the
-         qa_* flakies quarantined via examples/qa_known_failing.txt are the
+         qa_* flakies quarantined via qa/qa_known_failing.txt are the
          `qa` stage's, not ctests)."""
     _run(["ctest", "--test-dir", BACKEND_BUILD, "-C", "Release",
           "--output-on-failure", "-E", "^contract_live$"])
@@ -332,9 +332,9 @@ def stage_live(_args) -> None:
 
 
 def stage_qa(_args) -> None:
-    """examples/qa_* regression sweep (each spawns + tears down its own backend).
+    """qa/qa_* regression sweep (each spawns + tears down its own backend).
 
-    Honors the quarantine in examples/qa_known_failing.txt: pre-existing broken
+    Honors the quarantine in qa/qa_known_failing.txt: pre-existing broken
     examples (today: the dead-API scripts owned by adoption item 4) are run but
     non-fatal with a loud KNOWN-FAIL line, so this gate catches NEW breakage now
     instead of waiting for the whole suite to be clean. See

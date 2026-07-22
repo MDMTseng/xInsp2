@@ -136,7 +136,7 @@ private:
     // process() runs on a dispatch worker while exchange()/set_def() run on the
     // host's control thread — atomics keep the shared config race-free without a
     // lock. (A plugin with richer coupled state guards it with a mutex instead;
-    // see plugins/expose, or config_swap_probe for the frame-perfect swap.)
+    // see toolbox/expose, or config_swap_probe for the frame-perfect swap.)
     std::atomic<int>    threshold_{128};
     std::atomic<double> last_fg_pct_{0.0};
 };

@@ -84,7 +84,7 @@ def _backend_exe() -> Path:
 
 
 BACKEND = _backend_exe()
-PROJECT = ROOT / "examples" / "qa_recipe_script_instance"
+PROJECT = ROOT / "qa" / "qa_recipe_script_instance"
 
 REQUIRE = bool(os.environ.get("XINSP2_REQUIRE_SCHEMA_GATE"))
 

@@ -17,7 +17,7 @@ re-deriving the design.
   in the same commit (update the matching file under `docs/`).
 - **Verify like this session did:** build Release (`cmake --build backend/build --config
   Release --target xinsp_backend test_xi_core`), run the unit tests, and add a deterministic
-  e2e under `examples/qa_*` where feasible (mirror `qa_sink_shared_doc` / `qa_lifecycle_
+  e2e under `qa/qa_*` where feasible (mirror `qa_sink_shared_doc` / `qa_lifecycle_
   teardown`: a driver that asserts the corrected behavior, ideally proven by a temp-revert).
 - Mark each fixed bug `✅ FIXED` in `core-bug-hunt-2026-06.md` with a one-line how, and update
   the memory pointer.

@@ -148,7 +148,7 @@ endif()
 option(XINSP2_HAS_IPP        "Link Intel IPP for JPEG encode acceleration" OFF)
 # NOTE: libjpeg-turbo is NOT a backend concern. Post-CUT the JPEG encoder lives in
 # the imgcodec LIB PLUGIN, so turbojpeg detection/linking is owned entirely by
-# plugins/CMakeLists.txt (and the JPEG bench moved there too). The shared header
+# toolbox/CMakeLists.txt (and the JPEG bench moved there too). The shared header
 # xi/xi_jpeg.hpp still has an #ifdef XINSP2_HAS_TURBOJPEG turbo path, but ONLY the
 # plugin ever defines it — the backend build never sets or looks for turbojpeg.
 
@@ -198,7 +198,7 @@ if(NOT DEFINED OpenCV_DIR AND NOT DEFINED ENV{OpenCV_DIR})
 endif()
 find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
 # OpenCV is an OPT-IN dependency, NOT part of xi_core (completes OQ-9 for the
-# backend, matching plugins/CMakeLists.txt which already decoupled it). The core
+# backend, matching toolbox/CMakeLists.txt which already decoupled it). The core
 # runtime does NO image processing — the umbrella xi.hpp / xi_image.hpp / xi_jpeg.hpp
 # are OpenCV-free — so xinsp_backend/xinsp_runner must not link opencv_world.dll.
 # cv:: lives only behind the opt-in <xi/xi_cv.hpp>; the few targets that include it
@@ -1072,7 +1072,7 @@ target_compile_definitions(xinsp_fe PRIVATE
 # line-safe case is handled by a comms plugin's own sidecar process, not the
 # core/FE. See docs/internals/comms-sidecar.md.)
 
-# bench_jpeg / perf_jpeg MOVED to plugins/CMakeLists.txt — the JPEG encoder (and its
+# bench_jpeg / perf_jpeg MOVED to toolbox/CMakeLists.txt — the JPEG encoder (and its
 # turbojpeg dependency) lives in the imgcodec plugin post-CUT, so its benchmark lives
 # there too. The backend build no longer references turbojpeg at all.
 
@@ -1169,7 +1169,7 @@ endif()
 
 # [v12 THE CUT — the xinsp_backend target no longer links libjpeg-turbo: the
 #  in-core JPEG encoder was evicted, encode is capability-only (xi.jpeg.encode).
-#  turbojpeg now lives ONLY in the imgcodec lib plugin (plugins/imgcodec).]
+#  turbojpeg now lives ONLY in the imgcodec lib plugin (toolbox/imgcodec).]
 
 # ---- Runtime DLL deployment --------------------------------------------
 # Copy accelerator DLLs next to the exe so end users / CI don't need a
@@ -1188,7 +1188,7 @@ function(_xinsp_deploy_dlls tgt)
     # turbojpeg.dll is NOT deployed here. Post-CUT (v12) the backend exe does not
     # link libjpeg-turbo — only the imgcodec LIB PLUGIN does. The plugin owns and
     # deploys its own turbojpeg.dll (next to xi-imgcodec.dll, see
-    # plugins/CMakeLists.txt), and the loader resolves it from there because
+    # toolbox/CMakeLists.txt), and the loader resolves it from there because
     # load_plugin_dll_ loads with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (searches the
     # plugin DLL's own directory for its dependencies). The backend build no longer
     # references turbojpeg at all (the JPEG bench moved to the plugins tree too).
@@ -1383,7 +1383,7 @@ if(Python3_Interpreter_FOUND)
     # per-plugin artifacts from contract/plugins/*.decl.json into a tmp dir and
     # (a) byte-compares vs the committed generated/plugins/ (stale = fail);
     # (c) proves the generated _keys.gen.h, the decl, AND the hand-written
-    # plugins/<p>/<p>_keys.h all carry the identical key-constant set + schema
+    # toolbox/<p>/<p>_keys.h all carry the identical key-constant set + schema
     # version (drift either way = fail); (e) WARNs (non-fatal) for any plugin
     # shipping a hand-written *_keys.h with no decl (the coverage ratchet). Pure
     # stdlib, so like contract_baseline it runs whenever Python is present.
@@ -1483,7 +1483,7 @@ add_test(NAME template_selfcheck
 set_tests_properties(template_selfcheck PROPERTIES LABELS "sdk")
 
 # ---- Examples compile gate -------------------------------------------------
-# "Exemplars are tests" (adoption-map item 4). The examples/ script tree is the
+# "Exemplars are tests" (adoption-map item 4). The qa/ script tree is the
 # first thing a new user runs; once, 32 of its inspect.cpp files carried 181
 # calls to the removed VAR() macro and none compiled on the current backend
 # (review 11, F grade). This gate compiles EVERY example script the same way the
@@ -1495,12 +1495,12 @@ set_tests_properties(template_selfcheck PROPERTIES LABELS "sdk")
 #
 # The source list is DERIVED (glob + CONFIGURE_DEPENDS) so a new example is
 # gated automatically — no hand-maintained list to rot. It is every *.cpp under
-# examples/ that is a SCRIPT: we exclude the co-located example PLUGINS
+# qa/ that is a SCRIPT: we exclude the co-located example PLUGINS
 # (*/plugins/* — those force-include a DIFFERENT support header and are covered
 # elsewhere), vendored third-party sources (*/vendor/*), and the standalone M0
 # executable demo_async (its own add_executable, not a JIT script).
 file(GLOB_RECURSE _examples_scripts CONFIGURE_DEPENDS
-     ${CMAKE_CURRENT_SOURCE_DIR}/../examples/*.cpp)
+     ${CMAKE_CURRENT_SOURCE_DIR}/../qa/*.cpp)
 list(FILTER _examples_scripts EXCLUDE REGEX "/plugins/")
 list(FILTER _examples_scripts EXCLUDE REGEX "/vendor/")
 list(FILTER _examples_scripts EXCLUDE REGEX "/demo_async\\.cpp$")

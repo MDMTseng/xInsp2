@@ -70,7 +70,7 @@ tracks only what is **still open**.
 - **A4 in-repo example migration** — the SDK entry, host wiring, loader, and compat
   fallback all landed and are proven (`test_parallel_safety` A4 cases + a real
   force-include compile of a migrated script exporting `xi_inspect_entry_tv`). The
-  ~90 `examples/*/inspect.cpp` scripts were **intentionally left on the legacy
+  ~90 `qa/*/inspect.cpp` scripts were **intentionally left on the legacy
   `xi_inspect_entry(int)` path** (one, `parallel_inspect_demo`, migrated as the
   reference) — legacy is supported forever, so bulk migration is churn, not a fix.
   New scripts should use `XI_INSPECT_ENTRY(t, frame)`.

@@ -105,8 +105,8 @@ backend/include/xi/  the SDK headers (50+): xi_plugin_manager, xi_trigger_bus,
                   xi_image_pool, xi_pack_*, xi_use, xi_result, xi_kv, …
 backend/tests/    C++ unit tests (ctest) + benchmarks
 hmi/              the operator SPA       vscode-extension/  the dev front-end
-examples/         runnable projects + qa_*/driver.py regression suite
-plugins/          globally-discoverable plugins
+qa/         runnable projects + qa_*/driver.py regression suite
+toolbox/          globally-discoverable plugins
 tools/            export_bundle.py, run_qa.py, xinsp2_py/ (Python SDK)
 ```
 

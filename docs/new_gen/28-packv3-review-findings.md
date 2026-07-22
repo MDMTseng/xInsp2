@@ -50,7 +50,7 @@ philosophy challenge). Findings are file:line-anchored against
 Convergence: integration F1–F4 × philosophy #2/#4 × round-1 core #5. Confidence: HIGH.
 
 - Tensor entries hit `default: continue` in every dump walk —
-  `plugins/expose/src/xex1_pack_dump.hpp:99` (shared by expose pull/store AND
+  `toolbox/expose/src/xex1_pack_dump.hpp:99` (shared by expose pull/store AND
   `record_save`), `xex1_wire_preview.hpp:138`, `expose.cpp:358`; the host walk
   agrees (`xi_pack.hpp` `canonical_value` returns false for `PackTag::Tensor`).
 - The XEX1-v3 format cannot carry a tensor: `xex1::V3Entry`

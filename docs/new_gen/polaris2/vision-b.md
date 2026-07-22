@@ -31,7 +31,7 @@ The core is hardened to a degree I rarely see. The lock-free `ImagePool` (genera
 
 ### 1.3 Unsynchronized `fps_` in `synced_stereo` (a shipped example)
 
-`plugins/synced_stereo/synced_stereo.cpp:68` declares `int fps_ = 10;` as a plain int. It is written on the control thread by `exchange()` (`:45`, the `set_fps` command) and by `set_def()` (`:61`), and read on the worker thread by `run_loop_()` (`:111`). This is a formal data race. `mock_camera` made the identical field `std::atomic<int>` (per the plugin investigation), so the correct pattern is established in-tree and this example diverges from it. **Failure scenario:** benign in practice (a torn read of a small int only mis-times one sleep), but it is a *shipped exemplar* — an author scaffolding a source plugin copies the race. The severity is pedagogical, not operational, which for a reference plugin is still a real defect.
+`toolbox/synced_stereo/synced_stereo.cpp:68` declares `int fps_ = 10;` as a plain int. It is written on the control thread by `exchange()` (`:45`, the `set_fps` command) and by `set_def()` (`:61`), and read on the worker thread by `run_loop_()` (`:111`). This is a formal data race. `mock_camera` made the identical field `std::atomic<int>` (per the plugin investigation), so the correct pattern is established in-tree and this example diverges from it. **Failure scenario:** benign in practice (a torn read of a small int only mis-times one sleep), but it is a *shipped exemplar* — an author scaffolding a source plugin copies the race. The severity is pedagogical, not operational, which for a reference plugin is still a real defect.
 
 ### 1.4 Every-crash slow leak of the input metadata doc on the `xi::use()` path
 

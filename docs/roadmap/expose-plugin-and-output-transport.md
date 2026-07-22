@@ -123,11 +123,11 @@ Not the `expose` plugin's job and not core's. A **comm plugin** that drives a PL
 ## 7. Rename + implementation change-set (when we build)
 
 Mechanical but broad — `preview` → `expose`, `tab`/`pg_id` → `channel id`, drop `PVAR`, new atomic frame:
-- `plugins/preview/` → `plugins/expose/` (+ `plugin.json` name).
+- `plugins/preview/` → `toolbox/expose/` (+ `plugin.json` name).
 - **Delete** `backend/include/xi/xi_preview.hpp` — no replacement header (scripts call `xi::use("expose").process(rec)` directly; channel via `rec.set("$channel", …)`; drop `PVAR` + the `$layout`/`__LINE__` ordering). Plugin-owned headers are the rule for any future plugin that needs one.
 - Transport: subscription per-channel-id (string, implicit), tracked **in the plugin** via `exchange` `subscribe`/`unsubscribe` (NOT a backend WS command — core stays a dumb byte pipe); **gate the JPEG-encode + emit on having a subscriber**; keep latest-per-channel for pull. msgpack is **hand-rolled** (minimal, fixed-shape encoder/decoder, no new dependency on any of the 3 sides) — still valid msgpack wire format.
 - Frame: emit the single `XEX1` + msgpack frame (`{v, channel, seq, json, images[]}`); JSON-string values; JPEG-encode each image on the publish path.
-- F-6 / decoder: the **`XEX1` decoder** lives in the plugin's own webUI (`plugins/expose/ui/index.html`), NOT in any client lib — `JSON.parse` the `json` field, JPEG-decode each image, magic/version gate. (Final architecture §10: expose is a pure plugin; core/extension/ui-components/hmi/python carry zero expose code.)
+- F-6 / decoder: the **`XEX1` decoder** lives in the plugin's own webUI (`toolbox/expose/ui/index.html`), NOT in any client lib — `JSON.parse` the `json` field, JPEG-decode each image, magic/version gate. (Final architecture §10: expose is a pure plugin; core/extension/ui-components/hmi/python carry zero expose code.)
 - Subscription gating (send-none-until-subscribed) lives in the plugin (`exchange subscribe`).
 - Docs: `write-a-script.md` "Surfacing output", `reference/ws-protocol.md`, `roadmap/run-result.md` cross-ref; this doc → `internals/` on ship.
 - `VAR`/`EMIT` + `xi_var.hpp` **deleted** from core (hard removal, integrator F-1); legacy scripts must migrate to `xi::use("expose")`.
@@ -152,7 +152,7 @@ Mechanical but broad — `preview` → `expose`, `tab`/`pg_id` → `channel id`,
 
 **Decision (supersedes the earlier "every client decodes XEX1" sketch):** `expose`
 is a *pure, self-contained plugin*. The XEX1 decoder + channel rendering live **only
-in the plugin's own webUI** (`plugins/expose/ui/index.html`, `has_ui:true`), hosted
+in the plugin's own webUI** (`toolbox/expose/ui/index.html`, `has_ui:true`), hosted
 generically by whatever already hosts plugin webUIs (the VS Code `get_plugin_ui` →
 `<folder>/ui/index.html` path, or a direct WebSocket). The pre-v9 `vars` + `gid` +
 per-image-name preview model is **removed**, and **no expose/preview/VAR code lives in

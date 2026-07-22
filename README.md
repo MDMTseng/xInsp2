@@ -146,7 +146,7 @@ Key design choices:
   (`.xex1`). Since the v12 cut this is the **only** data plane: every plugin
   speaks it through the `xi.pack@1` door (the legacy Record path was deleted).
 - **Shared heavy work is a lib plugin.** The capability plane: a lib plugin
-  registers named capabilities (e.g. `plugins/imgcodec`'s `xi.jpeg.encode` —
+  registers named capabilities (e.g. `toolbox/imgcodec`'s `xi.jpeg.encode` —
   one deduplicated encode serves every consumer), and other plugins call it
   by name through a host-forwarded funnel with the same crash attribution
   and quarantine as every other boundary.
@@ -366,8 +366,8 @@ cmake -S backend -B backend/build -A x64 \
 cmake --build backend/build --config Release
 
 # Plugins (mock_camera, blob_analysis, synced_stereo, …)
-cmake -S plugins -B plugins/build -A x64
-cmake --build plugins/build --config Release
+cmake -S toolbox -B toolbox/build -A x64
+cmake --build toolbox/build --config Release
 
 # VS Code extension
 cd vscode-extension && npm install && npm run build
@@ -401,9 +401,9 @@ This is the same script that produced the file on the Releases page.
 | `backend/src/service_main.cpp` | `xinsp-backend.exe` — full interactive server      |
 | `backend/src/runner_main.cpp`  | `xinsp-runner.exe` — headless production runner    |
 | `vscode-extension/`   | VS Code integration: TreeView, CodeLens, webviews, E2E      |
-| `plugins/`            | Shipped plugins: `mock_camera`, `blob_analysis`, `data_output`, `json_source`, `record_save`, `threshold_op`, `synced_stereo` |
+| `toolbox/`            | Shipped plugins: `mock_camera`, `blob_analysis`, `data_output`, `json_source`, `record_save`, `threshold_op`, `synced_stereo` |
 | `sdk/`                | Plugin SDK: `scaffold.mjs`, `cmake/` module, `template/`, `testing/` helpers, worked examples |
-| `examples/`           | User-script examples (defect_detection, use_demo, …)        |
+| `qa/`           | User-script examples (defect_detection, use_demo, …)        |
 | `docs/`               | Architecture, status, testing, protocol reference, guides   |
 
 ---
@@ -454,7 +454,7 @@ This is the same script that produced the file on the Releases page.
   files — the same canonical bytes as memory and wire — and the
   `record_replay` source re-emits them through the standard door: a
   byte-lossless record → save → replay loop for regression tests and
-  off-line tuning (`examples/qa_pack_record_replay/`). The `cache` plugin
+  off-line tuning (`qa/qa_pack_record_replay/`). The `cache` plugin
   is the in-RAM variant — capture live frames, re-inspect on a hot param
   change. See `examples/buffer_replay_demo/`.
 
@@ -536,9 +536,9 @@ xInsp2/
 │   ├── tests/               ← C++ unit tests (xi_core, pack, protocol, …)
 │   └── CMakeLists.txt
 ├── vscode-extension/        ← VS Code integration + Node E2E tests
-├── plugins/                 ← shipped plugins
+├── toolbox/                 ← shipped plugins
 ├── sdk/                     ← plugin SDK (scaffold, cmake, template, examples)
-└── examples/                ← user-script examples + crash_tests
+└── qa/                ← user-script examples + crash_tests
 ```
 
 ---

@@ -32,12 +32,12 @@ namespace xi::proto {
 // NOTE: the `vars` wire enum (VarKindWire) + VarItem/Vars structs were removed
 // with the v9 vars/value-store teardown — nothing emits a `vars` frame anymore.
 // Script output now leaves as the `expose` plugin's self-framed XEX1 binary
-// frame (plugins/expose/src/expose.cpp), not a core protocol type.
+// frame (toolbox/expose/src/expose.cpp), not a core protocol type.
 
 // NOTE: the old binary "preview header" (gid/codec/w/h/ch, 20-byte big-endian)
 // and its Codec enum were removed with the v9 vars/preview-core teardown. The
 // `expose` plugin now frames its own output as a self-describing XEX1 binary
-// frame (magic + msgpack; see plugins/expose/src/expose.cpp); the core is a dumb
+// frame (magic + msgpack; see toolbox/expose/src/expose.cpp); the core is a dumb
 // byte pipe for it (host emit_binary → broadcast), so no core-side header type.
 
 // ---------- JSON string escape / unescape ----------

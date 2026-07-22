@@ -56,7 +56,7 @@ For working **on** the framework (not just authoring a project on it):
 |---|---|
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | The "where do I start" doc: prerequisites, first build (backend **and** extension), the full pre-push test sweep, branch / commit / PR / coding style, doc culture. |
 | [`guides/build-and-run.md`](./guides/build-and-run.md) | Toolchain setup, build from source, and the edit→run dev loop in detail. |
-| [`testing.md`](./testing.md) | The whole test surface — C++ unit (`ctest`), Node WS suites, VS Code E2E, the `examples/qa_*` drivers — and how to add a test. |
+| [`testing.md`](./testing.md) | The whole test surface — C++ unit (`ctest`), Node WS suites, VS Code E2E, the `qa/qa_*` drivers — and how to add a test. |
 | [`guides/write-a-plugin.md`](./guides/write-a-plugin.md) | Authoring, building (in-project + standalone `cmake`), UI-testing, and exporting a plugin. |
 | [`guides/deploy.md`](./guides/deploy.md) | The `--aot` export bundle (`tools/export_bundle.py`) — ship to a PC with no compiler. |
 

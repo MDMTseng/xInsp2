@@ -175,7 +175,7 @@ inline DWORD GetModuleFileNameA(HMODULE mod, char* buf, DWORD size) {
 
 // Map a plugin manifest's Windows-convention module name ("xi-<name>.dll") to the
 // platform's actual shared-object file. Plugin manifests (plugin.json "dll") and
-// the plugins/ CMake share the SAME "xi-" prefix on every platform
+// the toolbox/ CMake share the SAME "xi-" prefix on every platform
 // (CMAKE_SHARED_LIBRARY_PREFIX="xi-"), so only the SUFFIX differs: .dll on
 // Windows, .so on Linux, .dylib on macOS. A path that already carries the native
 // suffix (e.g. a JIT-compiled script/plugin .so) is returned unchanged, so this

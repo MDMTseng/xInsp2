@@ -39,10 +39,10 @@ then export to standalone when you're ready to share.
 > contract, image-handle refcounts, and the UI patterns: keep UX flow in the
 > webui not C++, and don't reimplement geometry in JS).
 
-The repo ships reference plugins to crib from: `plugins/` (source/sink/processor
+The repo ships reference plugins to crib from: `toolbox/` (source/sink/processor
 basics — `mock_camera`, `blob_analysis`, `data_output`, `json_source`,
 `record_save`, `cache`, `synced_stereo`, `expose`) and richer worked examples under
-`examples/*/plugins/`.
+`qa/*/plugins/`.
 
 ---
 
@@ -409,7 +409,7 @@ live. The canonical lock-free shape: keep the live config in a
 `std::atomic<std::shared_ptr<const T>>` that `process()` reads, build a new one in
 `prepare()`, swap the pointer in `commit()`. Omit all this and a config change is a
 plain (host-serialized) `set_def` — fine for light plugins. The orchestrator drives
-it via `prepare_instance` + `commit_group`; see `plugins/config_swap_probe/` for a
+it via `prepare_instance` + `commit_group`; see `toolbox/config_swap_probe/` for a
 complete example and [`../reference/c-abi.md`](../reference/c-abi.md) §1.
 
 ### After a caught crash — `on_fault` policy (optional)
@@ -552,7 +552,7 @@ out.mp("blobs", mw.bytes().data(), mw.bytes().size());
 ```
 
 A consumer reads it back with `xi::mp::Reader` over the byte span `in.mp("blobs")`
-returns. `plugins/blob_analysis` is the worked example — it packs its whole
+returns. `toolbox/blob_analysis` is the worked example — it packs its whole
 per-blob array, each blob's contour polygon included, into a single `"blobs"`
 entry. Prefer contract-generated key constants
 (`contract/plugins/<name>.decl.json` → `<name>_keys.gen.h`) over string literals
@@ -594,11 +594,11 @@ XI_PLUGIN_PACK_DOOR(BlobAnalysis)     // publishes xi_plugin_get_interface("xi.p
 `XI_PLUGIN_PACK_DOOR` goes *after* `XI_PLUGIN_IMPL`; it exports the door the host
 probes (`xi_plugin_get_interface("xi.pack", 1)`) to learn your plugin speaks
 packs. A plugin with no data plane — a pure lib/capability provider (see below) —
-simply doesn't add it. The worked exemplars: `plugins/blob_analysis` (processor
-door, contract-generated keys), `plugins/expose` (a **generic sink** — walks any
+simply doesn't add it. The worked exemplars: `toolbox/blob_analysis` (processor
+door, contract-generated keys), `toolbox/expose` (a **generic sink** — walks any
 pack with
 `in.count()` / `in.key_at(i)` / `in.tag_at(i)` without knowing its producer),
-`plugins/mock_camera` (pack-mode emit), `plugins/record_replay` (replay
+`toolbox/mock_camera` (pack-mode emit), `toolbox/record_replay` (replay
 source).
 
 **Faults, not nulls.** A *contract* failure (missing input, wrong type) is a
@@ -649,7 +649,7 @@ destructor. Consumers call it by name via `get_interface("xi.cap", 1)` →
 `call(name, in, &out)`. Handlers **must be thread-safe** (the funnel does not
 serialize them), version via the `"$v"` entry *inside* the request pack, and
 answer a bool `"$probe": true` request with a `"$versions"` string doing no
-work. `plugins/imgcodec` (`"lib": true`, `reentrant: true`,
+work. `toolbox/imgcodec` (`"lib": true`, `reentrant: true`,
 `on_fault: refuse`) is the reference; the exact vtables + result codes are in
 [`../reference/c-abi.md`](../reference/c-abi.md) §6.
 
@@ -658,8 +658,8 @@ work. `plugins/imgcodec` (`"lib": true`, `reentrant: true`,
 > **Status at THE CUT:** the host-mock CLI (`sdk/host_mock/xi_run_plugin.cpp`)
 > still drives the **retired Record door** and is awaiting its v12 port to the
 > pack door — it does not exercise a pack-only plugin yet. Until that port
-> lands, test headlessly through a live backend instead: the `examples/qa_*`
-> drivers (e.g. `examples/qa_use_pack_door`) run a real project against your
+> lands, test headlessly through a live backend instead: the `qa/qa_*`
+> drivers (e.g. `qa/qa_use_pack_door`) run a real project against your
 > plugin's pack door end-to-end, and `xi_test.hpp` covers the pure-C++ core of
 > a `build:cmake` plugin without any host at all.
 
@@ -963,7 +963,7 @@ module.exports = { async run(h) {
 
 ### Instantiating an example/source-only plugin: `useProjectPlugin`
 
-Plugins that ship **source but no built DLL** (all the `examples/` plugins)
+Plugins that ship **source but no built DLL** (all the `qa/` plugins)
 can't be instantiated via the scan path — there's no DLL to load. Call
 **`h.useProjectPlugin(projectFolder)`** right after `createProject`: it copies
 the plugin's source into `<project>/plugins/<name>/` and reopens the project, so

@@ -34,7 +34,7 @@ from xinsp2 import Client, ProtocolError  # noqa: E402
 
 ITERS = fuzz_iters(800)
 SEED = int(os.environ.get("FUZZ_SEED", "9090"))
-PROJECT = REPO_ROOT / "examples" / "multi_source_surge"
+PROJECT = REPO_ROOT / "qa" / "multi_source_surge"
 
 
 def rstr(rng: random.Random, n: int) -> str:

@@ -253,7 +253,7 @@ clients/
   client-core-py/  generated                                              ← NEW
   extension/       consumes client-core-ts; consumes the FULL event contract
   hmi/             consumes client-core-ts (no hand-rolled socket)
-plugins/           shipped plugins — each is also a conformance exemplar
+toolbox/           shipped plugins — each is also a conformance exemplar
 gates/             CI definitions; examples-compile, schema-diff, fuzz smoke, protocol round-trip
 docs/              semantics by hand; shapes generated
 ```
