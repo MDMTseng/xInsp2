@@ -12,10 +12,11 @@
       "status": "IMPLEMENTED — test_controls (14 tests): schema tree emit, layout (tabs/grid/section/span/rows/caption), widgets (slider/numpad/stepper/range/toggle/dropdown/radio/text/file/color/button/readout/view/title/label/divider), semantic types, set_def clamp/enum-reject/absent-tolerant, snapshot typing + concurrency"
     },
     "ui": {
-      "entry": "mountSchema",
-      "symbol": "mountSchema (ui-components/src/auto-panel.mjs)",
-      "delivery": "vanilla ES module in @xinsp2/components; renders the $schema with the built xi-* custom elements, wired to set_instance_def",
-      "status": "IMPLEMENTED (renderer logic) — schema-panel.node.mjs (5 tests). Dedicated xi-stepper/xi-range/xi-color/xi-file Svelte widgets + touch numpad + live-view mount into the view slot remain (frontend build world)."
+      "entry": "ui/mount-schema.mjs",
+      "symbol": "mountSchema",
+      "test": "ui/mount-schema.test.mjs",
+      "delivery": "SOURCE (vanilla ES module) — like the native header, the consumer's build compiles/bundles it. The plet is a LEAF: this module imports nothing from the app layer; the app (extension/HMI/@xinsp2/components) depends on the PLET when it wants a schema panel.",
+      "status": "IMPLEMENTED — 6 tests (ui/mount-schema.test.mjs): tree/grid/tabs render, widget mapping + degrade intent, value seeding + set_instance_def wiring, button exchange, range two-key binding, null-when-no-$schema. Renders with the shared xi-* custom elements. Remaining: dedicated xi-stepper/xi-range/xi-color/xi-file elements, touch numpad, live-view mount into the view slot."
     }
   },
   "contract": "contract.ts",

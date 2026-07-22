@@ -35,7 +35,10 @@
 <div id="log">— edits log here —</div>
 <script type="module">
   import "../dist/xi-components.esm.js";                 // registers <xi-*>
-  import { mountSchema } from "../src/auto-panel.mjs";
+  // the renderer is OWNED BY THE PLET (doc 37) — import it from there, not from
+  // the app layer. NOTE: serve the REPO ROOT so /toolbox/... resolves:
+  //   python -m http.server -d <repo> 8931  ->  /ui-components/demo/schema.html
+  import { mountSchema } from "../../toolbox/pluginlets/controls/ui/mount-schema.mjs";
 
   const $schema = { type:"root", children:[
     { type:"tab", title:"Capture", children:[

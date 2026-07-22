@@ -1,8 +1,10 @@
-// schema-panel.node.mjs — mountSchema (auto-panel.mjs): renders the controls
-// pluginlet's $schema TREE (tabs / grid / widgets incl. radio/readout/view/button)
-// and wires value edits back through set_instance_def. Pure-Node: a tiny fake DOM
-// (no jsdom, no built Svelte bundle) so it verifies the tree/wiring LOGIC without
-// the frontend toolchain. (The real xi-* widget rendering needs `npm run build`.)
+// mount-schema.test.mjs — the controls pluginlet's OWN UI test (the plet owns its
+// UI half and its tests). Covers mount-schema.mjs: rendering the $schema TREE
+// (tabs / grid / widgets incl. radio/readout/view/button/range) and wiring value
+// edits back through set_instance_def, plus the app-layer chooser's fallback.
+// Pure-Node: a tiny fake DOM (no jsdom, no built Svelte bundle) so it verifies the
+// tree/wiring LOGIC without the frontend toolchain. (Real xi-* widget rendering
+// needs the webui build — `npm run build` in ui-components.)
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -40,7 +42,8 @@ const all = (el) => { const o = []; (function rec(n) { for (const c of n.childre
 const byTag = (el, t) => all(el).filter((e) => e.tagName === t.toUpperCase());
 const byClass = (el, c) => all(el).filter((e) => (e.className || "").split(" ").includes(c));
 
-const { mountSchema } = await import("../src/auto-panel.mjs");
+const { mountSchema } = await import("./mount-schema.mjs");
+const { mountInstancePanel } = await import("../../../../ui-components/src/auto-panel.mjs");
 
 function schemaDef() {
   const schema = { type: "root", children: [
@@ -178,7 +181,18 @@ test("extended widgets: stepper/file/color degrade + carry sem; range → two co
   assert.equal(client.calls.at(-1).low, 40, "band low preserved");
 });
 
-test("no $schema falls back to the flat mountPanel path", async () => {
+test("the plet renderer returns null when there is no $schema (it never falls back)", async () => {
+  const client = {
+    def: { width: 640 },
+    async getInstanceDef() { return { ...this.def }; },
+    async setInstanceDef() {},
+  };
+  const host = doc.createElement("div"); host.ownerDocument = doc;
+  assert.equal(await mountSchema(host, { client, instance: "x" }), null,
+    "choosing another renderer is the caller's job, not the plet's");
+});
+
+test("the APP chooser falls back to the flat mountPanel path", async () => {
   const client = {
     def: { width: 640, streaming: true },
     calls: [],
@@ -186,7 +200,7 @@ test("no $schema falls back to the flat mountPanel path", async () => {
     async setInstanceDef(n, d) { this.calls.push(d); },
   };
   const host = doc.createElement("div"); host.ownerDocument = doc;
-  const r = await mountSchema(host, { client, instance: "x" });
+  const r = await mountInstancePanel(host, { client, instance: "x" });
   assert.ok(r && typeof r.destroy === "function", "returns a panel handle");
   assert.ok(byTag(host, "xi-number").length >= 1, "inferred a number control (fallback)");
   assert.ok(byTag(host, "xi-toggle").length >= 1, "inferred a toggle (fallback)");
