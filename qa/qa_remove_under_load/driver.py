@@ -26,7 +26,7 @@ Run:  python qa/qa_remove_under_load/driver.py   (Windows; backend built)
 """
 from __future__ import annotations
 import os
-import tempfile, subprocess, sys, time
+import shutil, tempfile, subprocess, sys, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -66,6 +66,13 @@ def main() -> int:
 
     fails: list[str] = []
     frames_seen = 0
+    # This test MUTATES its own project by design — it creates a "victim"
+    # instance and churns it under load — and the backend persists that into
+    # project.json on the way out. Left alone, every run leaves the fixture
+    # dirty in git and the next reader cannot tell test residue from a real
+    # edit. Snapshot the bytes now, put them back in finally.
+    proj = ROOT / "project.json"
+    proj_orig = proj.read_bytes()
     proc = spawn(PORT)
     try:
         c = connect(PORT)
@@ -126,6 +133,10 @@ def main() -> int:
             proc.terminate(); proc.wait(timeout=10)
         except Exception:
             proc.kill()
+        # Restore the fixture (see the snapshot above). Do it after the backend
+        # is down, or it will just persist its in-memory copy over the top.
+        proj.write_bytes(proj_orig)
+        shutil.rmtree(ROOT / "instances" / "victim", ignore_errors=True)
 
     if fails:
         for f in fails:

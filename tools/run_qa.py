@@ -7,7 +7,7 @@ Each driver prints a `VERDICT: PASS|FAIL: …` line (and may print `SKIP: …`).
 runner aggregates PASS/FAIL/SKIP, prints a summary, and exits non-zero if any
 test FAILed (so it's usable as a CI gate).
 
-PARALLELISM (--jobs, default 4; env XINSP2_QA_JOBS; or 1 to force fully serial)
+PARALLELISM (--jobs, default min(4, cores//2); env XINSP2_QA_JOBS; 1 = fully serial)
 Each driver spawns its own backend(s) on a free_port() port, and J1's per-PID
 script work_dir removed the last shared-build-dir collision — so the
 parallel-safe tests run concurrently in a pool of `jobs` workers. The tests named
@@ -15,6 +15,14 @@ in qa/qa_serial.txt assert on TIMING / concurrency-count / load and would
 flake under CPU oversubscription, so they run SERIALLY in a second phase with
 nothing else running. --jobs=1 runs everything in one sequential pass (the old
 behaviour) and ignores the serial split.
+
+The default is a guess about YOUR machine and is sometimes wrong: one worker is
+a whole backend plus a g++ JIT compile, so on a small host (4 cores or fewer,
+ARM SBCs, shared CI) even the default of 2 can make timing-sensitive tests fail
+that pass individually. Set XINSP2_QA_JOBS=1 there. A failing run prints which
+of its failures look like contention and gives the exact serial re-run command,
+so you do not have to guess which kind you are looking at — see
+explain_failures().
 
   python tools/run_qa.py              # all qa_* tests (parallel pool + serial tail)
   python tools/run_qa.py group        # only those whose folder name contains "group"
@@ -65,6 +73,46 @@ def load_serial() -> set[str]:
         if s and not s.startswith("#"):
             out.add(s)
     return out
+
+
+def explain_failures(failed, jobs: int, cores: int | None = None) -> str:
+    """Say which KIND of failure this looks like, with the exact re-run command.
+
+    The two kinds are handled completely differently and the summary line cannot
+    tell them apart:
+
+      * died in ~0s  — it never started. Bad import, backend not built, missing
+        Python dep. Concurrency is irrelevant, and pointing someone at --jobs=1
+        here sends them down the wrong path entirely.
+      * failed after doing real work, while sharing the box with other backends
+        — that is the shape a contention flake takes.
+
+    Pure function of (name, outcome, seconds) so it can be checked without
+    running the suite. `cores` is injectable for the same reason.
+    """
+    cores = cores if cores is not None else (os.cpu_count() or 0)
+    me = f"tools/{Path(__file__).name}"
+    instant = [n for n, _, d in failed if d < 2.0]
+    worked  = [n for n, _, d in failed if d >= 2.0]
+    out = []
+    if instant:
+        out += ["", "  ! " + ", ".join(instant) + " failed in under 2s — that is not a",
+                "    timing flake, they never started. Run one directly to see why:",
+                f"      python {me} {instant[0]}",
+                "    Usual causes: backend not built, or a missing Python dep",
+                "    (tools/setup-linux.sh --check reports both)."]
+    if worked and jobs > 1:
+        out += ["", f"  ! Ran with --jobs={jobs} on a {cores}-core host. Each worker is a whole",
+                "    backend plus a g++ JIT compile, so timing-sensitive tests can fail",
+                "    purely from contention and pass on their own. Before treating these",
+                "    as real, re-run them serially (one filter per invocation):"]
+        out += [f"      python {me} --jobs=1 {n}" for n in worked[:3]]
+        if len(worked) > 3:
+            out += [f"      ... and {len(worked) - 3} more"]
+        out += ["    If they pass that way it was the box, not the code — set",
+                "    XINSP2_QA_JOBS=1 for this machine, or add the persistent offenders",
+                "    to qa/qa_serial.txt so only those are forced serial."]
+    return "\n".join(out)
 
 
 def test_name(drv: Path) -> str:
@@ -159,6 +207,21 @@ def main() -> int:
     # multi-threaded (dispatch workers + OMP + a cl.exe compile), so even the
     # parallel-safe tests must not oversubscribe. 16-core dev → 4; 4-core CI runner
     # → 2; 2-core → 1 (serial). Override with --jobs or XINSP2_QA_JOBS.
+    #
+    # KNOWN SOFT SPOT, deliberately not "fixed" here: on a 4-core machine this
+    # yields 2, and that is still enough to make timing-sensitive tests flake —
+    # measured on a Raspberry Pi 5 (4 cores, aarch64), qa_func / qa_jpeg_preview /
+    # qa_param_state_isolation fail under --jobs=2 and pass individually every
+    # time. Each worker is a whole backend plus a g++ JIT compile, so two of them
+    # is closer to eight busy threads than to two.
+    #
+    # It is left alone because the right value is a property of the MACHINE, not
+    # of this repo, and lowering the default would slow every CI runner to fix a
+    # problem only small hosts have. Pick deliberately:
+    #   XINSP2_QA_JOBS=1   small / shared / ARM hosts, or when chasing a real bug
+    #   --jobs=1           same, one-off
+    #   (default)          dedicated runners with cores to spare
+    # A failing run prints this same advice with the exact re-run command.
     default_jobs = min(4, max(1, (os.cpu_count() or 4) // 2))
     jobs = int(opts.get("--jobs", os.environ.get("XINSP2_QA_JOBS", default_jobs)))
     jobs = max(1, jobs)
@@ -218,7 +281,10 @@ def main() -> int:
           f"{nknown} known-fail, {nflaky} flaky, {nunexp} unexpected-pass "
           f"({len(results)} total, {wall:.0f}s cpu) ===")
     if nfail:
-        print("FAILED: " + ", ".join(n for n, o, _ in results if o in ("FAIL", "TIMEOUT")))
+        failed = [(n, o, d) for n, o, d in results if o in ("FAIL", "TIMEOUT")]
+        print("FAILED: " + ", ".join(n for n, _, _ in failed))
+        if (hint := explain_failures(failed, jobs)):
+            print(hint)
     if nknown:
         print("KNOWN-FAIL (quarantined, non-fatal — see qa/qa_known_failing.txt): "
               + ", ".join(n for n, o, _ in results if o == "KNOWN-FAIL"))

@@ -35,7 +35,7 @@ The deterministic LRU/slot semantics — content dedup, exact latest-wins, LRU
 eviction — are pinned by the ctest unit toolbox/cap_ui_egress_test.cpp (a timer-
 driven pipeline cannot make those wall-clock-deterministic from out here).
 
-Run:  python qa/qa_ui_egress/driver.py   (Windows; backend + plugins built)
+Run:  python qa/qa_ui_egress/driver.py   (backend + plugins built; any platform)
 """
 from __future__ import annotations
 
@@ -50,11 +50,15 @@ ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "tools" / "xinsp2_py"))
 sys.path.insert(0, str(REPO / "qa" / "lib"))
-from xinsp2 import Client       # noqa: E402
-from ports import free_port     # noqa: E402
+from xinsp2 import Client                    # noqa: E402
+from ports import backend_exe, free_port      # noqa: E402
 from xex1 import collect_frames, jpeg_dims, subscribe  # noqa: E402
 
-BACKEND = REPO / "backend" / "build" / "Release" / "xinsp-backend.exe"
+# Which build layout holds the exe is ports.backend_exe()'s job — it probes
+# build-linux, build/Release, build/Debug and a plain single-config build/.
+# (This used to hardcode build/Release/xinsp-backend.exe, which is why the whole
+# driver sat behind a Windows-only skip it never actually needed.)
+BACKEND = backend_exe()
 INSPECT = ROOT / "inspect.cpp"
 W, H = 64, 48
 EGRESS_FPS = 6
@@ -297,8 +301,10 @@ def phase3(fails: list[str]) -> None:
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("SKIP: Windows-only"); return 0
+    # (No platform gate. There never was a Windows-only dependency here — the
+    # skip was covering for the hardcoded build/Release/*.exe path above. The
+    # whole pipeline this exercises runs on Linux; toolbox/ui_egress/example
+    # demonstrates the same path there.)
     if not BACKEND.exists():
         print(f"SKIP: backend not built ({BACKEND})"); return 0
 

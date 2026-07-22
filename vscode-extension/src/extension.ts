@@ -11,6 +11,7 @@ import { TEMPLATE_CHOICES, TemplateId, locateSdkRoot, renderPluginFiles,
     from './projectPluginTemplates';
 import { renderProjectSettingsHtml } from './projectSettingsHtml';
 import { renderPluginBrowserHtml, PBModel, PBRoot, PBTreeNode, PBPlugin } from './pluginBrowser';
+import { locateExampleRoot, listExampleProjects, copyExample, ExampleProject } from './exampleProjects';
 import { ImageViewerPanel } from './imageViewerPanel';
 import { resolveBackendMode } from './backendMode.mjs';
 import { VerdictTally, parseRunOutcome, parseRunFinished,
@@ -2426,131 +2427,108 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // First-run sample project: create a throwaway demo project with a
-    // preconfigured mock_camera → blob_analysis pipeline so the user can
-    // see something working immediately.
+    // ---- Shipped example projects ------------------------------------
+    //
+    // The catalogue is READ FROM DISK (toolbox/<name>/example, plus the
+    // cross-plugin toolbox/example), not hardcoded here. This command used to
+    // be a ~120-line generator with an inspect.cpp inside a template literal;
+    // it drifted from the real examples every time either side moved, and it
+    // could only ever demo the two plugins someone had wired into it.
+    //
+    // An example is COPIED, never opened in place: the user is meant to edit
+    // it, and a shipped tree (or a read-only install) is the wrong thing to
+    // edit. Build output and run artifacts are left behind by copyExample().
+    const exampleRoot = () => locateExampleRoot(
+        context.extensionPath, findBackendExe(context) || undefined,
+        vscode.workspace.getConfiguration('xinsp2').get<string>('toolboxPath') || undefined);
+
+    async function openExample(ex: ExampleProject): Promise<void> {
+        const { tmpdir } = require('os');
+        const dest = path.join(tmpdir(),
+            `xinsp2_${ex.id}_${Date.now().toString(36)}`);
+        try {
+            copyExample(ex.dir, dest);
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`xInsp2: could not copy example: ${e?.message || e}`);
+            return;
+        }
+        await vscode.commands.executeCommand('xinsp2.openProject', dest);
+        // Open the script and the README side by side — the README is where the
+        // example says what it is demonstrating, which is the whole point of
+        // opening one rather than an empty project.
+        try {
+            const doc = await vscode.workspace.openTextDocument(path.join(dest, 'inspect.cpp'));
+            await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+        } catch { /* an example without a script would not have been listed */ }
+        const readme = path.join(dest, 'README.md');
+        if (require('fs').existsSync(readme)) {
+            try { await vscode.commands.executeCommand('markdown.showPreviewToSide',
+                                                       vscode.Uri.file(readme)); } catch { }
+        }
+        vscode.window.showInformationMessage(
+            `Opened the ${ex.id} example (copy at ${dest}) — edit it freely, the shipped one is untouched.`);
+    }
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.tryExample', async (id?: string) => {
+            if (!client?.connected) {
+                vscode.window.showWarningMessage('xInsp2: not connected to backend');
+                return;
+            }
+            const root = exampleRoot();
+            if (!root) {
+                vscode.window.showErrorMessage(
+                    'xInsp2: no plugin folder found, so no examples to list. '
+                    + 'Set xinsp2.toolboxPath to the folder holding the shipped plugins.');
+                return;
+            }
+            const all = listExampleProjects(root);
+            if (!all.length) {
+                vscode.window.showErrorMessage(`xInsp2: no example projects under ${root}.`);
+                return;
+            }
+            if (id) {
+                const hit = all.find((e) => e.id === id);
+                if (!hit) {
+                    vscode.window.showErrorMessage(
+                        `xInsp2: no example for '${id}' (have: ${all.map((e) => e.id).join(', ')})`);
+                    return;
+                }
+                await openExample(hit);
+                return;
+            }
+            const pick = await vscode.window.showQuickPick(
+                all.map((e) => ({
+                    label: (e.isStation ? '$(circuit-board) ' : '$(package) ') + e.title,
+                    description: e.isStation ? 'all plugins together' : e.id,
+                    detail: e.summary,
+                    ex: e,
+                })),
+                { title: 'xInsp2: try an example project',
+                  placeHolder: 'Each one is a runnable project — it is copied so you can edit it' });
+            if (pick) await openExample((pick as any).ex);
+        })
+    );
+
+    // Kept as the welcome-view / palette entry point, and non-interactive so a
+    // caller (including the ux_states E2E) gets a project without a prompt.
+    // Prefers the cross-plugin station, which is the best single thing to show
+    // someone who has never seen the tool.
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.createSampleProject', async () => {
             if (!client?.connected) {
                 vscode.window.showWarningMessage('xInsp2: not connected to backend');
                 return;
             }
-            const { tmpdir } = require('os');
-            const fs = require('fs');
-            const sampleDir = path.join(tmpdir(),
-                `xinsp2_sample_${new Date().toISOString().slice(0,10)}_${Date.now().toString(36)}`);
-            const create = await sendCmd('create_project', {
-                folder: sampleDir, name: 'xinsp2_sample',
-            });
-            if (!create?.ok) {
-                vscode.window.showErrorMessage(`Sample project failed: ${create?.error || 'unknown'}`);
+            const root = exampleRoot();
+            const all = root ? listExampleProjects(root) : [];
+            if (!all.length) {
+                vscode.window.showErrorMessage(
+                    'xInsp2: no example projects found. Set xinsp2.toolboxPath to the '
+                    + 'folder holding the shipped plugins.');
                 return;
             }
-            // Preconfigure a small pipeline — pick whichever plugins we have.
-            const plugins: any[] = (await sendCmd('list_plugins'))?.data || [];
-            const want = ['mock_camera', 'blob_analysis'];
-            for (const p of want) {
-                if (plugins.some(x => x.name === p)) {
-                    await vscode.commands.executeCommand('xinsp2.createInstance',
-                        p + '0', p);
-                }
-            }
-            // The `expose` sink is a plugin like any other and needs an instance
-            // before a script may call xi::use("expose"). Convention: the instance
-            // key IS the string "expose" (that is what the script uses), not "expose0".
-            const hasExpose = plugins.some(x => x.name === 'expose');
-            if (hasExpose) {
-                await vscode.commands.executeCommand('xinsp2.createInstance',
-                    'expose', 'expose');
-            }
-            // Seed a working script that uses whichever instances we created.
-            const scriptPath = path.join(sampleDir, DEFAULT_SCRIPT_NAME);
-            const hasCam = plugins.some(x => x.name === 'mock_camera');
-            const hasDet = plugins.some(x => x.name === 'blob_analysis');
-            if (hasCam && hasDet) {
-                // Only surface to `expose` if we actually created that instance —
-                // never reference an instance the generator didn't configure.
-                const exposeBlock = hasExpose ? `
-    // Surface the input + result to a UI panel via the shipped \`expose\` sink.
-    // Build a pack, tag a "$channel", and push it — no macro, no VAR.
-    xi::ScriptPackBuilder e;
-    e.add_str("$channel", "inspection");
-    e.add_i64("$seq", (int64_t)xi::run_id());   // ordering identity, producer-stamped
-    e.add_image("input", input->width, input->height, input->channels,
-                input->pixels.data());
-    if (auto bin = out.get_image("binary"))
-        e.add_image("binary", bin->width, bin->height, bin->channels,
-                    bin->pixels.data());
-    e.add_i64("blob_count", blob_count);
-    xi::use("expose").push(e.seal());
-` : `
-    // (No \`expose\` instance in this project — add one to surface previews:
-    //  create an instance named "expose" of the \`expose\` plugin, then build a
-    //  pack with xi::ScriptPackBuilder and xi::use("expose").push(pack).)
-`;
-                fs.writeFileSync(scriptPath, `//
-// xInsp2 sample — mock_camera0 -> blob_analysis0 pipeline.
-// Edit, save (compiles automatically), and click Run Inspection.
-//
-// Note: <xi/xi.hpp> is the OpenCV-free umbrella. Pull in OpenCV explicitly
-// with <xi/xi_cv.hpp> only if your script calls cv:: functions directly.
-//
-#include <xi/xi.hpp>
-#include <xi/xi_use.hpp>
-#include <xi/xi_script_pack.hpp>  // xi::ScriptPackBuilder — build packs script-side
-#include <xi/xi_result.hpp>   // xi::ok / xi::ng / xi::result (per-run verdict)
-
-// Explicit-trigger entry: the host hands the trigger in as \`t\` (no ambient
-// state), so \`t\` is self-contained and safe to use on any thread.
-XI_INSPECT_ENTRY(t, frame) {
-    (void)frame;
-
-    // Frames arrive by PUSH — the mock_camera0 source emits a sealed pack into
-    // the trigger bus. Read it straight off the trigger view.
-    auto f = t.pack();
-    auto input = f.get_image("frame");   // zero-copy view: dims + pixel span
-    if (!input) {
-        // Nothing to inspect this run — record NA (code 0), not OK/NG.
-        xi::result(0, "missing frame");
-        return;
-    }
-
-    // blob_analysis0 expects a SINGLE-CHANNEL image under the key "gray" and
-    // returns a "binary" image plus an integer "blob_count". Fold the RGB
-    // frame to luma first (no OpenCV needed for that).
-    std::vector<uint8_t> gray((size_t)input->width * (size_t)input->height);
-    const uint8_t* px = input->pixels.data();
-    for (size_t i = 0, n = gray.size(); i < n; ++i) {
-        const uint8_t* p = px + i * (size_t)input->channels;
-        gray[i] = input->channels >= 3
-            ? (uint8_t)((p[0] * 77 + p[1] * 150 + p[2] * 29) >> 8)  // RGB → luma
-            : p[0];
-    }
-
-    xi::ScriptPackBuilder b;
-    b.add_image("gray", input->width, input->height, 1, gray.data());
-    auto out = xi::use("blob_analysis0").process(b.seal());
-    if (out.is_fault()) {
-        // A fault is a normal sealed pack carrying "$fault" — check it BEFORE
-        // reading results (poison in, poison out).
-        xi::ng(1, "blob_analysis0 fault");
-        return;
-    }
-    long long blob_count = out.get_i64("blob_count").value_or(0);
-${exposeBlock}
-    // One per-run verdict: OK if we found something, NG otherwise.
-    if (blob_count > 0) xi::ok(1, "blobs found");
-    else                xi::ng(1, "no blobs");
-}
-`);
-            }
-            // Open the script so the user sees something concrete.
-            try {
-                const doc = await vscode.workspace.openTextDocument(scriptPath);
-                await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
-            } catch {}
-            vscode.window.showInformationMessage(
-                `Sample project created at ${sampleDir}. Edit inspection.cpp or click Run.`);
+            await openExample(all.find((e) => e.isStation) || all[0]);
         })
     );
 
@@ -2870,6 +2848,10 @@ ${exposeBlock}
         // not a hardcoded filename) + whether the active editor IS that script.
         // Backs the editor-title Compile/Run gating (xinsp2.isActiveScript).
         get scriptPath() { return currentScriptPath; },
+        // The open project's folder. Lets a test assert WHICH project a command
+        // opened — e.g. that Try Example opened a temp copy and not the shipped
+        // tree it was copied from.
+        get projectFolder() { return lastProjectFolder; },
         get activeIsScript() {
             const active = vscode.window.activeTextEditor?.document.uri.fsPath;
             return !!active && !!currentScriptPath &&

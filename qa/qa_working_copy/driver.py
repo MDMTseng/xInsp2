@@ -88,6 +88,22 @@ def stop_be(be, blog, *, hard):
     blog.close()
 
 
+def reset_canonical() -> None:
+    """Put the canonical instance config back to 'original'.
+
+    Driving the value from 'original' to 'edited' IS what this test proves, so
+    the fixture is mutated by design. Called at the START (so a crashed previous
+    run cannot poison this one) and again at the END — without the second call
+    every run leaves the fixture dirty in git, and worse, the next run starts
+    from 'edited' and the "it became edited" assertions go vacuous.
+
+    The exact bytes here are what the committed fixture holds, so a clean run
+    leaves `git status` clean.
+    """
+    CANON_INST.write_text(
+        json.dumps({"plugin": "kv", "config": {"value": "original"}}, indent=2) + "\n")
+
+
 def main() -> int:
     if not BE.exists():
         sys.exit(f"FAIL: missing {BE} (build xinsp_backend)")
@@ -95,7 +111,7 @@ def main() -> int:
         sys.exit(f"FAIL: something already on :{PORT}")
 
     # Idempotent reset: pristine canonical config + no leftover scratch.
-    CANON_INST.write_text(json.dumps({"plugin": "kv", "config": {"value": "original"}}, indent=2))
+    reset_canonical()
     import shutil
     shutil.rmtree(SCRATCH, ignore_errors=True)
 
@@ -153,6 +169,8 @@ def main() -> int:
         stop_be(be, blog, hard=False)
 
     print(f"[final] canonical={value_of(CANON_INST)!r} scratch={value_of(SCRATCH_INST)!r}")
+    # Read the value BEFORE this line; restoring is the last thing we do.
+    reset_canonical()
     print("\n" + "=" * 48)
     if failures:
         print("VERDICT: FAIL")
