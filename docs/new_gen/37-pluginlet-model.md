@@ -86,9 +86,13 @@ in-process. That equivalence is the proof the observation is right: a pluginlet 
 
 ```
 toolbox/pluginlets/live-view/
-├── live_view.hpp        native: xi::pluginlet::LiveView (the Derived cell), #include'd into the host plugin DLL
-├── live_view.ui.ts      ui:     mount(el, channel) → renders frames, emits viewport back
-└── contract.(ts|json)   SHARED: channel naming, viewport message schema, control schema
+├── pluginlet.json          the INDEX: halves / build / requires / version / contract
+├── live_view.hpp           native: xi::pluginlet::LiveView (the Derived cell), #include'd into the host plugin DLL
+├── contract.ts             SHARED: channel naming, viewport message schema, control schema
+└── ui/                     the UI half (SOURCE — the webui build compiles it)
+    ├── live-view.ui.ts     mount(el, channel) → renders frames, emits viewport back
+    ├── widgets/            xi-image-viewer.svelte, xi-image-editor.svelte
+    └── lib/                viewport.mjs, tools.mjs (+ their tests)
 ```
 
 Author-facing surface is two lines of C++ plus one manifest key:
