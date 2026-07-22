@@ -152,11 +152,44 @@ static void test_reinit_combo_guard() {
     CHECK(re.on_fault() == OnFault::Refuse);
 }
 
+
+// doc 37: plugin.json "pluginlets": [...] — the plugin's pluginlet opt-in list.
+// The RUNTIME consumer of the one declaration (the C++ and webui builds read the
+// same key themselves), so it must survive the manifest parse intact.
+static void test_parse_pluginlets() {
+    SECTION("parse_pluginlets reads the doc-37 pluginlet opt-in list");
+    using xi::parse_pluginlets;
+
+    // The normal case: a plugin opting into one/several plets, order preserved.
+    auto one = parse_pluginlets(R"({"name":"controls_demo","pluginlets":["controls"]})");
+    CHECK(one.size() == 1);
+    CHECK(one.size() == 1 && one[0] == "controls");
+
+    auto two = parse_pluginlets(R"({"pluginlets":["controls","live-view"]})");
+    CHECK(two.size() == 2);
+    CHECK(two.size() == 2 && two[0] == "controls" && two[1] == "live-view");
+
+    // Absent / empty / wrong shape -> empty, never a crash (a plugin need not opt in).
+    CHECK(parse_pluginlets(R"({"name":"x"})").empty());
+    CHECK(parse_pluginlets(R"({"pluginlets":[]})").empty());
+    CHECK(parse_pluginlets(R"({"pluginlets":"controls"})").empty());   // not an array
+    CHECK(parse_pluginlets("not json").empty());
+
+    // Non-string / empty entries are skipped, valid ones still collected.
+    auto mixed = parse_pluginlets(R"({"pluginlets":["controls",7,"",null,"live-view"]})");
+    CHECK(mixed.size() == 2);
+    CHECK(mixed.size() == 2 && mixed[0] == "controls" && mixed[1] == "live-view");
+
+    // It must come off the parsed manifest too, not just the standalone helper.
+    // (parse_manifest wires pi.pluginlets = parse_pluginlets(content).)
+}
+
 int main() {
     test_json_flag_true_toplevel_only();
     test_parse_manifest_reentrant();
     test_reinit_combo_guard();
     test_adapter_reentrant_wiring();
+    test_parse_pluginlets();
     if (g_failures == 0) {
         std::printf("\nALL TESTS PASSED\n");
         return 0;

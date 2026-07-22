@@ -89,6 +89,12 @@ struct PluginInfo {
     std::string dll_name;
     std::string factory_symbol;
     bool        has_ui = false;
+    // doc 37: the pluginlets this plugin opts into — plugin.json `"pluginlets": [...]`.
+    // ONE declaration, three consumers: the C++ build (CMake xi_wire_pluginlets),
+    // the webui build (the xi-pluginlet-ui vite plugin), and the RUNTIME — the host
+    // surfaces this list so a UI can auto-mount each plet's half (e.g. the controls
+    // plet's $schema panel) without the plugin shipping any bespoke UI.
+    std::vector<std::string> pluginlets;
     // `reentrant`: the plugin declares its process()/exchange()/get_def()/
     // set_def() are safe to call CONCURRENTLY on the same instance. When false
     // (the default) the host serializes calls per instance with a mutex, so a

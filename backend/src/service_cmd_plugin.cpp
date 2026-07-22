@@ -40,6 +40,17 @@ void cmd_list_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             out += "{\"name\":\"" + esc(p.name) + "\",\"description\":\"" + esc(p.description) + "\"";
             out += ",\"folder\":\"" + esc(p.folder_path) + "\"";
             out += ",\"has_ui\":" + std::string(p.has_ui ? "true" : "false");
+            // doc 37: the plugin's pluginlet opt-in list — the RUNTIME consumer of
+            // plugin.json's "pluginlets". A UI reads it to auto-mount each plet's
+            // half (e.g. the controls plet's $schema panel) with no bespoke UI.
+            if (!p.pluginlets.empty()) {
+                out += ",\"pluginlets\":[";
+                for (size_t k = 0; k < p.pluginlets.size(); ++k) {
+                    if (k) out += ",";
+                    out += "\"" + esc(p.pluginlets[k]) + "\"";
+                }
+                out += "]";
+            }
             out += ",\"loaded\":" + std::string(p.handle ? "true" : "false");
             // cmake/prebuilt plugins get the per-item "Rebuild" action in the
             // extension's Plugin Browser (rebuild_plugins {plugins:[name]}).
