@@ -514,13 +514,19 @@ above the frozen ABI** — zero `xi_core` / C-ABI change. Precisely:
   change, no core change — a convention each plet honors.
 - **config** — a named slice of the host's existing def. No new mechanism.
 
-**The one shared piece that is NOT per-plet, and is not `xi_core` either:** the
-upstream-control relay in **expose** (a plugin). Today it is hard-coded to `viewport`
-(the landed relay). To keep every FUTURE plet purely additive, generalize it ONCE
-into a generic per-channel control store (byte-blind, additive to expose); after that
-one enabling change every plet rides it with no further expose or core change. So the
-honest statement is: **zero frozen-ABI / zero xi_core change; one generic additive
-enabler in expose; everything else per-plet additive.**
+**The one shared piece that is NOT per-plet** — the upstream-control relay in
+**expose** (a plugin, not `xi_core`) — **is now generic, so the invariant holds
+fully.** It was hard-coded to `viewport`, which meant every new plet wanting
+upstream control had to edit expose. It is now a byte-blind per-channel control
+store: `{command:"control", channel, key, value}` writes any key, and the
+`xi.ui.sink` probe reply hands back every control for that channel as its own
+entry. `viewport` is simply one key (the `{command:"viewport", x,y,w,h}` sugar
+still works, so live-view's native half is unchanged). Controls are stored only
+while the channel is SUBSCRIBED and dropped on unsubscribe, so the store is
+bounded by `subscribed_` with no separate cap.
+
+So the statement is now unqualified: **zero frozen-ABI / zero xi_core change, and
+a new pluginlet — including one that needs upstream control — is purely additive.**
 
 ## Prior art (control-panel frameworks surveyed) — what to adopt
 
@@ -786,9 +792,6 @@ the sections above as describing shipped behaviour:
   `$rev` bumping (the tree is static today, `$rev` constant).
 - **plet settings persistence** — the delegated `plet/<fqname>` def slice: convention
   only, no helper written.
-- **generalizing expose's upstream relay** from the hard-coded `viewport` to a generic
-  per-channel control store — the one additive enabler that keeps future plets
-  purely additive (see "additive invariant"); not done.
 - **the thin `Plet` interface** (`publish()` + `stats()` for uniform lifecycle /
   metrics reporting under the host's owner name) — not written; plain members remain
   the recommendation until several pluginlets exist.
