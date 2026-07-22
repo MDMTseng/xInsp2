@@ -11,7 +11,7 @@
       "delivery": "header — #include'd into the host plugin DLL at compile time"
     },
     "ui": {
-      "entry": "live_view.ui.ts",
+      "entry": "ui/live-view.ui.ts",
       "symbol": "mountLiveView",
       "delivery": "TS module — bundled into the webui at build time"
     }
@@ -19,12 +19,28 @@
   "contract": "contract.ts",
   "channels": "ui/<instance>",
   "requires": {
-    "capabilities": ["xi.ui.sink", "xi.jpeg.encode"],
-    "planes": ["xi.cap", "xi.pack"]
+    "capabilities": [
+      "xi.ui.sink",
+      "xi.jpeg.encode"
+    ],
+    "planes": [
+      "xi.cap",
+      "xi.pack"
+    ]
   },
   "viewportFeedback": {
     "upstream": "widget -> expose: ViewportMessage, carried as expose's `viewport` exchange command {command:'viewport',channel,x,y,w,h}",
     "downstream": "expose -> native: 'viewport' key (x,y,w,h CSV) in the xi.ui.sink probe reply",
     "status": "LANDED end-to-end. expose relays per-channel viewport (stored only while subscribed, returned in the probe reply); LiveView::demand_() reads it and crops. Verified by cap_ui_egress_test 'VIEWPORT RELAY' section."
+  },
+  "build": {
+    "ui": {
+      "entry": "ui/live-view.ui.ts",
+      "widgets": [
+        "ui/widgets/xi-image-viewer.svelte",
+        "ui/widgets/xi-image-editor.svelte"
+      ],
+      "note": "SOURCE form — the webui build compiles these; the plet ships no artifact."
+    }
   }
 }

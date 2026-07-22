@@ -21,10 +21,31 @@
   },
   "contract": "contract.ts",
   "build": {
-    "native": { "headerOnly": true, "links": ["yyjson_plugin"] }
+    "native": {
+      "headerOnly": true,
+      "links": [
+        "yyjson_plugin"
+      ]
+    },
+    "ui": {
+      "entry": "ui/mount-schema.mjs",
+      "widgets": [
+        "ui/widgets/xi-slider.svelte",
+        "ui/widgets/xi-number.svelte",
+        "ui/widgets/xi-toggle.svelte",
+        "ui/widgets/xi-radio.svelte",
+        "ui/widgets/xi-dropdown.svelte",
+        "ui/widgets/xi-text.svelte"
+      ],
+      "note": "SOURCE form — the webui build (vite/svelte) compiles these; the plet ships no artifact."
+    }
   },
   "requires": {
-    "hostMethods": ["get_def", "set_def", "exchange"],
+    "hostMethods": [
+      "get_def",
+      "set_def",
+      "exchange"
+    ],
     "planes": []
   },
   "notes": {
