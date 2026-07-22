@@ -1,7 +1,7 @@
 // options.mjs test — the pure options normalizer for xi-radio / xi-dropdown.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseOptions } from "../src/lib/options.mjs";
+import { parseOptions } from "./options.mjs";
 
 test("parseOptions handles arrays, JSON strings, and {value,label}", () => {
   assert.deepEqual(parseOptions(["a", "b"]), [

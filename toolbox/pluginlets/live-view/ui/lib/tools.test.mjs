@@ -2,7 +2,7 @@
 // coords) → result. Pure logic, deterministic.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeTool, registerTool, TOOLS } from "../src/lib/tools.mjs";
+import { makeTool, registerTool, TOOLS } from "./tools.mjs";
 
 test("point tool: one click → {x,y}", () => {
   const t = makeTool("point");
