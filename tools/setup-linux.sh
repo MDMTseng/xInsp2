@@ -9,7 +9,7 @@
 #   Required:  g++ (>=13, C++20), cmake >= 3.16, ninja, pkg-config, OpenCV 4.x dev
 #   Optional:  ccache (much faster rebuilds), libjpeg-turbo dev (fast JPEG encode),
 #              node >= 18 (ui-components / vscode-extension / gate docs+sdk stages),
-#              python3 (tools/gate.py, examples/qa_* e2e drivers)
+#              python3 (tools/gate.py, qa/qa_* e2e drivers)
 #
 # Re-runnable: anything already present is detected and skipped. Finishes with a
 # health check, and with --check it ONLY runs the health check (installs nothing).
@@ -56,7 +56,7 @@ command -v apt-get >/dev/null && APT=1
 
 # --- 1. install -----------------------------------------------------------
 REQUIRED_PKGS=(build-essential g++ cmake ninja-build pkg-config libopencv-dev)
-OPTIONAL_PKGS=(ccache libturbojpeg0-dev nodejs npm python3)
+OPTIONAL_PKGS=(ccache libturbojpeg0-dev nodejs npm python3 python3-websocket)
 
 if [[ $CHECK_ONLY -eq 0 ]]; then
   if [[ -z "$APT" ]]; then
@@ -128,6 +128,18 @@ check_cmd "ccache"     ccache     ""     0 "ccache --version | head -1 | awk '{p
 check_cmd "node"       node       18     0 "node --version | tr -d v"
 check_cmd "python3"    python3    3.9    0 "python3 -c 'import sys;print(\"%d.%d\"%sys.version_info[:2])'"
 
+# websocket-client: every qa/ driver imports it via tools/xinsp2_py/xinsp2/client.py.
+# python3 alone is not enough — without this module the entire QA suite fails at
+# import time (46 drivers, 0s each), which looks like a code break and is not one.
+if command -v python3 >/dev/null 2>&1; then
+  if wsv="$(python3 -c 'import websocket;print(websocket.__version__)' 2>/dev/null)"; then
+    ok "$(printf '%-16s %s (python3 -m websocket)' "websocket-client" "$wsv")"
+  else
+    warn "$(printf '%-16s MISSING — qa/ drivers will all fail at import' "websocket-client")"
+    warn "                 apt install python3-websocket   (Debian marks pip EXTERNALLY-MANAGED)"
+  fi
+fi
+
 # libjpeg-turbo: optional accelerator, consumed by the imgcodec PLUGIN
 # (-DXINSP2_HAS_TURBOJPEG=ON), not by the backend exe.
 if pkg-config --exists libturbojpeg 2>/dev/null; then
@@ -152,8 +164,8 @@ cat <<'EOF'
   ctest --test-dir backend/build --output-on-failure
 
   # plugins (mock_camera, blob_analysis, imgcodec, …)
-  cmake -S plugins -B plugins/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-  cmake --build plugins/build -j"$(nproc)"
+  cmake -S toolbox -B toolbox/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+  cmake --build toolbox/build -j"$(nproc)"
 
   # web UI components (Node)
   cd ui-components && npm install && npm run build && npm test
