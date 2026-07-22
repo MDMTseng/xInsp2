@@ -755,6 +755,14 @@ inline void install() {
                                    std::memory_order_release);
 }
 
+// Windows counterpart of the POSIX install_minidump_writer(): a NO-OP. Windows
+// already writes real minidumps through its own SetUnhandledExceptionFilter path
+// (write_minidump above) — Breakpad is the POSIX-only stop-gap. This exists so
+// entrypoints (service_main / runner) can call it UNCONDITIONALLY right before
+// install(), exactly as they do on POSIX; without it the Windows backend build
+// fails with "'install_minidump_writer': is not a member of 'xi::crash'".
+inline void install_minidump_writer() {}
+
 #else  // !_WIN32
 // ---- POSIX crash forensics (stop-gap) ---------------------------------------
 //
