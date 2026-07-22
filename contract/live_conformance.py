@@ -55,6 +55,7 @@ import contextlib
 import json
 import os
 import socket
+import tempfile
 import subprocess
 import sys
 import threading
@@ -193,11 +194,17 @@ def _free_port() -> int:
 @contextlib.contextmanager
 def spawn_backend():
     port = _free_port()
-    # Isolate TEMP so a parallel gate run's build cache/state doesn't collide.
-    iso = Path(os.environ.get("LOCALAPPDATA", os.environ.get("TEMP", "."))) / "Temp" / "xi_contract_live"
+    # Isolate the temp dir so a parallel gate run's build cache/state doesn't
+    # collide. This used to be Path(LOCALAPPDATA or TEMP or ".") / "Temp" / ...
+    # which on POSIX (neither var set) resolved to a RELATIVE "./Temp/..." —
+    # created relative to THIS process's cwd, then handed to a backend spawned
+    # with cwd=ROOT. It only ever worked because a stray <repo>/Temp/ happened to
+    # exist; delete that and the backend aborts on the missing dir. Absolute, and
+    # TMPDIR too, since that is the POSIX knob (TEMP/TMP are the Windows ones).
+    iso = Path(tempfile.gettempdir()) / "xi_contract_live"
     iso.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
-    env["TEMP"] = env["TMP"] = str(iso)
+    env["TMPDIR"] = env["TEMP"] = env["TMP"] = str(iso)
     proc = subprocess.Popen(
         [str(BACKEND), f"--port={port}", "--host=127.0.0.1"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(ROOT), env=env,

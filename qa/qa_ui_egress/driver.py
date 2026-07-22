@@ -32,7 +32,7 @@ Two phases, two isolated backends (unique free_port()):
     carries raw pixels, no jpeg preview) — nothing fails to nothing.
 
 The deterministic LRU/slot semantics — content dedup, exact latest-wins, LRU
-eviction — are pinned by the ctest unit toolbox/cap_ui_egress_test.cpp (a timer-
+eviction — are pinned by the ctest unit toolbox/ui_egress/tests/cap_ui_egress_test.cpp (a timer-
 driven pipeline cannot make those wall-clock-deterministic from out here).
 
 Run:  python qa/qa_ui_egress/driver.py   (backend + plugins built; any platform)

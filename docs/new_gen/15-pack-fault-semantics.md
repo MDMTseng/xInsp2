@@ -161,7 +161,7 @@ XI_INSPECT_ENTRY(t, frame) {
 | `backend/include/xi/xi_use.hpp` | `ScriptPack::is_fault()/fault_reason()/fault_key()/fault_detail()/src()/prov()`; `process(ScriptPack)` contract comment documents the funnel short-circuit. |
 | `backend/include/xi/xi_script_pack.hpp` | `ScriptPackBuilder::fault()/src()`. |
 | `backend/src/service_sinks.cpp` | `use_pack_process_cb`: the U1 fault short-circuit (before instance lookup). `use_push_pack_cb`/staging untouched. |
-| `toolbox/use_pack_door_test.cpp` | Funnel mirror gains the same short-circuit + a door-call counter; sections 7–10: fault round-trip, short-circuit (call count proves the plugin never ran), provenance chain across two chained doors (happy + poisoned), non-fault packs unaffected. |
+| `toolbox/tests/use_pack_door_test.cpp` | Funnel mirror gains the same short-circuit + a door-call counter; sections 7–10: fault round-trip, short-circuit (call count proves the plugin never ran), provenance chain across two chained doors (happy + poisoned), non-fault packs unaffected. |
 | `qa/qa_pack_fault_path/` | NEW QA-gated example — the io_stress/fixturing ERROR pattern, pack-only in the live service: script-minted fault → two-hop propagation → plugin-minted contract fault → verdict plane reflects the carried reason/chain. |
 
 Record path: byte-for-byte untouched. Canonical profile: untouched (the new

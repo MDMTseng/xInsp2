@@ -1,6 +1,6 @@
 //
 // test_controls.cpp — the native half of the `controls` pluginlet
-// (pluginlets/controls/controls.hpp). Verifies the contract that lets a plugin
+// (toolbox/pluginlets/controls/controls.hpp). Verifies the contract that lets a plugin
 // declare its params once and get get_def / set_def / the $schema UI tree /
 // thread-safe access: schema emission (tabs/sections/collapse/widget/constraints),
 // set_def validation (clamp + enum reject + absent-tolerant + readout/button

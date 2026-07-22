@@ -33,7 +33,7 @@ consumer would then time out (or worse, accept stragglers) instead of aborting.
 **Fix.** Copy `kStream`/`kPart` (i64) and `kEof` (bool) forward when present,
 exactly as `$seq` is carried. Cheap, presence-gated, no payload copied.
 
-**Test.** `toolbox/use_pack_door_test.cpp` §8b: a fault sealed with
+**Test.** `toolbox/tests/use_pack_door_test.cpp` §8b: a fault sealed with
 `$stream=1002/$part=2/$eof` short-circuits a hop; assert all three survive on the
 propagated fault (and the door never ran).
 
@@ -88,7 +88,7 @@ The parser signals `ParsedFrame::has_channel`/`has_seq`; record_replay injects
 each only when the file carried it. A frame with both present is still the
 `map(4)` `{v,channel,seq,frame}` shape — unchanged bytes.
 
-**Test.** `toolbox/record_replay_pack_test.cpp` §G: save a 3-entry pack with no
+**Test.** `toolbox/record_replay/tests/record_replay_pack_test.cpp` §G: save a 3-entry pack with no
 `$channel/$seq`, replay, assert neither key was injected and
 `replayed.size() == original.size()`.
 
@@ -325,9 +325,9 @@ audit trail is complete:
 
 | Finding | Regression test |
 |---|---|
-| RT1 / F1 | `toolbox/use_pack_door_test.cpp` §8b (stream identity survives a hop) |
+| RT1 / F1 | `toolbox/tests/use_pack_door_test.cpp` §8b (stream identity survives a hop) |
 | RT2 / F3 | `qa/qa_pack_stream` (`s4_foreign_fault_ignored`, driver-asserted) |
-| RT3 / F5 | `toolbox/record_replay_pack_test.cpp` §G (no `$channel/$seq` injected) |
+| RT3 / F5 | `toolbox/record_replay/tests/record_replay_pack_test.cpp` §G (no `$channel/$seq` injected) |
 | RT4 / B1 | `backend/tests/test_cap_provider_refcount.cpp` (shadow promotion) |
 | RT5 | `qa/qa_remove_under_load/` (remove under continuous load) |
 | RT6 / A1·A2 | `backend/tests/test_cap_reinit_race.cpp` (funnel vs reinit) |

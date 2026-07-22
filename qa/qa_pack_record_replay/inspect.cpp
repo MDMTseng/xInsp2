@@ -29,7 +29,7 @@
 //
 // Zero xi::Record data-plane use: capture, route, replay, verify — all packs.
 // (The empty pack is the replay source's "advance one file" verb.)
-// The byte-level parity oracle for the loop is toolbox/record_replay_pack_test.cpp;
+// The byte-level parity oracle for the loop is toolbox/record_replay/tests/record_replay_pack_test.cpp;
 // THIS example is the composition proof that the loop is expressible as a
 // real project (source -> script routing -> sink door -> replay source -> wire).
 #include <xi/xi.hpp>

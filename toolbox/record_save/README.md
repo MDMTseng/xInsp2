@@ -90,7 +90,7 @@ docs/new_gen/13-replay-file-migration.md.
 
 ## Tests
 
-`toolbox/record_save_pack_test.cpp` drives the real DLL's pack door: it persists a
+`toolbox/record_save/tests/record_save_pack_test.cpp` drives the real DLL's pack door: it persists a
 multi-entry pack (scalars + nested msgpack + image), asserts the file bytes equal
 the shared encoder's output, loads it back through the untrusted-disk ingress and
 asserts entries + image pixels are identical, checks a truncated file is refused,

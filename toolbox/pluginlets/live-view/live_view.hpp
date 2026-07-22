@@ -50,7 +50,7 @@
 namespace xi::pluginlet {
 
 // The keys the viewport round-trip uses — ONE definition, mirrored in
-// pluginlets/live-view/contract.ts. The UI widget sends upstream
+// toolbox/pluginlets/live-view/contract.ts. The UI widget sends upstream
 //   {type:"viewport", channel, x, y, w, h}
 // and expose returns the latest as "x,y,w,h" (i32 CSV) under kViewport in the
 // xi.ui.sink probe reply.

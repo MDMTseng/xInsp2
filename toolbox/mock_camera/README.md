@@ -93,6 +93,6 @@ The live exemplar is
 ## Tests
 
 The pack emit + chained-door flow is proven against the real DLL in
-`toolbox/pack_pilot_test.cpp` (pack_pilot_test); the script-surface door chain
-in `toolbox/use_pack_door_test.cpp`; the live closed loop in
+`toolbox/tests/pack_pilot_test.cpp` (pack_pilot_test); the script-surface door chain
+in `toolbox/tests/use_pack_door_test.cpp`; the live closed loop in
 `qa/qa_pack_feedback`. Run via `ctest --test-dir toolbox/build -C Release`.

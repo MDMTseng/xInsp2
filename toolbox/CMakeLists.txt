@@ -51,12 +51,12 @@ set(XI_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../backend/include)
 set(XI_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../backend/vendor)
 
 # xi_use_pluginlet(<target> <name>) — pull a pluginlet into a plugin build from its
-# manifest (pluginlets/<name>/pluginlet.json). ONE line replaces the hand-written
+# manifest (toolbox/pluginlets/<name>/pluginlet.json). ONE line replaces the hand-written
 # include/link (doc 37 dev-UX "include the plet folder when compiling the plugin"):
-# adds the pluginlets/ include root (so `<name/name.hpp>` resolves) plus XI_INCLUDE/
+# adds the toolbox/pluginlets include root (so `<name/name.hpp>` resolves) plus XI_INCLUDE/
 # XI_VENDOR, and links whatever `build.native.links` the manifest declares. The
 # manifest is the single source of truth — no per-plugin knowledge of the plet's deps.
-set(XI_PLUGINLETS ${CMAKE_CURRENT_SOURCE_DIR}/../pluginlets)
+set(XI_PLUGINLETS ${CMAKE_CURRENT_SOURCE_DIR}/pluginlets)
 function(xi_use_pluginlet target name)
     target_include_directories(${target} PRIVATE ${XI_PLUGINLETS} ${XI_INCLUDE} ${XI_VENDOR})
     set(_manifest ${XI_PLUGINLETS}/${name}/pluginlet.json)
@@ -344,7 +344,7 @@ enable_testing()
 # (plugin-side capability probe), mock_camera's pack-mode emit through the bus,
 # the chained flow, fail-loud, and pooled-handle balance. Needs both DLLs + a
 # host ImagePool (make_host_api + install_pack_abi).
-add_executable(pack_pilot_test pack_pilot_test.cpp)
+add_executable(pack_pilot_test tests/pack_pilot_test.cpp)
 target_include_directories(pack_pilot_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis
@@ -367,7 +367,7 @@ add_test(NAME pack_pilot_test COMMAND pack_pilot_test)
 # edges (miss / no door / empty / older host), mock_camera's CONTROL door
 # (ex-feedback, 5c: json_source now seats the -4 door-less edge), and
 # pack+pool balance.
-add_executable(use_pack_door_test use_pack_door_test.cpp)
+add_executable(use_pack_door_test tests/use_pack_door_test.cpp)
 target_include_directories(use_pack_door_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/blob_analysis)
@@ -463,7 +463,7 @@ set_tests_properties(xex1_fixtures PROPERTIES
 # 08 Wave 2): build a real xi::Pack, dump it to XEX1-v3, and assert the pack's
 # in-memory canonical small plane equals the wire bytes equals a disk readback,
 # byte-for-byte. Header-only (xi::Pack + xi::mp + the v3 encoder); no DLL load.
-add_executable(xex1_v2_identity_test xex1_v2_identity_test.cpp)
+add_executable(xex1_v2_identity_test expose/tests/xex1_v2_identity_test.cpp)
 target_include_directories(xex1_v2_identity_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
@@ -473,7 +473,7 @@ add_test(NAME xex1_v2_identity_test COMMAND xex1_v2_identity_test)
 # pack with zero producer knowledge and emits XEX1 (v2 opt-in / v1 default),
 # captured off the host binary sink and decoded back. Needs the built expose DLL
 # + a host ImagePool (make_host_api + install_pack_abi).
-add_executable(expose_pack_test expose_pack_test.cpp)
+add_executable(expose_pack_test expose/tests/expose_pack_test.cpp)
 target_include_directories(expose_pack_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
@@ -491,7 +491,7 @@ add_test(NAME expose_pack_test COMMAND expose_pack_test)
 # flushed with the service's use_push_pack_cb discipline mirrored, and the
 # pushed XEX1-v2 bytes are asserted BYTE-IDENTICAL to a direct host-side dump
 # of the same pack. Needs the built expose DLL + a host ImagePool.
-add_executable(expose_script_push_test expose_script_push_test.cpp)
+add_executable(expose_script_push_test expose/tests/expose_script_push_test.cpp)
 target_include_directories(expose_script_push_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(expose_script_push_test PRIVATE
@@ -509,7 +509,7 @@ add_test(NAME expose_script_push_test COMMAND expose_script_push_test)
 # exactly in frame order (and in call order within a frame); ungated control on
 # the same uneven workload -> inversions (proving the gate, not luck, ordered
 # phase A); pack/pool registries balance.
-add_executable(pack_order_gate_test pack_order_gate_test.cpp)
+add_executable(pack_order_gate_test expose/tests/pack_order_gate_test.cpp)
 target_include_directories(pack_order_gate_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(pack_order_gate_test PRIVATE
@@ -527,7 +527,7 @@ add_test(NAME pack_order_gate_test COMMAND pack_order_gate_test)
 # it back through the untrusted-disk ingress (xex1_pack_load.hpp) and asserts the
 # rebuilt pack's entries / image pixels are identical and the image pool balances.
 # Needs the built record_save DLL + a host ImagePool (make_host_api + install_pack_abi).
-add_executable(record_save_pack_test record_save_pack_test.cpp)
+add_executable(record_save_pack_test record_save/tests/record_save_pack_test.cpp)
 target_include_directories(record_save_pack_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
@@ -545,7 +545,7 @@ add_test(NAME record_save_pack_test COMMAND record_save_pack_test)
 # parity at the pack level (entry-for-entry, incl. restored $channel/$seq) AND
 # the byte level (re-dump == disk == original's dump). Also the fail-loud edge:
 # a corrupt file emits a sealed $fault pack and the cursor advances past it.
-add_executable(record_replay_pack_test record_replay_pack_test.cpp)
+add_executable(record_replay_pack_test record_replay/tests/record_replay_pack_test.cpp)
 target_include_directories(record_replay_pack_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson
     ${CMAKE_CURRENT_SOURCE_DIR}/expose/src)
@@ -564,7 +564,7 @@ add_test(NAME record_replay_pack_test COMMAND record_replay_pack_test)
 # byte-identical JPEG out), decode round trip, $probe/$v convention, $fault
 # contract answers, unregister-on-destroy, pack balance. Needs a host
 # ImagePool (make_host_api + install_pack_abi + install_cap_plane).
-add_executable(cap_imgcodec_test cap_imgcodec_test.cpp)
+add_executable(cap_imgcodec_test imgcodec/tests/cap_imgcodec_test.cpp)
 target_include_directories(cap_imgcodec_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(cap_imgcodec_test PRIVATE
@@ -583,7 +583,7 @@ add_test(NAME cap_imgcodec_test COMMAND cap_imgcodec_test)
 # encode, latest-wins collapse, LRU eviction — observed only through the "stats"
 # and "get"/"subscribe" exchanges. Needs the same host (make_host_api +
 # install_pack_abi + install_cap_plane).
-add_executable(cap_ui_egress_test cap_ui_egress_test.cpp)
+add_executable(cap_ui_egress_test ui_egress/tests/cap_ui_egress_test.cpp)
 target_include_directories(cap_ui_egress_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(cap_ui_egress_test PRIVATE
@@ -604,7 +604,7 @@ add_test(NAME cap_ui_egress_test COMMAND cap_ui_egress_test)
 # fault (quarantine) clean fallback + attribution, and identical fail modes on
 # corrupt/null. Compiles the real host TU + stb impl into the EXE.
 add_executable(cap_imgcodec_host_test
-    cap_imgcodec_host_test.cpp
+    imgcodec/tests/cap_imgcodec_host_test.cpp
     ../backend/src/xi_image_io.cpp
     ../backend/src/stb_impl.cpp
 )
@@ -627,7 +627,7 @@ add_test(NAME cap_imgcodec_host_test COMMAND cap_imgcodec_host_test)
 # fallback. Compiles the in-core encoder + stb impl into the EXE; the turbojpeg
 # opt-in matches imgcodec's so an opted-in build stays byte-equal engine-for-engine.
 add_executable(cap_jpeg_encode_host_test
-    cap_jpeg_encode_host_test.cpp
+    imgcodec/tests/cap_jpeg_encode_host_test.cpp
     ../backend/src/stb_impl.cpp
 )
 target_include_directories(cap_jpeg_encode_host_test PRIVATE
@@ -667,7 +667,7 @@ endif()
 # and recycle_all -> stale_handle, wrong type -> wrong_type, malformed/out-of-
 # range handles -> bad_handle, handle $v gate, $probe/$v convention,
 # unregister-on-destroy, pack balance.
-add_executable(cap_lut_owner_test cap_lut_owner_test.cpp)
+add_executable(cap_lut_owner_test lut_owner/tests/cap_lut_owner_test.cpp)
 target_include_directories(cap_lut_owner_test PRIVATE
     ${XI_INCLUDE} ${XI_VENDOR} ${XI_VENDOR}/yyjson)
 target_compile_definitions(cap_lut_owner_test PRIVATE

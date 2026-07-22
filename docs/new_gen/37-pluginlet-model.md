@@ -83,7 +83,7 @@ in-process. That equivalence is the proof the observation is right: a pluginlet 
 ## Two halves + a contract
 
 ```
-pluginlets/live-view/
+toolbox/pluginlets/live-view/
 ├── live_view.hpp        native: xi::pluginlet::LiveView (the Derived cell), #include'd into the host plugin DLL
 ├── live_view.ui.ts      ui:     mount(el, channel) → renders frames, emits viewport back
 └── contract.(ts|json)   SHARED: channel naming, viewport message schema, control schema
@@ -92,7 +92,7 @@ pluginlets/live-view/
 Author-facing surface is two lines of C++ plus one manifest key:
 
 ```cpp
-#include <pluginlets/live_view.hpp>
+#include <live-view/live_view.hpp>
 xi::pluginlet::LiveView view{host, name};   // native half, in the ctor
 view.publish(img);                          // per processed frame
 ```
@@ -551,7 +551,7 @@ the same constrained path ("declare, don't draw").
 ### A plet is a folder + a manifest (the manifest is the index)
 
 ```
-pluginlets/<name>/
+toolbox/pluginlets/<name>/
 ├── pluginlet.json      the INDEX: halves / build / requires / version / contract
 ├── <name>.hpp          native half (header-only, or + .cpp)
 ├── <name>.ui.ts|.mjs   webui half
@@ -665,7 +665,7 @@ product noun — `pluginlet` is the noun for the same idea.
   tests (`test_reactive`, gate/dedup/stats + ordering law), UiView compiles against
   the real cap/pack ABI. Landed.
 - **restructure into a pluginlet** — `UiView` → `xi::pluginlet::LiveView`;
-  `pluginlets/live-view/` two-halves + contract + manifest; UI widget
+  `toolbox/pluginlets/live-view/` two-halves + contract + manifest; UI widget
   (subscribe + render + pan/zoom emit-viewport); `Demand::window` folded into the
   dedup key and wired to a crop+downsample. Landed.
 - **viewport relay through expose** — expose stores the browser's per-channel
@@ -689,7 +689,7 @@ the sections above as describing shipped behaviour:
 - **the overlay plet** — vocabulary (point/line/…/text + verdict styling), the native
   `Overlay` builder, and the generic webui renderer + custom draw hook: none written.
 - **the controls plet — LANDED (native + webui renderer + a live plugin).** Native
-  `xi::pluginlet::Controls` (`pluginlets/controls/controls.hpp` + `contract.ts` +
+  `xi::pluginlet::Controls` (`toolbox/pluginlets/controls/controls.hpp` + `contract.ts` +
   manifest; `test_controls`, 14 tests). Webui `mountSchema`
   (ui-components/src/auto-panel.mjs) renders the `$schema` tree with the real built
   xi-* Svelte custom elements, wired to set_instance_def (`schema-panel.node.mjs`,

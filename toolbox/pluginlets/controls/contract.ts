@@ -1,6 +1,6 @@
 // contract.ts — the SHARED contract of the `controls` pluginlet (doc 37): the
 // default plugin UI. The single source of truth for the `$schema` UI tree the
-// native half emits (pluginlets/controls/controls.hpp) and the generic webui
+// native half emits (toolbox/pluginlets/controls/controls.hpp) and the generic webui
 // renderer consumes. Both sides validate against this; documented nowhere else.
 //
 // Widget vocabulary is THIS pluginlet's contract, NOT core ABI — a new widget /

@@ -21,7 +21,7 @@ order, each rebuilt by its on-wire `XI_PACK_TAG_*`.
 
 Re-dumping the emitted pack through `encode_pack_v3` reproduces the file bytes
 **exactly** — record → save → replay is byte-lossless. Proof:
-`toolbox/record_replay_pack_test.cpp` (drives the real record_save + record_replay
+`toolbox/record_replay/tests/record_replay_pack_test.cpp` (drives the real record_save + record_replay
 DLLs and asserts original pack ≈ file ≈ replayed pack, byte-for-byte at the
 dump level and entry-for-entry at the pack level).
 

@@ -179,7 +179,7 @@ stored scalars raw. The walk API:
   package's contract).
 
 The identity "memory == wire" is pinned by
-`toolbox/xex1_v2_identity_test.cpp`: **`raw_at(i)` == `canonical_value` == an
+`toolbox/expose/tests/xex1_v2_identity_test.cpp`: **`raw_at(i)` == `canonical_value` == an
 independent `xi::mp::Writer` re-encode == the XEX1-v3 encoder's wire bytes ==
 disk** — a *structural* identity, not a walker convention. `raw_at(i)` returns
 the entry's stored canonical bytes for every inline entry (empty for EXTERN

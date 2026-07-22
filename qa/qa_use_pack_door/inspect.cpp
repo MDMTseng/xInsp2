@@ -6,7 +6,7 @@
 //
 //   1. SCRIPT-BUILD (D1) — assembles a door input with xi::ScriptPackBuilder:
 //      a 16x16 gray image with a 5x5 white square (the established
-//      blob-analysis door pattern, toolbox/use_pack_door_test.cpp) + threshold/
+//      blob-analysis door pattern, toolbox/tests/use_pack_door_test.cpp) + threshold/
 //      min_area scalars + a NESTED canonical-mp entry written with
 //      xi::mp::Writer (U4). The sealed pack's mp entry must read back
 //      byte-identical to the Writer's bytes (canonicalize is the identity on

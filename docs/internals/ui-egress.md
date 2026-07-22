@@ -123,7 +123,7 @@ consumer needs it.
 
 ## Tests
 
-- **`toolbox/cap_ui_egress_test.cpp`** (ctest unit) drives the WHOLE pipeline in
+- **`toolbox/ui_egress/tests/cap_ui_egress_test.cpp`** (ctest unit) drives the WHOLE pipeline in
   process against the three REAL DLLs (ui_egress + imgcodec + expose) through the
   real cap plane, observed only through the `stats` / `get` / `subscribe`
   exchanges. Because a push does NOT force an early flush (the flusher's wake CV

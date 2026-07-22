@@ -909,7 +909,7 @@ inspect in frame order (the same ordered-emit discipline every sink push gets);
 the ack is dropped. The sealed pack crosses the seam **untouched** — no
 re-encode, no host `$seq` stamping (a sealed pack is immutable) — so expose's
 XEX1-v3 dump of a pushed pack is byte-identical to a host-side dump of the same
-pack (`toolbox/expose_script_push_test.cpp` asserts this). Routing comes from the
+pack (`toolbox/expose/tests/expose_script_push_test.cpp` asserts this). Routing comes from the
 pack's own `$channel`/`$seq` entries; without them it lands on channel
 `"default"` with seq 0, so stamp `$seq` yourself
 (`b.add_i64("$seq", (int64_t)xi::run_id())`) before you seal a pack you build.

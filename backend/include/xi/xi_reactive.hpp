@@ -3,7 +3,7 @@
 // xi_reactive.hpp — xi::Derived<Out>: a demand-gated, dedup-memoized derivation
 // cell for SDK-side plugin code. The reusable CORE of the pluginlet model (doc
 // 37). Its first worked application, the `live-view` pluginlet's native half
-// (xi::pluginlet::LiveView), lives in pluginlets/live-view/live_view.hpp — this
+// (xi::pluginlet::LiveView), lives in toolbox/pluginlets/live-view/live_view.hpp — this
 // header stays dependency-free (functional/string only) so it unit-tests
 // headless and any plugin can #include it without pulling the pack/cap planes.
 //

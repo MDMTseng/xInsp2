@@ -159,14 +159,14 @@ the ordering guarantee attaches to the declared sink role, not to the verb.
 
 ## Evidence
 
-- **`toolbox/pack_order_gate_test.cpp`** (new, plugins ctest): 4 worker
+- **`toolbox/expose/tests/pack_order_gate_test.cpp`** (new, plugins ctest): 4 worker
   threads, uneven compute, real `xi::EmitGate`/`EmitTurn` + the real expose
   DLL door, service staging discipline mirrored. Asserts: gated flush →
   door-observed wire seq exactly `1..N` in arrival order (zero inversions,
   within-frame call order preserved); ungated control on the same workload →
   inversions > 0 (the workload genuinely reorders); pack/pool registries
   balance to zero.
-- **`toolbox/use_pack_door_test.cpp`** (extended): a sink-declared adapter
+- **`toolbox/tests/use_pack_door_test.cpp`** (extended): a sink-declared adapter
   rejects `process(pack)` with `-5` → script sees an empty pack, the sink door
   was never entered; `push()` to the same adapter still lands.
 - **`qa/qa_pack_order/`** (new, live service — the pack-only successor

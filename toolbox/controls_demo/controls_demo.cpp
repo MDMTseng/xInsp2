@@ -1,5 +1,5 @@
 // controls_demo — a real plugin whose def surface IS the controls pluginlet
-// (pluginlets/controls/controls.hpp, doc 37). It declares its parameters once as a
+// (toolbox/pluginlets/controls/controls.hpp, doc 37). It declares its parameters once as a
 // UI tree and DELEGATES get_def/set_def to xi::pluginlet::Controls; the backend
 // then serves the $schema + validated values with no hand-written marshalling.
 // exchange("tick") bumps a counter and reflects it into a readout, to show

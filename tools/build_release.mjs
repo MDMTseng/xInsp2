@@ -139,9 +139,14 @@ for (const f of readdirSync(binSrc)) {
 
 // toolbox/ (source) -> plugins/ (bundle): the backend auto-scans <cwd>/plugins,
 // so the shipped folder keeps the runtime name. Skip build dirs.
+// Not every folder under toolbox/ is a plugin. `tests` is the cross-plugin ctest
+// suite and `pluginlets` is a compile-time source library that plugin authors
+// #include — neither is something the backend should find while scanning
+// <cwd>/plugins, and neither belongs in a customer bundle.
+const NOT_A_PLUGIN = new Set(['build', 'tests', 'pluginlets']);
 for (const p of readdirSync(join(ROOT, 'toolbox'))) {
     const ps = join(ROOT, 'toolbox', p);
-    if (!statSync(ps).isDirectory() || p === 'build') continue;
+    if (!statSync(ps).isDirectory() || NOT_A_PLUGIN.has(p)) continue;
     copyDir(ps, join(STAGE, 'plugins', p));
 }
 
