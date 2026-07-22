@@ -39,8 +39,8 @@ backend probes, then runs a health check. Re-runnable; skips what's present.
 winget install Kitware.CMake Git.Git
 cmake -S backend -B backend/build -A x64
 cmake --build backend/build --config Release      # → xinsp-backend.exe, xinsp-fe.exe, tests, DLLs
-cmake -S plugins -B plugins/build -A x64
-cmake --build plugins/build --config Release
+cmake -S toolbox -B toolbox/build -A x64
+cmake --build toolbox/build --config Release
 ```
 
 Optional accelerators: add `-DXINSP2_HAS_TURBOJPEG=ON` / `-DXINSP2_HAS_IPP=ON` to
@@ -78,23 +78,23 @@ both the compiler and IntelliSense, so they can't drift. Recompile to apply.
 Override with `TURBOJPEG_ROOT` / `IPP_ROOT`.
 
 - **VS Code (fast loop):** open the repo with the xInsp2 extension, open a project
-  under `examples/`, hit compile/run — the extension spawns the BE, compiles the
+  under `qa/`, hit compile/run — the extension spawns the BE, compiles the
   script, and reports the run (verdict via `run_result`). (Per-run value/image
   streaming to a viewer was removed from core; it's now handled by the shipped
   `expose` plugin — `xi::use("expose").process(rec)`, see
   [`write-a-script.md`](write-a-script.md).)
 - **Headless (what FE/production does):**
   ```powershell
-  backend/build/Release/xinsp-backend.exe --project=examples/qa_group_parallelism --autostart-fps=-1
+  backend/build/Release/xinsp-backend.exe --project=qa/qa_group_parallelism --autostart-fps=-1
   ```
   (`-1` = trigger-only; the project's sources drive it.)
 - **HMI:** `node hmi/serve.mjs` then open the printed URL (or
   `hmi/index.html?ws=ws://127.0.0.1:7823/`).
 - **First change:** edit a project's `inspect.cpp` and re-run — the backend
   hot-reloads the DLL. Try an `xi::result(...)` (the live per-run verdict) in
-  `examples/qa_run_result/inspect.cpp`. (`VAR(...)`/`EMIT(...)` still compile but
-  no longer surface anything — per-run output goes through the `expose` plugin.)
-- **Tests:** `python tools/run_qa.py` (all `examples/qa_*/driver.py`); `ctest` for
+  `qa/qa_run_result/inspect.cpp`. (`VAR(...)`/`EMIT(...)` were removed and no
+  longer compile — per-run output goes through the `expose` plugin.)
+- **Tests:** `python tools/run_qa.py` (all `qa/qa_*/driver.py`); `ctest` for
   the C++ unit tests. See `testing.md`.
 
 ---

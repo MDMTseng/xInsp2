@@ -23,6 +23,10 @@
         "icon": "$(play)"
       },
       {
+        "command": "xinsp2.showHealth",
+        "title": "xInsp2: Show Backend Health Snapshot"
+      },
+      {
         "command": "xinsp2.openPipelineGraph",
         "title": "xInsp2: Open Pipeline Graph",
         "icon": "$(type-hierarchy)"
@@ -169,6 +173,11 @@
         "icon": "$(rocket)"
       },
       {
+        "command": "xinsp2.tryExample",
+        "title": "xInsp2: Try an Example Project…",
+        "icon": "$(beaker)"
+      },
+      {
         "command": "xinsp2.openScript",
         "title": "xInsp2: Open Inspection Script",
         "icon": "$(file-code)"
@@ -210,7 +219,7 @@
       },
       {
         "view": "xinsp2.instances",
-        "contents": "No project open yet.\n[Try a Sample Project](command:xinsp2.createSampleProject)\n\nOr start from scratch:\n[Create New Project](command:xinsp2.createProject)\n[Open Existing Project](command:xinsp2.openProject)\n[Open Recent…](command:xinsp2.openRecent)\n\n[Read Getting Started](command:xinsp2.openGettingStarted)",
+        "contents": "No project open yet.\n[Try a Sample Project](command:xinsp2.createSampleProject)\n[Browse Example Projects…](command:xinsp2.tryExample)\n\nOr start from scratch:\n[Create New Project](command:xinsp2.createProject)\n[Open Existing Project](command:xinsp2.openProject)\n[Open Recent…](command:xinsp2.openRecent)\n\n[Read Getting Started](command:xinsp2.openGettingStarted)",
         "when": "xinsp2.connected && !xinsp2.hasProject && !xinsp2.busy"
       },
       {
@@ -390,6 +399,11 @@
           "type": "string",
           "default": "",
           "description": "Path to the xInsp2 plugin SDK folder (the one containing testing/helpers.cjs). Used by the Run Plugin UI Tests command. Defaults to ../sdk relative to this extension."
+        },
+        "xinsp2.toolboxPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the folder holding the shipped plugins and their example/ projects (source tree: toolbox/; a shipped release: plugins/). Used by Try an Example Project. Auto-detected from the extension and backend locations when empty."
         }
       }
     }
@@ -399,6 +413,9 @@
     "typecheck": "tsc --noEmit",
     "watch": "node esbuild.mjs --watch",
     "test:protocol": "node --test test/protocol.test.mjs",
+    "test:outcome": "node --experimental-strip-types --test test/run_outcome.test.mjs",
+    "test:compat": "node --experimental-strip-types --test test/version_compat.test.mjs",
+    "test:health": "node --experimental-strip-types --test test/health_state.test.mjs",
     "test:integration": "node --test test/ws_basic.test.mjs"
   },
   "devDependencies": {
@@ -410,7 +427,6 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
-    "@vscode-elements/elements": "^2.5.1",
     "ws": "^8.18.0"
   }
 }

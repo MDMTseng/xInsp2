@@ -11,8 +11,16 @@ import { TEMPLATE_CHOICES, TemplateId, locateSdkRoot, renderPluginFiles,
     from './projectPluginTemplates';
 import { renderProjectSettingsHtml } from './projectSettingsHtml';
 import { renderPluginBrowserHtml, PBModel, PBRoot, PBTreeNode, PBPlugin } from './pluginBrowser';
+import { locateExampleRoot, listExampleProjects, copyExample, ExampleProject } from './exampleProjects';
 import { ImageViewerPanel } from './imageViewerPanel';
 import { resolveBackendMode } from './backendMode.mjs';
+import { VerdictTally, parseRunOutcome, parseRunFinished,
+         CLASS_OK, CLASS_NG, CLASS_CRASHED, CLASS_DROPPED } from './runOutcome';
+import { classifyHello, SkewResult } from './versionCompat';
+import { parseHealth, mergeHealthEvent, enteredProblem, failingComponents,
+         componentSummary, summarizeFailing,
+         STATE_RUNNING, STATE_DEGRADED, STATE_FAULT,
+         type HealthSnapshot } from './healthState';
 
 // --- Plugin Browser model building (pure; reads project.json + the filesystem) ---
 function pbExpandRoot(raw: string, projectFolder: string): string {
@@ -174,19 +182,30 @@ function findBackendExe(context: vscode.ExtensionContext): string {
     const explicit = (cfg.get<string>('backendExe', '') || '').trim();
     if (explicit) return explicit;
 
-    const candidates = [
-        // Dev tree: vscode-extension/ is sibling of backend/
-        path.join(context.extensionPath, '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'),
-        // Packaged: exe shipped next to extension
-        path.join(context.extensionPath, 'backend', 'xinsp-backend.exe'),
+    // The exe name and the build layout are both platform-dependent: MSVC is a
+    // multi-config generator (build/<Config>/xinsp-backend.exe), the Linux/macOS
+    // Ninja build is single-config (build/xinsp-backend). Probe both, Release
+    // first — same convention as ui-components/test/backend-exe.mjs and
+    // tests/fuzz/_common.py.
+    const exe = process.platform === 'win32' ? 'xinsp-backend.exe' : 'xinsp-backend';
+    const buildDirs = (root: string) => [
+        path.join(root, 'backend', 'build', 'Release', exe),
+        path.join(root, 'backend', 'build', 'Debug', exe),
+        path.join(root, 'backend', 'build', exe),
     ];
 
-    // Also check workspace folders.
+    const candidates = [
+        // Dev tree: vscode-extension/ is sibling of backend/
+        ...buildDirs(path.join(context.extensionPath, '..')),
+        // Packaged: exe shipped next to extension
+        path.join(context.extensionPath, 'backend', exe),
+    ];
+
+    // Also check workspace folders, walking up to find the xInsp2 root.
     for (const wf of vscode.workspace.workspaceFolders ?? []) {
-        candidates.push(path.join(wf.uri.fsPath, 'backend', 'build', 'Release', 'xinsp-backend.exe'));
-        // Walk up from workspace to find xInsp2 root
-        candidates.push(path.join(wf.uri.fsPath, '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'));
-        candidates.push(path.join(wf.uri.fsPath, '..', '..', 'backend', 'build', 'Release', 'xinsp-backend.exe'));
+        candidates.push(...buildDirs(wf.uri.fsPath));
+        candidates.push(...buildDirs(path.join(wf.uri.fsPath, '..')));
+        candidates.push(...buildDirs(path.join(wf.uri.fsPath, '..', '..')));
     }
 
     const fs = require('fs');
@@ -196,7 +215,7 @@ function findBackendExe(context: vscode.ExtensionContext): string {
             return resolved;
         }
     }
-    return 'xinsp-backend.exe';
+    return exe;
 }
 
 // Render a plugin's I/O contract (from its plugin.json `manifest` block) as a
@@ -531,6 +550,197 @@ export function activate(context: vscode.ExtensionContext) {
     const statusMap: Record<string, string> = {};
     const refreshStatuses = () => treeProvider.setStatuses({ ...statusMap });
 
+    // --- Run-outcome (verdict) status bar --------------------------------
+    // Rolling ok/ng/na/crashed tally fed by `run_result` events (single-shot
+    // cmd:run AND continuous-mode dispatch). Hidden until the first verdict; the
+    // tooltip carries the last verdict's code/msg + full class breakdown, and the
+    // background reddens when the latest verdict is ng/crashed so a failing part
+    // in `start` mode is impossible to miss. Reset on cmd:start (mirrors the
+    // backend resetting its per-run counters) and on disconnect.
+    const verdictTally = new VerdictTally();
+    const verdictStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+    verdictStatus.command = 'xinsp2.resetVerdicts';
+    context.subscriptions.push(verdictStatus);
+    // Throttle OK-class + run_finished output logging so a fast continuous stream
+    // can't flood the channel; ng/crashed/dropped/no_verdict lines are always logged.
+    let lastOkLogMs = 0;
+    let lastFinishLogMs = 0;
+    const updateVerdictStatus = () => {
+        const t = verdictTally;
+        if (t.total === 0) { verdictStatus.hide(); return; }
+        const cr = t.crashed + t.dropped;
+        verdictStatus.text = `$(pulse) ok ${t.ok} · ng ${t.ng} · na ${t.na}`
+            + (cr > 0 ? ` · cr ${cr}` : '');
+        const last = t.last;
+        const lines = [
+            `Last verdict: ${t.lastClass} — code ${last?.code}${last?.msg ? ' “' + last.msg + '”' : ''}`,
+        ];
+        if (last?.source || last?.group)
+            lines.push(`  source: ${last?.source ?? '?'}${last?.group ? '  group: ' + last.group : ''}`);
+        lines.push(`ok ${t.ok} · ng ${t.ng} · na ${t.na} · no_verdict ${t.no_verdict}`
+            + ` · crashed ${t.crashed} · dropped ${t.dropped}`
+            + (t.other ? ` · other ${t.other}` : '') + `  (${t.total} runs)`);
+        lines.push('Click to reset counts.');
+        verdictStatus.tooltip = lines.join('\n');
+        verdictStatus.backgroundColor =
+            t.lastClass === CLASS_CRASHED || t.lastClass === CLASS_DROPPED
+                ? new vscode.ThemeColor('statusBarItem.errorBackground')
+                : t.lastClass === CLASS_NG
+                    ? new vscode.ThemeColor('statusBarItem.warningBackground')
+                    : undefined;
+        verdictStatus.show();
+    };
+    const resetVerdicts = () => { verdictTally.reset(); updateVerdictStatus(); };
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.resetVerdicts', resetVerdicts));
+
+    // --- Compile-lifecycle status bar ------------------------------------
+    // Driven by `compile_started` / `compile_finished` events, which bracket
+    // EVERY compile_and_load — including recompiles the extension didn't initiate
+    // directly (file-watch save, auto-compile on restore), which the local `busy`
+    // flag doesn't cover. Shows a spinner across the 3-5s cold-compile quiet
+    // window so the connection doesn't look hung.
+    const compileStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
+    context.subscriptions.push(compileStatus);
+    let compileClearTimer: ReturnType<typeof setTimeout> | undefined;
+    const showCompiling = (p?: string) => {
+        if (compileClearTimer) { clearTimeout(compileClearTimer); compileClearTimer = undefined; }
+        compileStatus.text = `$(sync~spin) xInsp2: compiling ${p ? path.basename(p) : ''}`.trimEnd();
+        compileStatus.tooltip = `Compiling ${p || 'script'}…`;
+        compileStatus.backgroundColor = undefined;
+        compileStatus.show();
+    };
+    const showCompileDone = (ok: boolean, p?: string) => {
+        if (compileClearTimer) { clearTimeout(compileClearTimer); compileClearTimer = undefined; }
+        const name = p ? path.basename(p) : '';
+        compileStatus.text = ok ? `$(check) xInsp2: compiled ${name}`.trimEnd()
+                                : `$(error) xInsp2: compile failed ${name}`.trimEnd();
+        compileStatus.tooltip = ok ? `Compiled ${p || ''}` : `Compile failed: ${p || ''}`;
+        compileStatus.backgroundColor = ok ? undefined
+            : new vscode.ThemeColor('statusBarItem.errorBackground');
+        compileStatus.show();
+        compileClearTimer = setTimeout(() => compileStatus.hide(), ok ? 3000 : 6000);
+    };
+
+    // --- Extension <-> backend version-skew ------------------------------
+    // The backend's `hello` carries its version + WS abi stamp. classifyHello
+    // (pure, in versionCompat.ts) turns that into a compat verdict; the UX here
+    // makes skew VISIBLE without ever blocking (pre-1.0, first-party — inform
+    // loudly, never lock out). Compatible → silence. Notice → one output line.
+    // Incompatible → a warning notification (once per connection) naming BOTH
+    // versions, plus a persistent status chip while connected. Cleared on
+    // disconnect (see the `close` handler's resetSkew()).
+    const extensionVersion: string =
+        (context.extension?.packageJSON?.version as string) || '0.0.0';
+    const skewStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
+    context.subscriptions.push(skewStatus);
+    let skewWarned = false;   // warn notification is shown at most once per connection
+    const applySkew = (r: SkewResult) => {
+        // Always record the verdict in the output channel (the pre-existing
+        // "backend v…" line, now with the classification appended).
+        output.appendLine(`[xinsp2] backend v${r.backendVersion ?? '?'}`
+            + ` (abi ${r.backendAbi ?? '?'}) — ${r.kind}`);
+        if (r.level === 'ok') { skewStatus.hide(); return; }   // silence is the feature
+        if (r.level === 'notice') {
+            // One informational line; no notification, no chip.
+            output.appendLine('[xinsp2] ' + r.summary + (r.advice ? ' ' + r.advice : ''));
+            skewStatus.hide();
+            return;
+        }
+        // warn: persistent chip + a one-shot notification naming both versions.
+        skewStatus.text = '$(warning) xInsp2: version skew';
+        skewStatus.tooltip = r.summary + (r.advice ? '\n' + r.advice : '')
+            + `\nExtension v${r.extensionVersion} · expected backend ${r.expectedBackend} · abi ${r.expectedAbi}`;
+        skewStatus.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+        skewStatus.command = 'xinsp2.showOutput';
+        skewStatus.show();
+        output.appendLine('[xinsp2] VERSION SKEW: ' + r.summary + (r.advice ? ' ' + r.advice : ''));
+        if (!skewWarned) {
+            skewWarned = true;
+            vscode.window.showWarningMessage(r.summary + (r.advice ? '  ' + r.advice : ''));
+        }
+    };
+    const resetSkew = () => { skewWarned = false; skewStatus.hide(); };
+    // Clicking the skew chip reveals the output channel where the full verdict
+    // (both versions + advice) was logged.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.showOutput', () => output.show(true)));
+
+    // --- Canonical health/state chip (schema xi.health/1) -----------------
+    // The ONE authoritative read of the backend's state machine + which
+    // component (if any) is unhealthy — pulled once on connect (get_health, the
+    // delivery guarantee) and kept live by the health_changed event
+    // (accelerator). Replaces inferring liveness from side channels. Degrades
+    // gracefully on an older backend that lacks get_health (feature-detected via
+    // the "unknown command" rsp — no version-sniffing): the chip simply stays
+    // hidden and the extension keeps its prior behaviour.
+    const healthChip = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
+    healthChip.command = 'xinsp2.showHealth';
+    context.subscriptions.push(healthChip);
+    // undefined = not yet probed this connection; false = backend has no
+    // get_health (stop touching the chip); a snapshot = live state.
+    let healthSupported: boolean | undefined;
+    let lastHealthState: string | undefined;   // for one-shot enter-problem warning
+    let lastHealthSnap: HealthSnapshot | undefined;
+
+    // Icon + optional warning/error background per top-level state. Unknown
+    // (newer) states fall through to a neutral pulse so they still surface.
+    const HEALTH_ICON: Record<string, string> = {
+        boot: 'debug-start', project_loaded: 'folder-opened', running: 'pulse',
+        degraded: 'warning', draining: 'sync', fault: 'error',
+    };
+    const updateHealthChip = (snap: HealthSnapshot) => {
+        const st = snap.state;
+        healthChip.text = `$(${HEALTH_ICON[st] ?? 'pulse'}) health: ${st}`;
+        const bad = failingComponents(snap);
+        const lines = [`Backend state: ${st}`];
+        if (snap.since_ms) lines.push(`  since ${new Date(snap.since_ms).toLocaleTimeString()}`);
+        if (bad.length) {
+            lines.push('Unhealthy components:');
+            for (const c of bad) lines.push(`  • ${componentSummary(c)}`);
+        } else if (st === STATE_RUNNING) {
+            lines.push('All components healthy.');
+        }
+        lines.push('Click for the full health snapshot.');
+        healthChip.tooltip = lines.join('\n');
+        healthChip.backgroundColor =
+            st === STATE_FAULT ? new vscode.ThemeColor('statusBarItem.errorBackground')
+            : st === STATE_DEGRADED ? new vscode.ThemeColor('statusBarItem.warningBackground')
+            : undefined;
+        healthChip.show();
+    };
+    // Apply a freshly parsed snapshot: refresh the chip and fire a ONE-TIME
+    // warning when the machine ENTERS degraded/fault (not on every subsequent
+    // health_changed while it stays there — see enteredProblem).
+    const applyHealth = (snap: HealthSnapshot) => {
+        healthSupported = true;
+        lastHealthSnap = snap;
+        updateHealthChip(snap);
+        if (enteredProblem(lastHealthState, snap.state)) {
+            const detail = summarizeFailing(snap);
+            const msg = `xInsp2 backend entered "${snap.state}"`
+                + (detail ? ` — ${detail}` : '.');
+            output.appendLine('[xinsp2] ' + msg);
+            if (snap.state === STATE_FAULT) vscode.window.showErrorMessage(msg);
+            else vscode.window.showWarningMessage(msg);
+        }
+        lastHealthState = snap.state;
+    };
+    const resetHealthChip = () => {
+        healthChip.hide();
+        healthChip.backgroundColor = undefined;
+        healthSupported = undefined;
+        lastHealthState = undefined;
+    };
+    // Click → dump the current snapshot to the output channel (a lightweight
+    // "show me everything" without a bespoke panel).
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.showHealth', () => {
+            output.show(true);
+            if (!lastHealthSnap) { output.appendLine('[health] no snapshot yet'); return; }
+            output.appendLine('[health] ' + JSON.stringify(lastHealthSnap.raw));
+        }));
+
     // Plugin data cache (the "Plugins" tree view was removed; the Plugin Browser
     // webview is the management surface now — this just holds the last-known set).
     const pluginRegistry = new PluginRegistry();
@@ -818,8 +1028,9 @@ export function activate(context: vscode.ExtensionContext) {
     // disables. framePath is optional (frame-driven projects need it; source /
     // continuous projects don't).
     // First image file under <project>/frames — a sample frame so the capture
-    // button works for frame-driven projects (imread current_frame_path) without
-    // the user wiring one up.
+    // button works for frame-driven projects (the script reads the per-run
+    // xi::current_frame_path() set by cmd:run's frame_path arg) without the
+    // user wiring one up.
     function firstProjectFrame(): string | undefined {
         if (!currentProjectPath) return undefined;
         try {
@@ -1002,6 +1213,17 @@ export function activate(context: vscode.ExtensionContext) {
             for (const src of Object.keys(data)) statusMap[src] = data[src]?.text ?? '';
             refreshStatuses();
         }).catch(() => {});
+        // Canonical health/state snapshot on (re)connect — the delivery guarantee
+        // behind the health_changed accelerator. Feature-detected: an older backend
+        // answers get_health with an "unknown command" rsp, in which case we mark
+        // the feature unsupported and leave the chip hidden (no version-sniffing).
+        sendCmd('get_health').then((r: any) => {
+            if (r?.ok) { applyHealth(parseHealth(r.data)); return; }
+            if (/unknown command/i.test(r?.error || '')) {
+                healthSupported = false;
+                output.appendLine('[xinsp2] backend has no get_health — health chip disabled (older backend)');
+            }
+        }).catch(() => {});
         // Surface any unread crash reports from previous sessions. The
         // notification names the faulty module so the user knows whether
         // their script, a plugin, or the backend itself was at fault.
@@ -1087,6 +1309,16 @@ export function activate(context: vscode.ExtensionContext) {
         treeProvider.setProjectOpen(false);
         lastConnected = false;
         setViewBadge(false, 0, 0);
+        // Clear run/compile indicators — stale verdict counts from a dead backend
+        // are misleading, and a spinner would hang forever.
+        resetVerdicts();
+        compileStatus.hide();
+        // Skew state is per-connection: clear the chip and re-arm the one-shot
+        // warning so a reconnect to a different backend re-evaluates cleanly.
+        resetSkew();
+        // Health is per-connection; drop the chip + re-probe on the next connect
+        // (a stale "running" from a dead backend is misleading).
+        resetHealthChip();
         if (attachMode) {
             // The FE owns recovery; make clear the extension isn't going to
             // respawn. Word it from the FE's true state when we have it: a latched
@@ -1100,7 +1332,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     client.on('json', (msg: any) => {
         if (msg.type === 'event' && msg.name === 'hello') {
-            output.appendLine(`[xinsp2] backend v${msg.data?.version}`);
+            // Classify extension<->backend skew and surface it (versionCompat.ts).
+            // Compatible → silence; notice → one output line; incompatible →
+            // warning notification + persistent status chip. Never blocks.
+            applySkew(classifyHello(msg, extensionVersion));
         } else if (msg.type === 'event' && msg.name === 'status') {
             // Live status delta — accelerator between the connect snapshots.
             const src = msg.data?.source;
@@ -1108,6 +1343,64 @@ export function activate(context: vscode.ExtensionContext) {
                 statusMap[src] = msg.data?.text ?? '';
                 refreshStatuses();
             }
+        } else if (msg.type === 'event' && msg.name === 'run_result') {
+            // Per-run verdict (schema xi.run-outcome/1). Tally into the status bar
+            // and log the outcome; OK lines are rate-limited so a fast continuous
+            // stream can't flood the output channel.
+            const o = parseRunOutcome(msg);
+            const cls = verdictTally.record(o);
+            updateVerdictStatus();
+            const line = `[run${o.run_id != null ? ' #' + o.run_id : ''}] ${cls}`
+                + ` (code ${o.code})${o.msg ? ' — ' + o.msg : ''}`
+                + (o.source ? `  [${o.source}${o.group ? '/' + o.group : ''}]` : '');
+            if (cls === CLASS_OK) {
+                const now = Date.now();
+                if (now - lastOkLogMs > 1000) { lastOkLogMs = now; output.appendLine(line); }
+            } else {
+                output.appendLine(line);
+            }
+        } else if (msg.type === 'event' && msg.name === 'run_error') {
+            // Inspect threw (C++ exception / SEH) — fires INSTEAD of run_finished.
+            // Surface it distinctly from a normal finish; the crashed verdict is
+            // separately tallied via its run_result, so this is diagnostic detail.
+            const rid = msg.data?.run_id;
+            const what = msg.data?.what ?? 'unknown error';
+            output.appendLine(`[run${rid != null ? ' #' + rid : ''}] ERROR: ${what}`);
+        } else if (msg.type === 'event' && msg.name === 'run_finished') {
+            // Normal bracket close (run_error fires instead of this on a throw).
+            // The verdict already surfaced via run_result, so this only emits an
+            // occasional, rate-limited compute-timing line — inspect COMPUTE time
+            // only, NOT cycle latency — so continuous mode can't flood the channel.
+            const f = parseRunFinished(msg);
+            const now = Date.now();
+            if (f.run_id != null && now - lastFinishLogMs > 1000) {
+                lastFinishLogMs = now;
+                output.appendLine(`[run #${f.run_id}] finished`
+                    + (f.inspect_compute_us != null ? ` (compute ${(f.inspect_compute_us / 1000).toFixed(2)}ms)` : ''));
+            }
+        } else if (msg.type === 'event' && msg.name === 'state_dropped') {
+            // Hot-reload dropped the persisted xi::kv() store because the new DLL
+            // declares a different kv-schema version (event data carries
+            // "store":"kv" + old/new versions). The developer MUST see this —
+            // otherwise their state silently resets and they debug a phantom.
+            const oldS = msg.data?.old_schema;
+            const newS = msg.data?.new_schema;
+            const detail = (oldS != null && newS != null)
+                ? ` (kv schema v${oldS} → v${newS})` : '';
+            const warn = `xInsp2: persistent script state was DROPPED on reload${detail}`
+                + ' — xi::kv() started empty because the schema changed.';
+            output.appendLine('[xinsp2] ' + warn);
+            vscode.window.showWarningMessage(warn);
+        } else if (msg.type === 'event' && msg.name === 'health_changed') {
+            // Live accelerator for the health/state contract. Ignore it until a
+            // get_health snapshot has confirmed the backend supports the feature
+            // (healthSupported !== false), so a stray event can't un-hide the chip
+            // on a backend we've classified as too old.
+            if (healthSupported !== false) applyHealth(mergeHealthEvent(lastHealthSnap, parseHealth(msg)));
+        } else if (msg.type === 'event' && msg.name === 'compile_started') {
+            showCompiling(msg.data?.path);
+        } else if (msg.type === 'event' && msg.name === 'compile_finished') {
+            showCompileDone(msg.data?.ok !== false, msg.data?.path);
         } else if (msg.type === 'rsp') {
             // Responses are dispatched via pending map (simple approach).
             const handler = pendingRsp.get(msg.id);
@@ -2134,108 +2427,108 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // First-run sample project: create a throwaway demo project with a
-    // preconfigured mock_camera → blob_analysis pipeline so the user can
-    // see something working immediately.
+    // ---- Shipped example projects ------------------------------------
+    //
+    // The catalogue is READ FROM DISK (toolbox/<name>/example, plus the
+    // cross-plugin toolbox/example), not hardcoded here. This command used to
+    // be a ~120-line generator with an inspect.cpp inside a template literal;
+    // it drifted from the real examples every time either side moved, and it
+    // could only ever demo the two plugins someone had wired into it.
+    //
+    // An example is COPIED, never opened in place: the user is meant to edit
+    // it, and a shipped tree (or a read-only install) is the wrong thing to
+    // edit. Build output and run artifacts are left behind by copyExample().
+    const exampleRoot = () => locateExampleRoot(
+        context.extensionPath, findBackendExe(context) || undefined,
+        vscode.workspace.getConfiguration('xinsp2').get<string>('toolboxPath') || undefined);
+
+    async function openExample(ex: ExampleProject): Promise<void> {
+        const { tmpdir } = require('os');
+        const dest = path.join(tmpdir(),
+            `xinsp2_${ex.id}_${Date.now().toString(36)}`);
+        try {
+            copyExample(ex.dir, dest);
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`xInsp2: could not copy example: ${e?.message || e}`);
+            return;
+        }
+        await vscode.commands.executeCommand('xinsp2.openProject', dest);
+        // Open the script and the README side by side — the README is where the
+        // example says what it is demonstrating, which is the whole point of
+        // opening one rather than an empty project.
+        try {
+            const doc = await vscode.workspace.openTextDocument(path.join(dest, 'inspect.cpp'));
+            await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+        } catch { /* an example without a script would not have been listed */ }
+        const readme = path.join(dest, 'README.md');
+        if (require('fs').existsSync(readme)) {
+            try { await vscode.commands.executeCommand('markdown.showPreviewToSide',
+                                                       vscode.Uri.file(readme)); } catch { }
+        }
+        vscode.window.showInformationMessage(
+            `Opened the ${ex.id} example (copy at ${dest}) — edit it freely, the shipped one is untouched.`);
+    }
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('xinsp2.tryExample', async (id?: string) => {
+            if (!client?.connected) {
+                vscode.window.showWarningMessage('xInsp2: not connected to backend');
+                return;
+            }
+            const root = exampleRoot();
+            if (!root) {
+                vscode.window.showErrorMessage(
+                    'xInsp2: no plugin folder found, so no examples to list. '
+                    + 'Set xinsp2.toolboxPath to the folder holding the shipped plugins.');
+                return;
+            }
+            const all = listExampleProjects(root);
+            if (!all.length) {
+                vscode.window.showErrorMessage(`xInsp2: no example projects under ${root}.`);
+                return;
+            }
+            if (id) {
+                const hit = all.find((e) => e.id === id);
+                if (!hit) {
+                    vscode.window.showErrorMessage(
+                        `xInsp2: no example for '${id}' (have: ${all.map((e) => e.id).join(', ')})`);
+                    return;
+                }
+                await openExample(hit);
+                return;
+            }
+            const pick = await vscode.window.showQuickPick(
+                all.map((e) => ({
+                    label: (e.isStation ? '$(circuit-board) ' : '$(package) ') + e.title,
+                    description: e.isStation ? 'all plugins together' : e.id,
+                    detail: e.summary,
+                    ex: e,
+                })),
+                { title: 'xInsp2: try an example project',
+                  placeHolder: 'Each one is a runnable project — it is copied so you can edit it' });
+            if (pick) await openExample((pick as any).ex);
+        })
+    );
+
+    // Kept as the welcome-view / palette entry point, and non-interactive so a
+    // caller (including the ux_states E2E) gets a project without a prompt.
+    // Prefers the cross-plugin station, which is the best single thing to show
+    // someone who has never seen the tool.
     context.subscriptions.push(
         vscode.commands.registerCommand('xinsp2.createSampleProject', async () => {
             if (!client?.connected) {
                 vscode.window.showWarningMessage('xInsp2: not connected to backend');
                 return;
             }
-            const { tmpdir } = require('os');
-            const fs = require('fs');
-            const sampleDir = path.join(tmpdir(),
-                `xinsp2_sample_${new Date().toISOString().slice(0,10)}_${Date.now().toString(36)}`);
-            const create = await sendCmd('create_project', {
-                folder: sampleDir, name: 'xinsp2_sample',
-            });
-            if (!create?.ok) {
-                vscode.window.showErrorMessage(`Sample project failed: ${create?.error || 'unknown'}`);
+            const root = exampleRoot();
+            const all = root ? listExampleProjects(root) : [];
+            if (!all.length) {
+                vscode.window.showErrorMessage(
+                    'xInsp2: no example projects found. Set xinsp2.toolboxPath to the '
+                    + 'folder holding the shipped plugins.');
                 return;
             }
-            // Preconfigure a small pipeline — pick whichever plugins we have.
-            const plugins: any[] = (await sendCmd('list_plugins'))?.data || [];
-            const want = ['mock_camera', 'blob_analysis'];
-            for (const p of want) {
-                if (plugins.some(x => x.name === p)) {
-                    await vscode.commands.executeCommand('xinsp2.createInstance',
-                        p + '0', p);
-                }
-            }
-            // The `expose` sink is a plugin like any other and needs an instance
-            // before a script may call xi::use("expose"). Convention: the instance
-            // key IS the string "expose" (that is what the script uses), not "expose0".
-            const hasExpose = plugins.some(x => x.name === 'expose');
-            if (hasExpose) {
-                await vscode.commands.executeCommand('xinsp2.createInstance',
-                    'expose', 'expose');
-            }
-            // Seed a working script that uses whichever instances we created.
-            const scriptPath = path.join(sampleDir, DEFAULT_SCRIPT_NAME);
-            const hasCam = plugins.some(x => x.name === 'mock_camera');
-            const hasDet = plugins.some(x => x.name === 'blob_analysis');
-            if (hasCam && hasDet) {
-                // Only surface to `expose` if we actually created that instance —
-                // never reference an instance the generator didn't configure.
-                const exposeBlock = hasExpose ? `
-    // Surface the input + result to a UI panel via the shipped \`expose\` sink.
-    // Build a plain Record, tag a "$channel", and push it — no macro, no VAR.
-    xi::use("expose").process(
-        xi::Record()
-            .set("$channel", "inspection")
-            .image("input",  input)
-            .image("binary", out.get_image("binary"))
-            .set("blob_count", blob_count));
-` : `
-    // (No \`expose\` instance in this project — add one to surface previews:
-    //  create an instance named "expose" of the \`expose\` plugin, then push a
-    //  Record via xi::use("expose").process(...).)
-`;
-                fs.writeFileSync(scriptPath, `//
-// xInsp2 sample — mock_camera0 -> blob_analysis0 pipeline.
-// Edit, save (compiles automatically), and click Run Inspection.
-//
-// Note: <xi/xi.hpp> is the OpenCV-free umbrella. Pull in OpenCV explicitly
-// with <xi/xi_cv.hpp> only if your script calls cv:: functions directly.
-//
-#include <xi/xi.hpp>
-#include <xi/xi_use.hpp>
-#include <xi/xi_result.hpp>   // xi::ok / xi::ng / xi::result (per-run verdict)
-
-// Explicit-trigger entry: the host hands the trigger in as \`t\` (no ambient
-// state), so \`t\` is self-contained and safe to use on any thread.
-XI_INSPECT_ENTRY(t, frame) {
-    (void)frame;
-
-    // Frames arrive by PUSH — the mock_camera0 source emits into the trigger
-    // bus. Read the correlated frame straight off the trigger view.
-    auto input = t.image("mock_camera0");
-    if (input.empty()) {
-        // Nothing to inspect this run — record NA (code 0), not OK/NG.
-        xi::result(0, "missing frame");
-        return;
-    }
-
-    // blob_analysis0 expects its input image under the key "gray" and returns
-    // a "binary" image plus an integer "blob_count".
-    auto out = xi::use("blob_analysis0")
-                   .process(xi::Record().image("gray", input));
-    int blob_count = out["blob_count"].as_int();
-${exposeBlock}
-    // One per-run verdict: OK if we found something, NG otherwise.
-    if (blob_count > 0) xi::ok(1, "blobs found");
-    else                xi::ng(1, "no blobs");
-}
-`);
-            }
-            // Open the script so the user sees something concrete.
-            try {
-                const doc = await vscode.workspace.openTextDocument(scriptPath);
-                await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
-            } catch {}
-            vscode.window.showInformationMessage(
-                `Sample project created at ${sampleDir}. Edit inspection.cpp or click Run.`);
+            await openExample(all.find((e) => e.isStation) || all[0]);
         })
     );
 
@@ -2464,11 +2757,11 @@ ${exposeBlock}
             html = html.replace('</body>', testShim + '</body>');
 
             // Create webview panel. localResourceRoots gates which files the
-            // webview can load — include the extension dir (so @vscode-elements
-            // can be served) and the plugin's own folder (for images/assets
-            // it might reference from the UI).
-            const veLibDir = vscode.Uri.joinPath(context.extensionUri,
-                'node_modules', '@vscode-elements', 'elements', 'dist');
+            // webview can load — include the extension's media dir (so the
+            // in-house @xinsp2/components bundle + VS Code theme adapter can be
+            // served) and the plugin's own folder (for images/assets it might
+            // reference from the UI).
+            const kitDir = vscode.Uri.joinPath(context.extensionUri, 'media');
             const panel = vscode.window.createWebviewPanel(
                 'xinsp2.pluginUI',
                 `${instanceName} (${pluginName})`,
@@ -2476,25 +2769,32 @@ ${exposeBlock}
                 {
                     enableScripts: true,
                     localResourceRoots: [
-                        veLibDir,
+                        kitDir,
                         vscode.Uri.file(uiPath),
                     ],
                 }
             );
 
-            // Inject @vscode-elements (Microsoft's web-components for VS Code
-            // webviews — native-looking buttons, inputs, tabs, badges that
-            // inherit the user's theme). If the plugin doesn't use any of the
-            // <vscode-*> tags this is just ~230KB of dead code in the webview.
-            const veUri = panel.webview.asWebviewUri(
-                vscode.Uri.joinPath(veLibDir, 'bundled.js')
+            // Inject the in-house web-component kit (xi-* custom elements) plus
+            // the theme adapter that maps their --xi-* custom properties onto
+            // the webview's --vscode-* theme tokens, so the kit inherits the
+            // user's active colour theme. The bundle registers the elements;
+            // the stylesheet must precede it so the vars are set before first
+            // paint.
+            const kitScriptUri = panel.webview.asWebviewUri(
+                vscode.Uri.joinPath(kitDir, 'xi-components.esm.js')
             );
-            const veScriptTag = `<script type="module" src="${veUri}"></script>`;
-            // Put it in the <head> if we can find one, else prepend to body.
+            const kitThemeUri = panel.webview.asWebviewUri(
+                vscode.Uri.joinPath(kitDir, 'vscode-theme.css')
+            );
+            const kitTags =
+                `<link rel="stylesheet" href="${kitThemeUri}">\n` +
+                `  <script type="module" src="${kitScriptUri}"></script>`;
+            // Put them in the <head> if we can find one, else prepend to body.
             if (html.includes('</head>')) {
-                html = html.replace('</head>', `  ${veScriptTag}\n</head>`);
+                html = html.replace('</head>', `  ${kitTags}\n</head>`);
             } else {
-                html = html.replace('<body>', `<body>\n${veScriptTag}`);
+                html = html.replace('<body>', `<body>\n${kitTags}`);
             }
             panel.webview.html = html;
             pluginUIPanels.set(instanceName, panel);
@@ -2548,6 +2848,10 @@ ${exposeBlock}
         // not a hardcoded filename) + whether the active editor IS that script.
         // Backs the editor-title Compile/Run gating (xinsp2.isActiveScript).
         get scriptPath() { return currentScriptPath; },
+        // The open project's folder. Lets a test assert WHICH project a command
+        // opened — e.g. that Try Example opened a temp copy and not the shipped
+        // tree it was copied from.
+        get projectFolder() { return lastProjectFolder; },
         get activeIsScript() {
             const active = vscode.window.activeTextEditor?.document.uri.fsPath;
             return !!active && !!currentScriptPath &&
@@ -2763,7 +3067,12 @@ ${exposeBlock}
 
     let g_continuous = false;
     client.on('json', (msg: any) => {
-        if (msg.type === 'rsp' && msg.data?.started) g_continuous = true;
+        if (msg.type === 'rsp' && msg.data?.started) {
+            g_continuous = true;
+            // cmd:start resets the backend's per-run counters — mirror that so the
+            // verdict tally is scoped to the current continuous run, not lifetime.
+            resetVerdicts();
+        }
         if (msg.type === 'rsp' && msg.data?.stopped)  g_continuous = false;
     });
 
@@ -2816,13 +3125,25 @@ ${exposeBlock}
             const args = [`--port=${port}`];
             for (const dir of extraPluginDirs) args.push(`--plugins-dir=${dir}`);
             output.appendLine(`[xinsp2] starting ${exe} ${args.join(' ')}`);
-            backend = spawn(exe, args, {
+            const child = spawn(exe, args, {
                 stdio: ['ignore', 'pipe', 'pipe'],
             });
-            backend.stdout?.on('data', (d: Buffer) => output.append(d.toString()));
-            backend.stderr?.on('data', (d: Buffer) => output.append(d.toString()));
-            backend.on('exit', (code: number | null, signal: string | null) => {
+            backend = child;
+            child.stdout?.on('data', (d: Buffer) => output.append(d.toString()));
+            child.stderr?.on('data', (d: Buffer) => output.append(d.toString()));
+            child.on('exit', (code: number | null, signal: string | null) => {
                 output.appendLine(`[xinsp2] backend exited (code=${code} signal=${signal})`);
+                // Only the CURRENT backend's exit is ours to react to. `exit` is
+                // async, so a manual restart (kill + immediate respawn) delivers
+                // the dead process's exit AFTER its replacement is already live
+                // and intendedRunning is back to true. Without this identity
+                // check that stale event reads as a crash: it nulls the handle to
+                // the NEW backend, spends a respawn-budget slot, and spawns a
+                // duplicate that cannot bind the port — which exits(1), respawns,
+                // and burns the whole budget in seconds. One user-initiated
+                // "Restart Backend" was enough to end at "backend crashed 5× in
+                // last minute — giving up".
+                if (backend !== child) return;  // superseded — not the live one
                 backend = null;
                 if (!intendedRunning) return;   // clean shutdown
                 // Per-project / workspace opt-out — recompute in case

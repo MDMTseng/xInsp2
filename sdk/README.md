@@ -44,7 +44,7 @@ The host handles:
 - discovering the plugin (from its `plugin.json` manifest)
 - creating instances (one plugin → many configured instances)
 - hosting the config GUI (webview loaded from `ui/index.html`)
-- wiring images + records between plugins via `xi::use("name")`
+- wiring images + data between plugins via `xi::use("name")` (a sealed **pack** crosses each hop — see below)
 - persisting state (instance config lives in `<project>/instances/<name>/instance.json`)
 
 You write three things:
@@ -52,10 +52,11 @@ You write three things:
 | File | Purpose |
 |------|---------|
 | `plugin.json`         | Manifest: name, factory, whether a GUI exists |
-| `<name>.cpp`          | One class inheriting `xi::Plugin`, one macro `XI_PLUGIN_IMPL(Class)` |
+| `<name>.cpp`          | One class inheriting `xi::Plugin`; `XI_PLUGIN_IMPL(Class)` + `XI_PLUGIN_PACK_DOOR(Class)` for a data-plane plugin |
 | `ui/index.html` (opt) | Webview HTML+JS that posts messages to/from the plugin |
 
-That's it. Drop the folder into `plugins/` and the host scans it on startup.
+That's it. Drop the folder into the host's `plugins/` folder (or any dir on
+`xinsp2.extraPluginDirs`) and it is scanned on startup.
 
 ---
 
@@ -68,18 +69,22 @@ class Hello : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    xi::Record process(const xi::Record& input) override {
-        std::string who = input["name"].as_string("world");
-        return xi::Record().set("greeting", "hello " + who);
+    // The xi.pack@1 door — the sole data plane since the v12 ABI cut.
+    // Read entries from the input pack; write entries to the output pack.
+    void process(xi::PackIn& in, xi::PackOut& out) override {
+        std::string who(in.str("name").value_or("world"));
+        out.str("greeting", "hello " + who);
     }
 };
 
 XI_PLUGIN_IMPL(Hello)
+XI_PLUGIN_PACK_DOOR(Hello)   // publishes xi_plugin_get_interface("xi.pack",1)
 ```
 
-That's a complete, working plugin. Inputs are optional; output is
-whatever you return. Images and structured data share one bag
-(`xi::Record`).
+That's a complete, working plugin. Inputs are optional (`in.str(...)`
+returns `std::nullopt` when a key is absent); output is whatever you add
+to `out`. Images and structured data share one sealed, keyed container —
+the **pack** (`xi::PackIn` / `xi::PackOut`). See `examples/hello/`.
 
 ---
 
@@ -93,7 +98,7 @@ host calls xi_plugin_create(host_api, name)           → new Hello(...)
 host calls xi_plugin_set_def(stored_config_json)      → restore config if any
          ↓
 ┌──── for each inspection frame ──────────────────────────────────┐
-│ host calls xi_plugin_process(input_record, out_record)          │
+│ host drives the xi.pack@1 door: process(PackIn&, PackOut&)      │
 │ host calls xi_plugin_exchange(cmd_json, reply_buf) on UI clicks │
 └─────────────────────────────────────────────────────────────────┘
          ↓ (on project save)
@@ -113,15 +118,19 @@ All virtuals have sensible defaults; override only what you need:
 
 | Method | Purpose | Default |
 |--------|---------|---------|
-| `xi::Record process(const xi::Record&)` | Main work. Called per frame. | returns `{}` |
+| `void process(xi::PackIn&, xi::PackOut&)` | Main work. Called per frame via the `xi.pack@1` door. | no-op (empty pack out) |
 | `std::string exchange(const std::string& cmd)` | Handle UI button clicks / ad-hoc commands. | returns `"{}"` |
 | `std::string get_def()` | Serialize config → JSON for persistence. | returns `"{}"` |
 | `bool set_def(const std::string& json)` | Restore config from JSON. | returns `true` |
-| `void start()` / `void stop()` | For streaming sources (cameras). | no-op |
 
-A **source plugin** (camera / frame generator) overrides `start()`/`stop()`
-to run its own capture thread and calls `xi::emit_record(...)` to push frames
-into the pipeline — see [Image sources and dispatch](#image-sources-and-dispatch).
+A data-plane plugin overrides `process(PackIn&, PackOut&)` **and** publishes
+the door with `XI_PLUGIN_PACK_DOOR(Class)` (after `XI_PLUGIN_IMPL`) — that's
+what the host probes to learn the plugin speaks packs.
+
+A **source plugin** (camera / frame generator) instead runs its own capture
+thread and calls the inherited `emit(...)` to push sealed packs into the
+pipeline — see [Image sources and dispatch](#image-sources-and-dispatch). A
+pure source needs no pack door.
 
 ### Per-instance storage
 
@@ -157,8 +166,9 @@ Returns empty string if the plugin is running detached from a project.
 
 ## `xi::Json` cheatsheet
 
-For parsing `exchange()` commands and building reply payloads. RAII —
-no manual document free. Same path syntax as `xi::Record`.
+For parsing `exchange()` commands and building reply payloads (the JSON
+control channel — distinct from the pack data plane). RAII — no manual
+document free.
 
 ```cpp
 #include <xi/xi_json.hpp>
@@ -197,120 +207,152 @@ instead of crashing — no need to null-check at every step.
 
 ---
 
-## `xi::Record` cheatsheet
+## `xi::PackIn` / `xi::PackOut` cheatsheet
+
+The data plane is the **pack**: one sealed, keyed, typed container (canonical
+msgpack — byte-identical in memory, on the WS wire, and on disk). Inside
+`process()` you read `in` and write `out`. Typed reads return
+`std::optional` (absence is explicit); adders chain.
 
 ```cpp
-// Build
-xi::Record r;
-r.set("count", 5)
- .set("pass", true)
- .set("label", "ok")
- .image("binary", img)
- .image("overlay", rgb);
+void process(xi::PackIn& in, xi::PackOut& out) override {
+    // Read (optional-returning — nullopt on absent key / wrong type)
+    int64_t n       = in.i64("count").value_or(0);
+    bool    ok      = in.bool_or("pass", false);
+    std::string lbl(in.str("label").value_or(""));
 
-// Nested objects
-r.set("roi", xi::Record().set("x", 10).set("y", 20));
+    // Read an image entry — zero-copy pixel span + dims. NEVER write through it.
+    if (auto src = in.image("binary")) {
+        const uint8_t* px = static_cast<const uint8_t*>(src->pixels);
+        int w = src->width, h = src->height, c = src->channels;
+        // ... wrap px in a cv::Mat, analyse ...
+    }
 
-// Read (with default)
-int n     = r["count"].as_int(0);
-bool ok   = r["pass"].as_bool(false);
-std::string lbl = r["label"].as_string("");
+    // Enumerate an unknown pack producer-agnostically
+    in.for_each([&](std::string_view key, int tag) { /* ... */ });
 
-// Path access
-int x     = r["roi.x"].as_int();
-int first = r["points[0].value"].as_int();
+    // Write typed entries
+    out.i64("count", 5)
+       .boolean("pass", true)
+       .str("label", "ok");
 
-// Images
-const xi::Image& img = r.get_image("binary");
-for (auto& [key, img] : r.images()) { /* iterate */ }
+    // Produce an output image in the host pool, then hand it over by
+    // refcount (zero-copy — no heap→pool memcpy across the ABI)
+    xi::Image dst = pool_image(w, h, 1);
+    // ... write dst.write() ...
+    out.adopt_image("overlay", dst.width, dst.height, dst.channels, dst.pool_handle());
+
+    // Nested trees are msgpack's job — one entry (xi::mp::Writer),
+    // read back with xi::mp::Reader
+    // out.mp("items", writer.bytes().data(), writer.bytes().size());
+
+    // Fail-loud: a missing required input is a normal sealed pack stamped
+    // "$fault", never a silent default (the host short-circuits it downstream)
+    if (!in.image("binary")) { out.fault("missing_input", "binary"); return; }
+}
 ```
+
+Producer identity (`$src`) and the hop chain (`$prov`) are stamped
+automatically on every non-empty door output — see
+[`../docs/internals/pack-plane.md`](../docs/internals/pack-plane.md) and
+`xi/xi_pack_contract.hpp` for the reserved `$`-key contract.
 
 ---
 
 ## Image sources and dispatch
 
 If your plugin is a **camera / image source** — something that pushes
-frames into the pipeline rather than processing input — it emits a
-**record** and the host dispatches the inspection script once per emit.
-There is one dispatch verb: `emit_record`.
+frames into the pipeline rather than processing input — it emits a sealed
+**pack** and the host dispatches the inspection script once per emit.
+There is one dispatch verb: the inherited `emit(...)`.
 
-### Emitting frames: `xi::emit_record(...)`
+### Emitting frames: `new_pack()` / `emit()`
 
-Build a `xi::Record` (one or more images, plus optional metadata) and
-hand it to the host. The host stamps it with a **128-bit trigger id**,
-dispatches the inspection exactly once, and the script reads the frames
-back via `xi::current_trigger()`.
+Build a pack (one or more image entries, plus optional metadata as ordinary
+keyed entries) and hand it to the host. The host stamps it with a **128-bit
+trigger id**, dispatches the inspection exactly once, and the script reads the
+frames back via `xi::current_trigger()`.
 
 ```cpp
-#include <xi/xi_abi.hpp>   // xi::Plugin, xi::Record, xi::Image, xi::emit_record
+#include <xi/xi_abi.hpp>   // xi::Plugin, xi::PackOut, xi::Image, pool_image()/new_pack()/emit()
 
 void run_loop() {
-    xi::Image img(W, H, channels);
-    // ... write pixels into img.data() ...
-    xi::emit_record(host_, name().c_str(),
-                    xi::Record().image("frame", img));   // id auto-minted, ts = now
+    // Paint straight into a fresh host-pool slot, so the pack can adopt it
+    // by refcount (no heap→pool copy).
+    xi::Image img = pool_image(W, H, channels);
+    // ... write pixels into img.write() ...
+
+    xi::PackOut f = new_pack();               // starts a host-side builder
+    f.i64("seq", seq);
+    f.adopt_image("frame", W, H, channels, img.pool_handle());
+    emit(std::move(f));                        // seals + dispatches, drops our ref
 }
 ```
 
-The SDK helper signature (default id/ts shown):
+`emit()` is the `xi::Plugin` member that seals the pack, dispatches it, and
+drops our ref — one call owns the whole `builder_seal` / `emit_pack` /
+`release` refcount dance. Its full signature (defaults shown):
 
 ```cpp
-void xi::emit_record(const xi_host_api* host,
-                     const char*        emitter,   // this instance's name()
-                     xi::Record&        rec,
-                     xi_trigger_id      id = XI_TRIGGER_NULL,  // null → host mints one
-                     int64_t            ts = 0);               // 0 → host clock
+void xi::Plugin::emit(xi::PackOut&& out,
+                      xi_trigger_id id = XI_TRIGGER_NULL,  // null → host mints one
+                      int64_t       ts = 0);               // 0 → host clock
 ```
 
 `id == XI_TRIGGER_NULL` asks the host for a fresh id (its hex is
 `current_trigger().id_string()`, used by the buffer_replay plugin to
-replay a run). A record can also carry routing/context metadata:
-`xi::Record().image("frame", img).set("recipe", 7)`.
+replay a run). Routing/context metadata rides as ordinary pack entries
+alongside the image: `f.i64("recipe", 7)`.
 
 See `sdk/examples/trigger_source/` for a complete runnable source plugin.
 
-### Reading a record from a script
+### Reading a pack from a script
 
-Scripts read the current event via `xi::current_trigger()`:
+Scripts read the current event via `xi::current_trigger()`; the payload is
+the trigger's pack (`t.pack()`, a `ScriptPack`):
 
 ```cpp
 #include <xi/xi_use.hpp>
-void xi_inspect_entry(int frame) {
-    auto t = xi::current_trigger();
+XI_INSPECT_ENTRY(t, frame) {         // t = the trigger, passed in explicitly
+    (void)frame;
     if (!t.is_active()) return;
-    VAR(id,    t.id_string());
-    VAR(frame, t.image("frame"));    // key matches what the source emitted
-    auto meta = t.meta();            // the metadata doc, if any
+    auto id = t.id_string();
+    if (auto f = t.pack()) {                 // empty if the event carries no pack
+        auto img = f.get_image("frame");     // key matches what the source emitted
+        int64_t seq = f.get_i64("seq").value_or(-1);   // metadata = ordinary entries
+        // Surface results by pushing a pack to the expose sink:
+        xi::ScriptPackBuilder b;
+        b.add_str("$channel", "main");
+        if (img) b.add_image("frame", *img);
+        b.add_str("id", id);
+        xi::use("expose").push(b.seal());
+    }
 }
 ```
 
-`t.image(key)` fetches an image by the key the source used; `t.sources()`
-lists every source that contributed; `t.meta()` returns the metadata doc.
-
-For the common **single-image** source — `Record().image("frame", img)` — the
-frame is stored under that key (`"frame"`), so `t.image("frame")` works
-identically whether the frame arrived from a live source, a `cmd:run --frame`
-inject, or a replay. As a convenience, a single-image event also resolves under
-**any** key, so a legacy script reading by the source's instance name still gets
-the frame. Multi-image records are matched strictly by key (`"cam_left"` etc.).
+`f.get_image(key)` fetches an image entry by the key the source used;
+`f.get_i64/get_str/...` read metadata entries; `f.for_each(...)` enumerates
+an unknown pack. The frame is stored under whatever key the source emitted
+(`"frame"` above), so the read works identically whether the frame arrived
+from a live source, a `cmd:run --frame` inject, or a replay.
 
 ### Correlating multiple sources
 
 Bus correlation policies were removed — there is no `set_trigger_policy`.
 To fire one inspection from several sources "at the same event" (e.g. a
 hardware-synced stereo pair), write a **gathering plugin**: it subscribes
-to the source instances, combines their latest frames into one record
-(distinct keys like `"left"` / `"right"`, optionally sharing a trigger
-id), and `emit_record`s that single combined record. See
-`examples/stereo_sync/` for a paired-cameras reference.
+to the source instances, combines their latest frames into ONE pack
+(distinct keys like `"left"` / `"right"`, optionally sharing a trigger id),
+and `emit()`s that single combined pack. See `examples/stereo_sync/` for a
+paired-cameras reference.
 
 ### Recording and replay
 
 Replay is a plugin, not a core feature. The **buffer_replay** plugin
-captures emitted records and re-emits them through the same
-`emit_record` path, so the whole pipeline sees them identically to a
-live run — good for regression tests and off-line tuning. See
-`examples/buffer_replay_demo/`.
+captures emitted packs and re-emits them through the same `emit()` path,
+so the whole pipeline sees them identically to a live run — and because a
+sealed pack is immutable, the re-emit is **byte-lossless**. Good for
+regression tests and off-line tuning. See `examples/buffer_replay_demo/`.
 
 ---
 
@@ -405,17 +447,27 @@ sdk/
 ├── scaffold.mjs        ← CLI: scaffold a new plugin from a template
 ├── scaffold/render.mjs ← shared template renderer (used by extension too)
 ├── templates/          ← single source of truth for both VS Code + CLI
-│   ├── easy/           ← minimal pass-through (constructor / def / process / exchange)
-│   ├── medium/         ← image processor + UI (threshold + inline pan/zoom preview)
-│   ├── expert/         ← stateful source with worker thread + UI (start/stop)
+│   │                     ONE xi::Plugin skeleton, three layers (see below)
+│   ├── easy/           ← Layer 0: process() only — the bare skeleton
+│   ├── medium/         ← Layer 1: + config/params (xi::Json) + status() + image op + UI
+│   ├── expert/         ← Layer 2: + source worker (xi::spawn_worker) emitting via emit() + UI
 │   └── _shared/        ← reusable HTML snippets (image_viewer_widget.html)
-└── examples/
+└── qa/
     ├── hello/          ← 1 file, no state, no UI — the "hello world"
     ├── counter/        ← persistent state + minimal UI (xi::Json)
     ├── invert/         ← image-in → image-out
     ├── histogram/      ← image analysis with rich JSON output
-    └── trigger_source/ ← image source using xi::emit_record (push frames)
+    └── trigger_source/ ← image source using new_pack()/emit() (push frames)
 ```
+
+**One spine, three layers.** The `easy` / `medium` / `expert` templates are the
+same `xi::Plugin` skeleton with progressively more turned on — never three
+different architectures. `easy` overrides `process()` only; `medium` adds
+config/params + `status()` + a real image op; `expert` adds a background source
+worker (`xi::spawn_worker`) that pushes frames via `emit()`. Because every tier
+inherits `xi::Plugin`, every tier gets `pool_image()`, `status()`, `compress()`,
+`emit()`, and the capability wrappers for free — the tier you pick decides how
+much is *enabled*, not which base class or style you learn.
 
 Two ways to start a new plugin:
 
@@ -435,7 +487,7 @@ Two ways to start a new plugin:
    Adds CMakeLists + README so it builds on its own. Same templates as
    the in-project path; output is byte-identical for shared files.
 
-The `examples/` folder shows what to look at for specific patterns
+The `qa/` folder shows what to look at for specific patterns
 (state, image ops, trigger source). Read them in order — each adds one
 capability.
 
@@ -596,11 +648,12 @@ transfer between machines, so keep the two suites separate.
 - **Hot reload**: the host reloads your DLL on rebuild; instance state is
   preserved (backed by `get_def`/`set_def`), so you can iterate without
   restarting the whole host
-- **Don't block**: `process()` runs on the inspection thread. If you need
-  to wait (hardware, network), do it on your own worker thread (a source
-  plugin's `start()`/`stop()` thread that calls `emit_record`)
-- **Sharing images is free**: `xi::Image` uses a `shared_ptr` to pixels —
-  copying a Record does not copy image bytes
+- **Don't block**: `process()` runs on a dispatch worker thread. If you
+  need to wait (hardware, network), do it on your own worker thread (a
+  source plugin's `xi::spawn_worker` capture thread that calls `emit()`)
+- **Sharing images is free**: images live in the host pool and cross the
+  pack by refcount (`adopt_image`) — handing a frame to the output pack
+  copies no pixel bytes
 - **Raw host handles** (rare): if you need RAII over an
   `xi_image_handle` — e.g. passing a frame between plugins without
   decoding it — use the `HostImage` factories from `xi_abi.hpp`:

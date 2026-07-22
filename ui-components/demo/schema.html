@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>controls plet — mountSchema (real xi-* widgets)</title>
+<link rel="stylesheet" href="../src/vscode-theme.css">
+<style>
+  body{margin:0;background:#0e1116;color:#e6edf3;font:13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;padding:24px}
+  .panel{max-width:520px;margin:0 auto;background:#161b22;border:1px solid #2b3444;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.5);overflow:hidden}
+  .panel > header{display:flex;align-items:center;gap:8px;padding:11px 15px;background:linear-gradient(#1b2230,#141a22);border-bottom:1px solid #2b3444}
+  .panel > header h1{font-size:13px;margin:0;color:#8b98a9;font-weight:600}
+  .panel > header .tag{margin-left:auto;font-size:10px;color:#4b9fff;border:1px solid #23406a;border-radius:5px;padding:1px 7px}
+  #host{padding:14px}
+  /* layout hooks mountSchema emits */
+  .xi-tabbar{display:flex;gap:2px;border-bottom:1px solid #2b3444;margin:-14px -14px 14px;padding:6px 10px 0;background:#12161d}
+  .xi-tab{background:none;border:none;border-bottom:2px solid transparent;color:#8b98a9;font-size:12px;padding:9px 13px;cursor:pointer}
+  .xi-tab.active{color:#e6edf3;border-bottom-color:#4b9fff}
+  .xi-grid{gap:12px !important;margin-bottom:10px}
+  .xi-section{border:1px solid #2b3444;border-radius:9px;background:#1c2230;padding:10px 12px;margin-bottom:12px}
+  .xi-section-title{font-size:12px;margin:0 0 8px;color:#e6edf3}
+  .xi-control{min-width:0}
+  .xi-title{font-size:11px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:#8b98a9;margin:2px 0 8px}
+  .xi-label{font-size:12px;color:#8b98a9;margin:0 0 8px}
+  .xi-divider{border:none;border-top:1px solid #2b3444;margin:12px 0}
+  .xi-readout{background:#0b1622;border:1px solid #2b3444;border-radius:7px;padding:8px 11px}
+  .xi-readout-k{font-size:10px;color:#8b98a9}.xi-readout-v{font-size:18px;font-weight:600;margin-top:2px}
+  .xi-view{border:1px dashed #2b3444;border-radius:8px;min-height:120px;display:flex;align-items:center;justify-content:center;color:#8b98a9;font-size:12px;background:#05070c}
+  .xi-view::after{content:"▶ live-view mounts here · " attr(data-channel)}
+  .xi-button{width:100%;padding:9px;border-radius:7px;border:1px solid #2b3444;background:linear-gradient(#232c3b,#1a212c);color:#e6edf3;font-weight:600;cursor:pointer}
+  #log{max-width:520px;margin:12px auto 0;font:11px/1.5 monospace;color:#8b98a9}
+</style></head>
+<body>
+<div class="panel">
+  <header><h1>cd · controls_demo</h1><span class="tag">pluginlet · $schema · mountSchema</span></header>
+  <div id="host"></div>
+</div>
+<div id="log">— edits log here —</div>
+<script type="module">
+  import "../dist/xi-components.esm.js";                 // registers <xi-*>
+  import { mountSchema } from "../src/auto-panel.mjs";
+
+  const $schema = { type:"root", children:[
+    { type:"tab", title:"Capture", children:[
+      { type:"control", widget:"title", label:"Camera" },
+      { type:"grid", columns:12, children:[
+        { type:"control", widget:"slider", key:"fps", label:"Frame rate", min:1, max:60, span:6 },
+        { type:"control", widget:"number", key:"gain", label:"Gain", min:0.1, max:4, step:0.1, span:6 },
+        { type:"control", widget:"toggle", key:"streaming", label:"Streaming", span:6 },
+        { type:"control", widget:"dropdown", key:"mode", label:"Mode", options:["fast","accurate"], span:6 },
+        { type:"control", widget:"radio", key:"trigger", label:"Trigger", options:["soft","hardware","free"], span:12 },
+      ]},
+      { type:"control", widget:"divider" },
+      { type:"control", widget:"view", channel:"ui/cd/preview", label:"Live", span:12, rows:6 },
+    ]},
+    { type:"tab", title:"Output", children:[
+      { type:"section", title:"Results", children:[
+        { type:"grid", columns:12, children:[
+          { type:"control", widget:"readout", key:"ticks", label:"Ticks", span:6 },
+          { type:"control", widget:"readout", key:"last_fps", label:"FPS in use", span:6 },
+        ]},
+      ]},
+      { type:"control", widget:"button", command:"reset", label:"Reset" },
+    ]},
+  ]};
+  const def = { fps:30, gain:1.6, streaming:true, mode:"accurate", trigger:"hardware",
+                ticks:"7", last_fps:"30", $v:1, $rev:1, $schema };
+
+  const logEl = document.getElementById("log");
+  const client = {
+    async getInstanceDef(){ return { ...def }; },
+    async setInstanceDef(n, d){ logEl.textContent = "set_instance_def(cd, {"+Object.keys(d).filter(k=>!k.startsWith("$")).map(k=>k+"="+d[k]).join(", ")+"})"; },
+    exchangeInstance(n, c){ logEl.textContent = "exchange(cd, "+JSON.stringify(c)+")"; },
+  };
+  await mountSchema(document.getElementById("host"), { client, instance:"cd" });
+  window.__ready = true;
+</script>
+</body></html>

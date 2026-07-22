@@ -14,7 +14,7 @@
 </head>
 <body>
     <h2>Histogram</h2>
-    <div class="hint">Drives after every inspection. Feed this an image via <code>histogram0.process(Record().image("src", img))</code>.</div>
+    <div class="hint">Drives after every inspection. Feed this a pack with an image entry keyed <code>"src"</code> via <code>xi::use("histogram0").process(pack)</code>.</div>
     <canvas id="hist" width="256" height="220"></canvas>
     <div class="stats">
         <div class="k">Pixels</div>        <div class="v" id="pixels">–</div>
@@ -44,7 +44,7 @@
 
     window.addEventListener('message', e => {
         const m = e.data;
-        if (m.type === 'status' || m.type === 'process_result') {
+        if (m.type === 'status') {
             if (Array.isArray(m.counts)) draw(m.counts);
             document.getElementById('pixels').textContent = m.pixels ?? '–';
             document.getElementById('mean').textContent   = fmt(m.mean,   2);
@@ -54,10 +54,10 @@
         }
     });
 
-    // Poll: ask for fresh output every 500ms. The extension's wrapper
-    // forwards preview/process results back as {type:'process_result'}.
+    // Poll: ask the plugin for its latest snapshot every 500ms. exchange()
+    // replies with the last histogram JSON (kept by process()).
     setInterval(() => {
-        vscode.postMessage({ type: 'request_process', cmd: { command: 'get_status' } });
+        vscode.postMessage({ type: 'exchange', cmd: { command: 'get_status' } });
     }, 500);
 </script>
 </body>

@@ -1,10 +1,10 @@
 # Adding a plugin
 
 A plugin is a C++ DLL that exports a small C ABI (`xi_plugin_create`,
-`xi_plugin_destroy`, `xi_plugin_process`, `xi_plugin_exchange`,
-`xi_plugin_get_def`, `xi_plugin_set_def`). The backend loads it at
-project-open time and the inspection script reaches it via
-`xi::use("instance_name")`.
+`xi_plugin_destroy`, `xi_plugin_exchange`, `xi_plugin_get_def`,
+`xi_plugin_set_def`, plus the `xi.pack@1` data-plane door published by
+`xi_plugin_get_interface`). The backend loads it at project-open time and the
+inspection script reaches it via `xi::use("instance_name")`.
 
 > **Why you're writing a plugin — the project's spine.** xInsp2 is built on three
 > non-negotiable principles ([README → Core principles](../../README.md#core-principles--the-spine-do-not-drift),
@@ -15,8 +15,8 @@ project-open time and the inspection script reaches it via
 > author:
 > - **Your plugin owns its domain logic + state** — not the core, not the script.
 >   The script just wires; the core just dispatches. Keep the smarts in here.
-> - **Respect the hot path** — `process()` runs per frame. Zero-copy (images *and*
->   JSON already move by pointer — don't copy them), no I/O or allocation you can
+> - **Respect the hot path** — `process()` runs per frame. Zero-copy (images ride
+>   the pack as pool handles — don't copy them), no I/O or allocation you can
 >   avoid, measure before trading throughput for convenience.
 > - **A feature that feels like it needs a core change almost never does.** Reach
 >   for plugin composition first; the platform stays minimal precisely so it stays
@@ -39,10 +39,10 @@ then export to standalone when you're ready to share.
 > contract, image-handle refcounts, and the UI patterns: keep UX flow in the
 > webui not C++, and don't reimplement geometry in JS).
 
-The repo ships reference plugins to crib from: `plugins/` (source/sink/processor
+The repo ships reference plugins to crib from: `toolbox/` (source/sink/processor
 basics — `mock_camera`, `blob_analysis`, `data_output`, `json_source`,
-`record_save`, `record_load`, `synced_stereo`, `expose`) and richer worked examples under
-`examples/*/plugins/`.
+`record_save`, `cache`, `synced_stereo`, `expose`) and richer worked examples under
+`qa/*/plugins/`.
 
 ---
 
@@ -316,8 +316,8 @@ deciding "unchanged" and running stale code forever.
 > command once and it loads.
 
 > **Manifest flags are re-read on every reload.** `reentrant` (alias `thread_safe`),
-> `sink` / `role`, `json_fallback`, and `factory` are re-parsed from `plugin.json`
-> on **all** load paths — full `open_project`, the `Ctrl+S` cl.exe hot-recompile,
+> `sink` / `role`, `json_fallback`, `on_fault`, and `factory` are re-parsed from
+> `plugin.json` on **all** load paths — full `open_project`, the `Ctrl+S` cl.exe hot-recompile,
 > *and* the cmake **Rebuild** — not just the first open. Toggle `"reentrant": true`
 > → `false` and Save/Rebuild, and the host immediately starts serializing that
 > instance again (the dispatch admission cap follows the live flag); flip a plugin
@@ -341,18 +341,23 @@ class MyPlugin : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    xi::Record process(const xi::Record& in) override {
-        auto src = in.get_image("frame");                 // read-only INPUT view
-        auto dst = pool_image(src.width, src.height, 1);  // writable OUTPUT
-        cv::GaussianBlur(xi::as_cv_read(src), xi::as_cv_write(dst), {0, 0}, 2.0);
-        return xi::Record().image("blurred", dst);
+    void process(xi::PackIn& in, xi::PackOut& out) override {
+        auto src = in.image("frame");                     // zero-copy pixel span
+        if (!src) { out.fault("no_frame", "frame"); return; }
+        auto dst = pool_image(src->width, src->height, 1);   // writable OUTPUT slot
+        xi::Image in_view = xi::Image::view(src->width, src->height, src->channels,
+                          static_cast<const uint8_t*>(src->pixels));   // zero-copy adapter
+        cv::cvtColor(xi::as_cv_read(in_view), xi::as_cv_write(dst), cv::COLOR_RGB2GRAY);
+        out.image("gray", dst.width, dst.height, dst.channels, dst.data());  // pack entry
     }
 };
 
 XI_PLUGIN_IMPL(MyPlugin)
+XI_PLUGIN_PACK_DOOR(MyPlugin)     // publishes the xi.pack@1 data-plane door
 ```
 
-`xi::Plugin` is the base; `XI_PLUGIN_IMPL` generates the C ABI exports.
+`xi::Plugin` is the base; `XI_PLUGIN_IMPL` generates the C ABI exports and
+`XI_PLUGIN_PACK_DOOR` publishes the pack door the host runs per frame.
 
 ### Concurrency & config-change safety — which plugin type are you?
 
@@ -404,8 +409,45 @@ live. The canonical lock-free shape: keep the live config in a
 `std::atomic<std::shared_ptr<const T>>` that `process()` reads, build a new one in
 `prepare()`, swap the pointer in `commit()`. Omit all this and a config change is a
 plain (host-serialized) `set_def` — fine for light plugins. The orchestrator drives
-it via `prepare_instance` + `commit_group`; see `plugins/config_swap_probe/` for a
+it via `prepare_instance` + `commit_group`; see `toolbox/config_swap_probe/` for a
 complete example and [`../reference/c-abi.md`](../reference/c-abi.md) §1.
+
+### After a caught crash — `on_fault` policy (optional)
+
+The host **catches** a `process()`/`exchange()` fault (an access violation, a
+throw) so one bad frame can't take the backend down: the fault is logged, the
+instance is marked `degraded` in the health contract (`get_health`), the frame is
+dropped, and — by default — **the same instance is reused for the next frame**.
+That is exactly right for a **stateless** operator. But if your plugin faults
+*midway through mutating persistent state* (a half-updated model, a container
+resized but not filled), reusing it means the next frame reads inconsistent state
+and can produce a silently-wrong result. `on_fault` lets you choose what happens:
+
+| `on_fault` | After a caught fault | Use it when |
+|---|---|---|
+| `reuse` *(default)* | logged + `degraded`; instance stays in service | your `process()` holds no cross-frame state that a mid-fault could corrupt (stateless operators — most plugins) |
+| `reinit` | the instance is **torn down and re-created + re-prepared from its last committed config** before its next use, dropping in-flight state; after 3 consecutive rebuild failures it escalates to `refuse` | you keep mutable state across frames (accumulators, trackers, a loaded model) whose invariants a mid-fault could break |
+| `refuse` | the instance is **pulled from service**: subsequent `process()` calls fail fast (never entering your code) and it shows `failed`/`quarantined` in `get_health`, until an operator re-enables it | a wrong-but-not-crashing result is worse than no result — better to stop the station than pass a bad part |
+
+Declare it as a **per-plugin default** in `plugin.json`:
+
+```json
+{ "name": "blob_tracker", "reentrant": false, "on_fault": "reinit" }
+```
+
+and override it **per instance** in `instance.json` (`"on_fault": "refuse"`) when
+one deployment of the plugin needs a different posture. Absent/unknown ⇒ `reuse`,
+so existing plugins are unaffected. Like the other dispatch flags it is honoured
+**only as a top-level key** and is re-read on reload.
+
+A `reinit` rebuild rides the same lifecycle as a plugin reload — it re-runs your
+`xi_plugin_create` + restores the last committed config, so **anything your
+constructor/`set_def` rebuilds is restored, and anything only mutated during
+`process()` is dropped** (that's the point). To **re-enable** a `refuse`-d
+instance, re-commit its config (`set_instance_def` / `commit_group`) — the same
+action an operator takes to push a corrected config. See
+[`../new_gen/04-health-contract.md`](../new_gen/04-health-contract.md) and the
+`get_health` reason codes in [`../reference/ws-protocol.md`](../reference/ws-protocol.md).
 
 ### Image ops
 
@@ -432,6 +474,17 @@ encoding the **read-only-input / writable-output invariant** in the types:
 > returns null for a shared handle). **Never** do an in-place cv:: op on an input;
 > always `as_cv_read(src)` → `as_cv_write(dst)` into a separate `pool_image`.
 
+> **A `pool_image` slot is UNINITIALISED memory.** The pool no longer zero-fills
+> a fresh buffer (a recycled slot carries a previous image's bytes). **Fully
+> overwriting the output is the producer's responsibility.** A whole-frame op
+> (`cv::threshold`, `cv::cvtColor`, a full paint loop) is fine — it writes every
+> pixel. But a **partial** paint (drawing shapes/text onto a "blank" canvas,
+> filling a sub-region) must `memset`/clear the bytes it does not write first, or
+> the stale pixels ride onto the wire and into recorded frames. The same holds
+> for a minted blob payload (`blob_mint` / `PackOut::blob_mint`): its payload is
+> uninitialised; only the blob **head pad** stays deterministically zero (wire
+> determinism).
+
 Don't hand-roll Image⇄Mat copies or the RGB↔BGR flip — `<xi/xi_cv.hpp>` ships the
 canonical helpers: `xi::to_cv(img)` (owning copy), `xi::from_cv_mat(mat)` /
 `xi::to_image(mat)` (Mat→owning Image), and `xi::encode_preview(img, ".jpg")`
@@ -440,16 +493,18 @@ canonical helpers: `xi::to_cv(img)` (owning copy), `xi::from_cv_mat(mat)` /
 Pattern:
 
 ```cpp
-auto src = input.get_image("src");                       // read-only INPUT view
-auto dst = pool_image(src.width, src.height, 1);         // writable OUTPUT sink
+auto s = in.image("src");                                // zero-copy pixel span
+auto dst = pool_image(s->width, s->height, 1);           // writable OUTPUT sink
+xi::Image src(s->width, s->height, s->channels,
+              static_cast<const uint8_t*>(s->pixels));   // cv adapter over the span
 cv::GaussianBlur(xi::as_cv_read(src), xi::as_cv_write(dst), {0, 0}, 2.0);
-return xi::Record().image("blurred", dst);               // zero-copy across ABI
+out.image("blurred", dst.width, dst.height, dst.channels, dst.data());  // pack entry
 ```
 
-**Pixel order is RGB**, not OpenCV's default BGR. The decoder behind
-`xi::imread` is stb_image, which emits RGB-ordered pixels; that order
-flows through the host pool unchanged. When you hand a Mat to
-`cv::cvtColor`, use `cv::COLOR_RGB2*` (e.g. `RGB2GRAY`, `RGB2HSV`),
+**Pixel order is RGB**, not OpenCV's default BGR. The `xi.image.decode`
+capability (provided by the `imgcodec` plugin) decodes with stb_image, which
+emits RGB-ordered pixels; that order flows through the host pool unchanged. When
+you hand a Mat to `cv::cvtColor`, use `cv::COLOR_RGB2*` (e.g. `RGB2GRAY`, `RGB2HSV`),
 **not** `BGR2*`. Mixing them up is a silent failure — red and blue
 swap, hue values land 120° away from where they should be, and the
 plugin still "works", just on the wrong colour. Corollary:
@@ -459,57 +514,154 @@ first — otherwise the preview's colours are R/B-swapped.
 
 **You don't manage refcounts yourself.** `pool_image()` returns an
 `xi::Image` that holds the pool handle's ref via its internal
-`shared_ptr`. Storing it in a local, returning it through
-`xi::Record::image("key", img)`, copy-constructing — all the obvious
-C++ patterns do the right thing. The cross-ABI return path picks the
-handle up with one `addref` and the local `xi::Image` releases its
-ref when it goes out of scope. Net refcount: 1, owned by the receiver.
-You never call `image_addref` / `image_release` from plugin code.
+`shared_ptr`. Storing it in a local, adopting it into the output pack
+with `out.adopt_image("key", w, h, c, img.pool_handle())`,
+copy-constructing — all the obvious C++ patterns do the right thing.
+`adopt_image` picks the handle up with one `addref` and the local
+`xi::Image` releases its ref when it goes out of scope. Net refcount: 1,
+owned by the receiver. You never call `image_addref` / `image_release`
+from plugin code. (`out.image(...)` instead *copies* the pixels into a
+fresh pool slot — use it when the source isn't already a pool image.)
 
 For the API contracts in detail, see
 [`docs/reference/c-abi.md`](../reference/c-abi.md).
 
-### Building a richer output Record
+### Building a richer output — nested structures
 
-`xi::Record::set` is **not** scalar-only — nest sub-records and build arrays, so a
-variable-length result set needs no hand-rolled JSON string:
+Scalars and images are pack entries by key. A *variable-length* or *nested*
+result set (an array of objects, a sub-record) goes in as **one nested
+canonical-msgpack entry** — msgpack does the nesting, so you need no
+flattened-key convention and no hand-rolled JSON string. Build it with
+`xi::mp::Writer` and add it with `out.mp(key, bytes, len)`:
 
 ```cpp
-xi::Record out;
-out.set("count", n);
-out.set("best", xi::Record().set("x", bx).set("y", by).set("score", bs));   // nested object
-for (auto& f : features)
-    out.push("features", xi::Record()                                        // array of objects
-        .set("pose", xi::Record().set("x", f.x).set("y", f.y).set("angle", f.angle))
-        .set("score", f.score));
-return out;
+xi::mp::Writer mw;
+mw.array((uint32_t)blobs.size());               // an array of per-blob maps
+for (auto& b : blobs) {
+    mw.map(3);
+    mw.key("area");    mw.int_(b.area);
+    mw.key("cx");      mw.float_(b.cx);
+    mw.key("contour"); mw.array((uint32_t)b.contour.size());   // nested array
+    for (auto& [px, py] : b.contour) {
+        mw.map(2);
+        mw.key("x"); mw.int_(px);
+        mw.key("y"); mw.int_(py);
+    }
+}
+out.mp("blobs", mw.bytes().data(), mw.bytes().size());
 ```
 
-`push(key, …)` appends to (and creates) an array; `set(key, const Record&)` nests
-an object (its images are merged in under `"<key>.<imgkey>"`, not dropped);
-`set_value(key, Value)` deep-copies any value from another Record (the safe
-cross-doc copy verb that replaced the old raw `set_raw` escape hatch). See
+A consumer reads it back with `xi::mp::Reader` over the byte span `in.mp("blobs")`
+returns. `toolbox/blob_analysis` is the worked example — it packs its whole
+per-blob array, each blob's contour polygon included, into a single `"blobs"`
+entry. Prefer contract-generated key constants
+(`contract/plugins/<name>.decl.json` → `<name>_keys.gen.h`) over string literals
+so producer and consumers can't drift. See
 [`reference/data-types.md`](../reference/data-types.md).
+
+### The pack door — your plugin's data plane
+
+Your plugin's data plane is the **Pack** — a sealed, immutable keyed buffer
+(`key → typed entry`; an image is just an entry) that crosses the ABI as an
+opaque handle ([`../internals/pack-plane.md`](../internals/pack-plane.md)). You
+override one method and publish one macro:
+
+```cpp
+class BlobAnalysis : public xi::Plugin {
+public:
+    using xi::Plugin::Plugin;
+
+    // The pack door: sealed pack in (borrowed), entries out.
+    void process(xi::PackIn& in, xi::PackOut& out) override {
+        auto gray = in.image("gray");                    // zero-copy view
+        if (!gray || !gray->pixels) {
+            out.fault(xi::contract::kMissingInput, "gray",
+                      "blob_analysis(pack): required image 'gray' is missing");
+            return;                                      // fault = a NORMAL pack
+        }
+        const int  thresh = (int)in.i64_or("threshold", 128);
+        const bool invert = in.bool_or("invert", false); // reads BOOL, or legacy i64 0/1
+        // ... compute ...
+        out.image("binary", w, h, 1, bin.data());
+        out.i64("blob_count", (int64_t)count);
+        out.boolean("pass", count > 0);                  // a real BOOL entry
+    }
+};
+XI_PLUGIN_IMPL(BlobAnalysis)
+XI_PLUGIN_PACK_DOOR(BlobAnalysis)     // publishes xi_plugin_get_interface("xi.pack", 1)
+```
+
+`XI_PLUGIN_PACK_DOOR` goes *after* `XI_PLUGIN_IMPL`; it exports the door the host
+probes (`xi_plugin_get_interface("xi.pack", 1)`) to learn your plugin speaks
+packs. A plugin with no data plane — a pure lib/capability provider (see below) —
+simply doesn't add it. The worked exemplars: `toolbox/blob_analysis` (processor
+door, contract-generated keys), `toolbox/expose` (a **generic sink** — walks any
+pack with
+`in.count()` / `in.key_at(i)` / `in.tag_at(i)` without knowing its producer),
+`toolbox/mock_camera` (pack-mode emit), `toolbox/record_replay` (replay
+source).
+
+**Faults, not nulls.** A *contract* failure (missing input, wrong type) is a
+**normal sealed pack** carrying `$fault` — that's what `out.fault(code, key,
+detail)` writes (reuse the `xi::contract` reason codes) — so the caller always
+gets a pack to route. `XI_PACK_NULL` is reserved for hard internal failure (the
+macro glue returns it if your door throws). A fault input never reaches you at
+all: the host short-circuits it, minting a propagated fault pack with your hop
+appended — so your door body can assume a non-fault input.
+
+**`$src`/`$prov` are stamped for you — at the door.** On every **non-empty**
+door output the glue stamps, *before seal* (sealed packs are immutable):
+`$src` = your instance name, `$prov` = the input's chain + your hop
+(`"cam0/det0"` style, oldest→newest). To override, call `out.src(...)` /
+`out.prov(...)` — those exact methods, not a raw `out.str("$src", ...)`; the
+glue detects only them. An **untouched** `PackOut` seals *empty* and gets no
+stamp — empty is the door's absence sentinel, and stamping identity onto
+nothing would turn absence into presence.
+
+**What `emit()` does NOT stamp.** A pack *source* (`auto p = new_pack(); …
+emit(std::move(p));`) gets **no** automatic `$src`/`$prov` — an emitted pack's
+entry set is the producer's contract (`record_replay` must re-emit disk dumps
+byte-identical; a gatherer's published shape must not grow surprise entries).
+Want attribution on an emitted pack? Call `p.src(name())` yourself. Same for
+ordering: the host can't stamp `"$seq"` into a sealed pack, so a producer that
+wants seq-correlation adds `p.i64("$seq", xi::run_id())` before seal.
+
+**Bool entries.** `out.boolean()` writes a real BOOL-tagged entry (the additive
+v1 tail; on a host without the tail it degrades to i64 0/1). Reads are
+fail-closed per tag — `in.boolean()` won't coerce an i64 — so when you accept
+both eras, read with `in.bool_or(key, def)`, which tries BOOL then legacy
+i64 0/1.
+
+**Structured results** (arrays, nested objects) go in as **one nested
+canonical-msgpack entry**: build with `xi::mp::Writer`, add with `out.mp(key,
+bytes, len)` — see how `blob_analysis` packs its per-blob array (contours
+included) into a single `"blobs"` entry. And prefer contract-generated key
+constants (`contract/plugins/<name>.decl.json` → `<name>_keys.gen.h`) over
+string literals, so producer and consumers can't drift.
+
+**Lib plugins — capability providers (the imgcodec pattern).** A plugin whose
+job is a *service* other plugins call (an encoder, a decoder, a model runner)
+doesn't need a data plane at all: register **named capabilities** instead.
+From lifecycle code (constructor is fine — never from inside a door), resolve
+`host->get_interface("xi.cap.provider", 1)` and register a pack-door-shaped
+handler per capability name (`"xi.jpeg.encode"`); unregister in your
+destructor. Consumers call it by name via `get_interface("xi.cap", 1)` →
+`call(name, in, &out)`. Handlers **must be thread-safe** (the funnel does not
+serialize them), version via the `"$v"` entry *inside* the request pack, and
+answer a bool `"$probe": true` request with a `"$versions"` string doing no
+work. `toolbox/imgcodec` (`"lib": true`, `reentrant: true`,
+`on_fault: refuse`) is the reference; the exact vtables + result codes are in
+[`../reference/c-abi.md`](../reference/c-abi.md) §6.
 
 ### Test `process()` headlessly — `xi_run_plugin`
 
-To exercise a plugin's `process()` on an image **without** VS Code / the backend /
-a WS connection, build the host-mock CLI once and point it at any plugin DLL:
-
-```bat
-set XINSP2_ROOT=C:\path\to\xInsp2
-cmake -S %XINSP2_ROOT%\sdk\host_mock -B %XINSP2_ROOT%\sdk\host_mock\build -A x64 -DXINSP2_ROOT=%XINSP2_ROOT%
-cmake --build %XINSP2_ROOT%\sdk\host_mock\build --config Release
-
-xi_run_plugin <plugin.dll> --image src=in.png --def "{...}" --out-dir out --runs 1
-```
-
-It stands up the real `ImagePool` host_api (so `pool_image` + the image getters
-behave as in the backend), creates one instance, optionally `set_def`s a config,
-loads each `--image` (OpenCV, BGR→RGB), runs `process()`, and prints the output
-Record JSON + writes any output images (RGB→BGR) to `--out-dir`. `--runs N` repeats
-for stateful plugins. Great for CI / offline geometry checks of a `build:cmake`
-plugin's core.
+> **Status at THE CUT:** the host-mock CLI (`sdk/host_mock/xi_run_plugin.cpp`)
+> still drives the **retired Record door** and is awaiting its v12 port to the
+> pack door — it does not exercise a pack-only plugin yet. Until that port
+> lands, test headlessly through a live backend instead: the `qa/qa_*`
+> drivers (e.g. `qa/qa_use_pack_door`) run a real project against your
+> plugin's pack door end-to-end, and `xi_test.hpp` covers the pure-C++ core of
+> a `build:cmake` plugin without any host at all.
 
 ---
 
@@ -555,7 +707,7 @@ captured values into your own threads.
 |---|---|---|---|---|
 | `xi_plugin_abi_version` | pre-create (load gate) | control thread, before any instance exists | n/a (pure constant) | none |
 | `xi_plugin_create` | pre-create → live | control thread (`create_instance` / `open_project` / rename / rebuild) — never a dispatch worker | implicit: the instance isn't visible to dispatch until `create` returns | `ImagePoolOwnerScope` active — ctor images are owner-tagged & swept (`xi_plugin_manager.hpp:345,1803`). No trigger. |
-| `xi_plugin_process` | live | a **dispatch worker** thread (`service_main.cpp:159-163`); for a `sink`, staged & flushed in the ordered-emit gate | **gated** by `CallScope` — serialized per instance **unless** `reentrant=true` (`xi_cabi_adapter.hpp:242-248,286`) | `OwnerGuard(owner_id_)` set by the adapter (`:244`); the worker also holds the script's `current_trigger`. Both `thread_local` — do **not** cross into threads you spawn. |
+| `process` (xi.pack@1 door) | live | a **dispatch worker** thread (`service_main.cpp:159-163`); for a `sink`, staged & flushed in the ordered-emit gate | **gated** by `CallScope` — serialized per instance **unless** `reentrant=true` (`xi_cabi_adapter.hpp:242-248,286`) | `OwnerGuard(owner_id_)` set by the adapter (`:244`); the worker also holds the script's `current_trigger`. Both `thread_local` — do **not** cross into threads you spawn. |
 | `xi_plugin_exchange` | live | the caller's thread — control thread for a UI command (`service_main.cpp:262,2876`), or the inspect thread for a script `xi::use().exchange()` | **gated** by `CallScope` (`xi_cabi_adapter.hpp:227-234`) | `OwnerGuard(owner_id_)` (`:229`). No trigger guarantee. |
 | `xi_plugin_get_def` | live | control thread (project save) | **gated** by `CallScope` (`xi_cabi_adapter.hpp:210-217`) | `OwnerGuard(owner_id_)` (`:212`). |
 | `xi_plugin_set_def` | live | control thread (load / `set_instance_def` — `service_main.cpp:2804,3214`) | **gated** by `CallScope` (`xi_cabi_adapter.hpp:220-224`) — serialized vs `process` | `OwnerGuard(owner_id_)` (`:222`). |
@@ -646,35 +798,48 @@ forwards to your plugin's `exchange()` and posts the response back as
 `{ type: 'status', ... }`.
 
 **How do I emit images (camera / source)?**
-A source is an ordinary plugin: build an `xi::Record` carrying the frame (and any
-routing/context metadata — a command id, recipe, lane hint — the script needs)
-and hand it to the host with the one dispatch verb, `xi::emit_record` (ABI v6),
-from a worker thread. Each record dispatches one inspection. See the Expert
-template for a working synthetic source.
+A source is an ordinary plugin: build a **Pack** carrying the frame (and any
+routing/context metadata — a `seq` counter, a command id, a recipe — the script
+needs) and hand it to the host with `emit(std::move(f))` from a worker thread.
+Each emitted pack dispatches one inspection. See `mock_camera` for a working
+synthetic source.
+
+Spawn that worker with **`xi::spawn_worker`** (`<xi/xi_thread.hpp>`), not a raw
+`std::thread`: it installs the per-thread SEH translator + a top-level catch, so a
+stray fault in your grab loop is contained to the worker instead of taking the
+whole backend down. Paint frames into a `pool_image()` slot and emit them with
+`new_pack()` + the `emit()` member — the same blessed produce-and-hand-over path
+`process()` uses, no manual `host_->image_create` / refcount juggling. (The
+shipped `mock_camera` / `synced_stereo` / `json_source` sources all follow this
+pattern.)
 
 ```cpp
-auto rec = xi::Record()
-    .image("frame", img)
-    .set("command", "inspect_top")     // ← rides along as metadata
-    .set("recipe", 7);
-xi::emit_record(host(), name().c_str(), rec);   // id auto, ts = now
-// or, the member sibling that fills host()/name() for you:
-emit(rec);                                       // == the line above
+xi::Image img = pool_image(w, h, 3);
+// ... paint pixels into img.data() ...
+
+xi::PackOut f = new_pack();                        // host-side pack builder
+f.i64("seq", seq);                                 // rides along as an entry
+f.adopt_image("frame", w, h, 3, img.pool_handle());   // zero-copy pool-handle addref
+emit(std::move(f));                                // seals + hands to host dispatch
 ```
 
-The `emit(rec)` member (sibling of the free `xi::emit_record`, and of the
-output-verb member `emit_binary`) forwards to the free function with the
-plugin's own `host()`/`name()` — same staging, same optional `id`/`ts`
-defaults — so a source can't pass the wrong emitter name. The free function
-stays for out-of-class callers.
+`new_pack()` opens a builder on the host's `xi.pack@1` plane; `emit(PackOut&&)`
+seals it and forwards to `xi_pack_v1::emit_pack` with the plugin's own `name()`
+as the emitter (so a source can't pass the wrong emitter name). `id` defaults to
+a fresh trigger id, `ts` to host-now. `adopt_image` addrefs the pool handle (no
+heap-to-pool copy); `out.image(...)` is the copying alternative when the pixels
+aren't already a pool image. `emit()` deliberately stamps **nothing** — an
+emitted pack's entry set is the producer's contract (`record_replay` re-emits disk
+dumps byte-identical), so stamp `seq` / `$src` yourself if you want them.
 
-The metadata travels with the frame and the script reads it back with
-`xi::current_trigger().meta()` — no side-channel queue. It's handed over by
-pointer (zero-serialize). Multi-camera capture is a "gathering" plugin that emits
-one record carrying N named images. See
+The metadata rides as ordinary pack entries and the script reads it back off the
+trigger's pack — `current_trigger().pack().get_i64("seq")`,
+`.get_image("frame")` — no side-channel queue (see
+[`write-a-script.md`](./write-a-script.md)). Multi-camera capture is a "gathering"
+plugin that emits one pack carrying N named images. See
 [`docs/internals/dispatch.md`](../internals/dispatch.md).
 
-All plugins run in-process (cameras included), so `emit_record` always reaches the
+All plugins run in-process (cameras included), so `emit()` always reaches the
 real backend dispatcher — no special config is needed for source plugins. (A
 legacy `"isolation"` field in `instance.json` is accepted but ignored with a
 one-time deprecation warning; see
@@ -798,7 +963,7 @@ module.exports = { async run(h) {
 
 ### Instantiating an example/source-only plugin: `useProjectPlugin`
 
-Plugins that ship **source but no built DLL** (all the `examples/` plugins)
+Plugins that ship **source but no built DLL** (all the `qa/` plugins)
 can't be instantiated via the scan path — there's no DLL to load. Call
 **`h.useProjectPlugin(projectFolder)`** right after `createProject`: it copies
 the plugin's source into `<project>/plugins/<name>/` and reopens the project, so

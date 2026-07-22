@@ -1,0 +1,459 @@
+//
+// imgcodec.cpp — xi.imgcodec, the FIRST OFFICIAL LIB PLUGIN (docs/new_gen/14).
+//
+// A lib plugin has NO DATA PLANE: it never emits and nothing routes to it. On
+// create it registers capabilities with the host (get_interface
+// "xi.cap.provider"@1) and consumers call them by NAME through the host
+// forwarding funnel (get_interface "xi.cap"@1) — never through this DLL's
+// vtable.
+//
+// Capabilities (name-only registry; versioning rides IN the request pack):
+//
+//   "xi.jpeg.encode"  — Pack in:  image "image" (1/3/4-channel 8-bit),
+//                                 optional i64 "quality" (1..100, default from
+//                                 config), optional i64 "$v" (supported: 1),
+//                                 or bool "$probe": true (answers $versions).
+//                       Pack out: bin "jpeg" (the encoded bytes), i64
+//                                 "cache_hit" (1 = served from the dedup memo
+//                                 cache), i64 "encodes" (lifetime encode
+//                                 count — the dedup proof counter), i64 "hits".
+//                       DEDUP: keyed by the image's CONTENT identity (FNV-1a
+//                       over pixels + dims, the same identity the host's
+//                       xi.preview cache uses — sealed-pack pool handles are
+//                       not exposed through xi_pack_image, so content hash is
+//                       the stable identity available pre-v12) + quality. Two
+//                       consumers asking for the same sealed image encode ONCE
+//                       and receive byte-identical JPEG.
+//
+//   "xi.image.decode" — Pack in:  bin "data" (PNG/JPEG/BMP/TGA/GIF/PSD/HDR/PIC
+//                                 — stb_image, the same format set the host's
+//                                 former read_image_file slot decoded: that
+//                                 field was EVICTED at THE CUT (v12) and this
+//                                 capability IS its replacement — the only
+//                                 image-decode path left), optional i64
+//                                 "raw" (1 = preserve the file's NATIVE channel
+//                                 count, incl. 2-ch gray+alpha — the host sets
+//                                 this so the eviction is byte-for-byte), and
+//                                 optional "$v" / "$probe" as above.
+//                       Pack out: image "image" + i64 w/h/c for 1/3/4-channel;
+//                                 for a raw 2-channel result the pixels ride bin
+//                                 "pixels" + i64 w/h/c (the pack image type
+//                                 cannot tag 2 channels). Without "raw",
+//                                 gray+alpha is re-decoded to RGB (legacy shape).
+//
+// Contract failures are NORMAL sealed packs carrying the $fault entries
+// (pack_contract convention) — the funnel's rc stays 0; consumers route the
+// $fault. Hard internal failures return XI_PACK_NULL.
+//
+// ENCODER: xi::encode_jpeg (xi/xi_jpeg.hpp) — libjpeg-turbo's direct SIMD path
+// when XINSP2_HAS_TURBOJPEG is ON (the SAME opt-in the backend links), else
+// stb_image_write (vendored in backend/vendor, compiled into this DLL via
+// backend/src/stb_impl.cpp — the record_save pattern; deterministic bytes, zero
+// external deps). polaris2 ENCODE eviction: turbojpeg LEAVES the backend/core and
+// lands HERE, in the lib plugin, so the SIMD encoder + its deps consolidate
+// behind the capability boundary — the host's compress_sink delegates to
+// "xi.jpeg.encode" for perf parity with the pre-eviction in-core turbo path, and
+// at v12 core loses XINSP2_HAS_TURBOJPEG entirely. Same key/params as the core
+// encoder ⇒ byte-identical output engine-for-engine (turbo↔turbo, stb↔stb), so
+// the eviction is invisible to every consumer — the point of the boundary.
+//
+// THREAD SAFETY: handlers arrive concurrently from multiple dispatch threads
+// (the funnel does NOT serialize — the provider contract). The memo cache is
+// mutex-guarded; counters are atomics; config is read through the same mutex.
+//
+#include <xi/xi_abi.hpp>
+#include <xi/xi_image.hpp>
+#include <xi/xi_image_blob.hpp>  // xi::read_image_blob — read an xi/image blob (off the @1 adapter)
+#include <xi/xi_jpeg.hpp>   // xi::encode_jpeg — turbojpeg (opt-in) → stb fallback
+#include <xi/xi_json.hpp>
+#include <xi/xi_mp.hpp>     // canonical msgpack Writer — the xi/image blob descriptor
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <cstring>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+// stb prototypes (implementation compiled in via backend/src/stb_impl.cpp).
+// The JPEG WRITER is reached through xi::encode_jpeg (xi_jpeg.hpp declares its
+// own stbi_write_jpg_to_func extern); only the DECODE side is called directly.
+extern "C" unsigned char* stbi_load_from_memory(
+    const unsigned char* buffer, int len, int* x, int* y,
+    int* channels_in_file, int desired_channels);
+extern "C" void stbi_image_free(void* retval_from_stbi_load);
+
+namespace {
+constexpr const char* kVersions = "1";   // supported "$v" range, both capabilities
+}
+
+class ImgCodec : public xi::Plugin {
+public:
+    ImgCodec(const xi_host_api* host, const std::string& name)
+        : xi::Plugin(host, name) {
+        pk_  = pack_iface();    // xi.pack@1 (cached by the base)
+        pk4_ = pack4_iface();   // xi.pack@4 (blob door — decode output is a blob)
+        if (host && host->get_interface) {
+            provider_ = static_cast<const xi_cap_provider_v1*>(
+                host->get_interface("xi.cap.provider", 1));
+        }
+        if (!pk_ || !provider_) {
+            // Inert on a host without the planes (e.g. certify probes an older
+            // table): loadable, but it provides nothing and says so.
+            status("imgcodec: host lacks xi.pack@1/xi.cap.provider@1 — no capabilities registered");
+            return;
+        }
+        if (!pk4_) {
+            // HARD-REFUSE, not degrade: decode's output contract is a @4 blob
+            // (self-describing plane, spec 30) — on a @1-only host it could only
+            // answer $fault forever, and one hard fault would quarantine BOTH
+            // capabilities (on_fault:"refuse"), turning a host-table gap into a
+            // runtime mystery. Legacy (@1-only) compat is waived; be inert and
+            // name the gap at load time instead.
+            status("imgcodec: host lacks xi.pack@4 (blob door) — refusing to register (no capabilities)");
+            return;
+        }
+        int32_t r1 = provider_->register_capability("xi.jpeg.encode",  &h_encode, this);
+        int32_t r2 = provider_->register_capability("xi.image.decode", &h_decode, this);
+        registered_ = (r1 == XI_CAP_REG_OK && r2 == XI_CAP_REG_OK);
+        if (registered_) {
+            status("imgcodec: providing xi.jpeg.encode, xi.image.decode");
+        } else {
+            char m[128];
+            std::snprintf(m, sizeof(m),
+                          "imgcodec: registration failed (encode=%d decode=%d)",
+                          r1, r2);
+            status(m);
+        }
+    }
+
+    // Well-behaved lib: unregister on destroy. (The host's adapter-dtor owner
+    // sweep backstops a plugin that forgets — proven by cap_plane_test.)
+    ~ImgCodec() override {
+        if (provider_ && registered_) {
+            provider_->unregister_capability("xi.jpeg.encode", this);
+            provider_->unregister_capability("xi.image.decode", this);
+        }
+    }
+
+    // -- control surface ------------------------------------------------------
+    std::string exchange(const std::string& cmd) override {
+        auto p = xi::Json::parse(cmd);
+        const std::string command = p["command"].as_string();
+        if (command == "stats") {
+            // The dedup proof counter: tests/QA read encodes vs hits here.
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                "{\"encodes\":%lld,\"hits\":%lld,\"decodes\":%lld,"
+                "\"cache_entries\":%zu,\"registered\":%s}",
+                (long long)encodes_.load(), (long long)hits_.load(),
+                (long long)decodes_.load(), cache_size_(),
+                registered_ ? "true" : "false");
+            return buf;
+        }
+        if (command == "clear_cache") {
+            std::lock_guard<std::mutex> lk(mu_);
+            cache_.clear();
+            order_.clear();
+            return "{\"ok\":true}";
+        }
+        return exchange_unknown_command(command);
+    }
+
+    std::string get_def() const override {
+        std::lock_guard<std::mutex> lk(mu_);
+        char buf[128];
+        std::snprintf(buf, sizeof(buf),
+                      "{\"quality\":%d,\"cache_max\":%d,\"encode_max_concurrent\":%d}",
+                      quality_, cache_max_, max_concurrent_);
+        return buf;
+    }
+    bool set_def(const std::string& json) override {
+        auto p = xi::Json::parse(json);
+        if (!p.valid()) return false;
+        std::lock_guard<std::mutex> lk(mu_);
+        quality_   = clamp_q_(p["quality"].as_int(quality_));
+        cache_max_ = p["cache_max"].as_int(cache_max_);
+        if (cache_max_ < 1) cache_max_ = 1;
+        int mc = p["encode_max_concurrent"].as_int(max_concurrent_);
+        max_concurrent_ = mc < 0 ? 0 : mc;   // 0 = unlimited
+        // A raised (or lifted) cap must wake encoders blocked on the old, smaller
+        // limit; notify under the lock is fine (they re-check the predicate).
+        enc_cv_.notify_all();
+        return true;
+    }
+
+private:
+    // -- $v / $probe convention -----------------------------------------------
+    // Returns a sealed reply for the transport-level conventions ($probe / bad
+    // $v), or XI_PACK_NULL when the request should proceed as version `v`.
+    xi_pack_handle version_gate_(xi_pack_handle in) const {
+        int32_t probe = 0;
+        if (pk_->get_bool && pk_->get_bool(in, "$probe", &probe) && probe) {
+            xi_pack_builder b = pk_->builder_new();
+            pk_->builder_add_str(b, "$versions", kVersions,
+                                 (int32_t)std::strlen(kVersions));
+            return pk_->builder_seal(b);
+        }
+        int64_t v = 1;                       // absent $v = the documented default
+        pk_->get_i64(in, "$v", &v);
+        if (v != 1) {
+            xi_pack_builder b = pk_->builder_new();
+            pk_->builder_add_str(b, "$fault", "unsupported_version", 19);
+            pk_->builder_add_str(b, "$fault_key", "$v", 2);
+            pk_->builder_add_str(b, "$versions", kVersions,
+                                 (int32_t)std::strlen(kVersions));
+            return pk_->builder_seal(b);
+        }
+        return XI_PACK_NULL;
+    }
+
+    xi_pack_handle fault_(const char* code, const char* key, const char* detail) const {
+        xi_pack_builder b = pk_->builder_new();
+        pk_->builder_add_str(b, "$fault", code, (int32_t)std::strlen(code));
+        pk_->builder_add_str(b, "$fault_key", key, (int32_t)std::strlen(key));
+        pk_->builder_add_str(b, "$fault_detail", detail, (int32_t)std::strlen(detail));
+        return pk_->builder_seal(b);
+    }
+
+    static int clamp_q_(int q) { return q < 1 ? 1 : (q > 100 ? 100 : q); }
+
+    // -- xi.jpeg.encode ---------------------------------------------------------
+    xi_pack_handle encode_(xi_pack_handle in) {
+        if (xi_pack_handle early = version_gate_(in)) return early;
+
+        // Read the input as an xi/image blob via @4 (off the deprecated @1
+        // get_image adapter); populate the legacy img struct so the encode below
+        // is unchanged. A u8 xi/image blob only (the 8-bit encoder's contract).
+        xi_pack_image img{};
+        {
+            const void* dp = nullptr; int32_t dl = 0;
+            const void* pp = nullptr; int64_t pl = 0;
+            if (pk4_ && pk4_->get_blob && pk4_->get_blob(in, "image", &dp, &dl, &pp, &pl)) {
+                auto ib = xi::read_image_blob(
+                    std::span<const uint8_t>(static_cast<const uint8_t*>(dp), dl > 0 ? (size_t)dl : 0),
+                    std::span<const uint8_t>(static_cast<const uint8_t*>(pp), pl > 0 ? (size_t)pl : 0));
+                if (ib && ib->dt == "u8") {
+                    img.width = ib->width; img.height = ib->height; img.channels = ib->channels;
+                    img.pixels = ib->payload.data(); img.length = (int32_t)ib->payload.size();
+                }
+            }
+        }
+        if (!img.pixels)
+            return fault_("missing_input", "image",
+                          "xi.jpeg.encode: required image entry 'image' is missing");
+        if (img.channels != 1 && img.channels != 3 && img.channels != 4)
+            return fault_("wrong_type", "image",
+                          "xi.jpeg.encode: 'image' must be 1/3/4-channel 8-bit");
+
+        int q;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            q = quality_;
+        }
+        q = clamp_q_((int)pi64_(in, "quality", q));
+
+        // Content identity + params — the memo key (see header note).
+        const uint64_t key = content_key_(img, q);
+
+        std::shared_ptr<const std::vector<uint8_t>> jpeg;
+        bool hit = false;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = cache_.find(key);
+            if (it != cache_.end()) { jpeg = it->second; hit = true; }
+        }
+        if (hit) {
+            hits_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            // Concurrency cap: wait for a slot before doing the (single-threaded,
+            // CPU-heavy) encode, so at most max_concurrent_ run at once. Held only
+            // across the encode compute — the cache lookup above and insert below
+            // are unaffected. Unlimited when max_concurrent_ == 0.
+            EncodeSlot slot(this);
+            auto fresh = std::make_shared<std::vector<uint8_t>>();
+            // xi_pack_image pixels are contiguous (w*h*c) — the encoder's native
+            // interleaved layout; wrap without copy. xi::encode_jpeg dispatches
+            // turbojpeg (XINSP2_HAS_TURBOJPEG) → stb, matching the core encoder
+            // byte-for-byte engine-for-engine (perf parity is the point).
+            xi::Image view = xi::Image::view(
+                img.width, img.height, img.channels,
+                static_cast<const uint8_t*>(img.pixels));
+            if (!xi::encode_jpeg(view, q, *fresh) || fresh->empty()) {
+                return fault_("encode_failed", "image",
+                              "xi.jpeg.encode: encoder failed");
+            }
+            encodes_.fetch_add(1, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lk(mu_);
+            // Two threads may have encoded the same key concurrently — first
+            // one in wins; both produced identical bytes (deterministic
+            // encoder), so either answer is correct.
+            if (cache_.emplace(key, fresh).second) {
+                order_.push_back(key);
+                while ((int)order_.size() > cache_max_) {
+                    cache_.erase(order_.front());
+                    order_.pop_front();
+                }
+            }
+            jpeg = fresh;
+        }
+
+        xi_pack_builder b = pk_->builder_new();
+        pk_->builder_add_bin(b, "jpeg", jpeg->data(), (int32_t)jpeg->size());
+        pk_->builder_add_i64(b, "cache_hit", hit ? 1 : 0);
+        pk_->builder_add_i64(b, "encodes", (int64_t)encodes_.load(std::memory_order_relaxed));
+        pk_->builder_add_i64(b, "hits", (int64_t)hits_.load(std::memory_order_relaxed));
+        return pk_->builder_seal(b);
+    }
+
+    // -- xi.image.decode --------------------------------------------------------
+    // Decodes to the file's NATIVE channel count (stb, desired=0), mirroring the
+    // host's read_image_file (stbi_load(...,0)) EXACTLY so the eviction is byte-
+    // for-byte. Two reply shapes:
+    //   * comp in {1,3,4}: image "image" + i64 w/h/c (the taggable pack image).
+    //   * comp == 2 (gray+alpha): the pack image type cannot tag 2 channels, so
+    //     the pixels come back as bin "pixels" + i64 w/h/c — but ONLY when the
+    //     caller opts in with i64 "raw"=1 (the host does, to preserve stb's true
+    //     channel count). Legacy callers (no "raw") keep the historical behaviour:
+    //     gray+alpha is re-decoded to RGB so they always get an "image" entry.
+    xi_pack_handle decode_(xi_pack_handle in) {
+        if (xi_pack_handle early = version_gate_(in)) return early;
+
+        const void* ptr = nullptr; int32_t len = 0;
+        if (!pk_->get_bin(in, "data", &ptr, &len) || !ptr || len <= 0)
+            return fault_("missing_input", "data",
+                          "xi.image.decode: required bin entry 'data' is missing");
+
+        int64_t raw = 0;
+        pk_->get_i64(in, "raw", &raw);
+
+        int w = 0, h = 0, comp = 0;
+        unsigned char* px = stbi_load_from_memory(
+            static_cast<const unsigned char*>(ptr), len, &w, &h, &comp, 0);
+        if (px && comp == 2 && !raw) {
+            // Legacy: gray+alpha has no pack image tag — re-decode as RGB.
+            stbi_image_free(px);
+            px = stbi_load_from_memory(static_cast<const unsigned char*>(ptr),
+                                       len, &w, &h, &comp, 3);
+            comp = 3;
+        }
+        // "raw" additionally admits the native 2-channel result (returned as bin).
+        const bool comp_ok = raw ? (comp >= 1 && comp <= 4)
+                                  : (comp == 1 || comp == 3 || comp == 4);
+        if (!px || w <= 0 || h <= 0 || !comp_ok) {
+            if (px) stbi_image_free(px);
+            return fault_("decode_failed", "data",
+                          "xi.image.decode: unsupported or corrupt image bytes");
+        }
+        decodes_.fetch_add(1, std::memory_order_relaxed);
+
+        xi_pack_builder b = pk_->builder_new();
+        if (comp == 2) {
+            // raw gray+alpha — the pixels ride bin "pixels" (contiguous w*h*2).
+            pk_->builder_add_bin(b, "pixels", px, (int32_t)((size_t)w * h * 2));
+        } else if (pk4_ && pk4_->builder_add_blob) {
+            // Decode output as a self-describing xi/image blob via @4 (the copy
+            // from stb's buffer is inherent; add_blob mints the headed buffer +
+            // copies). Off the deprecated @1 builder_add_image adapter.
+            xi::mp::Writer dw;                       // {"t":"xi/image","w","h","c","dt"}
+            dw.map(5);
+            dw.key("t");  dw.str("xi/image");
+            dw.key("w");  dw.int_(w);
+            dw.key("h");  dw.int_(h);
+            dw.key("c");  dw.int_(comp);
+            dw.key("dt"); dw.str("u8");
+            pk4_->builder_add_blob(b, "image", dw.bytes().data(), (int32_t)dw.bytes().size(),
+                                   px, (int64_t)w * h * comp);
+        } else {
+            pk_->builder_add_image(b, "image", w, h, comp, px);   // pre-@4 host fallback
+        }
+        pk_->builder_add_i64(b, "w", w);
+        pk_->builder_add_i64(b, "h", h);
+        pk_->builder_add_i64(b, "c", comp);
+        stbi_image_free(px);
+        return pk_->builder_seal(b);
+    }
+
+    // -- helpers ---------------------------------------------------------------
+    int64_t pi64_(xi_pack_handle f, const char* key, int64_t d) const {
+        int64_t v = d;
+        pk_->get_i64(f, key, &v);
+        return v;
+    }
+    static uint64_t content_key_(const xi_pack_image& img, int q) {
+        const size_t n = (size_t)img.width * (size_t)img.height * (size_t)img.channels;
+        uint64_t key = 1469598103934665603ull;              // FNV-1a offset basis
+        const uint8_t* p = static_cast<const uint8_t*>(img.pixels);
+        for (size_t i = 0; i < n; ++i) { key ^= p[i]; key *= 1099511628211ull; }
+        key ^= ((uint64_t)img.width << 40) ^ ((uint64_t)img.height << 16)
+             ^ (uint64_t)(img.channels * 1000 + q);
+        return key;
+    }
+    size_t cache_size_() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return cache_.size();
+    }
+
+    // The registered pack-door-shaped handlers (funnel-invoked, concurrent).
+    // In-plugin catch: the boundary is noexcept in practice (the XI_PLUGIN_IMPL
+    // defense-in-depth); XI_PACK_NULL = hard failure sentinel.
+    static xi_pack_handle h_encode(void* self, xi_pack_handle in) {
+        try { return static_cast<ImgCodec*>(self)->encode_(in); }
+        catch (...) { return XI_PACK_NULL; }
+    }
+    static xi_pack_handle h_decode(void* self, xi_pack_handle in) {
+        try { return static_cast<ImgCodec*>(self)->decode_(in); }
+        catch (...) { return XI_PACK_NULL; }
+    }
+
+    const xi_pack_v1*         pk_       = nullptr;
+    const xi_pack_v4*         pk4_      = nullptr;   // xi.pack@4 blob door (decode output)
+    const xi_cap_provider_v1* provider_ = nullptr;
+    bool                      registered_ = false;
+
+    mutable std::mutex mu_;   // cache_ / order_ / quality_ / cache_max_ / cap state
+    std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>> cache_;
+    std::deque<uint64_t> order_;      // FIFO rotation (the host xi.preview pattern)
+    int quality_   = 85;
+    int cache_max_ = 32;
+
+    // Encode concurrency cap (CT: bound CPU so JPEG encoding can't starve the
+    // inspection compute). At most `max_concurrent_` real encodes run at once;
+    // 0 = unlimited (default — the pre-existing reentrant behaviour, byte-unchanged).
+    // Gates ONLY the encode compute, never a cache hit. A single libjpeg-turbo
+    // encode is itself single-threaded — this caps HOW MANY run in parallel, it
+    // does not thread one encode.
+    int                     max_concurrent_ = 0;   // guarded by mu_
+    int                     active_encodes_ = 0;   // guarded by mu_
+    std::condition_variable enc_cv_;
+
+    // RAII: block until a concurrency slot is free (if capped), hold it for the
+    // encode, release on scope exit — including the encode-failed early return.
+    struct EncodeSlot {
+        ImgCodec* s;
+        explicit EncodeSlot(ImgCodec* self) : s(self) {
+            std::unique_lock<std::mutex> lk(s->mu_);
+            s->enc_cv_.wait(lk, [&] {
+                return s->max_concurrent_ <= 0 || s->active_encodes_ < s->max_concurrent_;
+            });
+            ++s->active_encodes_;
+        }
+        ~EncodeSlot() {
+            { std::lock_guard<std::mutex> lk(s->mu_); --s->active_encodes_; }
+            s->enc_cv_.notify_one();
+        }
+        EncodeSlot(const EncodeSlot&) = delete;
+        EncodeSlot& operator=(const EncodeSlot&) = delete;
+    };
+
+    std::atomic<int64_t> encodes_{0};   // misses (real encode work) — dedup proof
+    std::atomic<int64_t> hits_{0};
+    std::atomic<int64_t> decodes_{0};
+};
+
+XI_PLUGIN_IMPL(ImgCodec)

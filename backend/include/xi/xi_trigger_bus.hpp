@@ -1,26 +1,26 @@
 #pragma once
 //
-// xi_trigger_bus.hpp — the host-side dispatch funnel for emit_record.
+// xi_trigger_bus.hpp — the host-side dispatch funnel for emit_pack.
 //
-// A source plugin pushes a record (frames + metadata) via host->emit_record
-// (xi::emit_record). The bus builds ONE TriggerEvent per emit and hands it to
-// the subscribed worker (the script's inspect loop). There is no correlation:
-// a source that wants several frames inspected together (e.g. a gathering
-// stereo source) puts them in the SAME record, so the bus is a pure funnel —
-// emit in, dispatch out. (Multi-camera sync, recording/replay, and trigger
-// policies were removed in the ABI-v6 dispatch cleanup: sync is a gathering
-// plugin, replay is a buffer-replay plugin.)
+// A source plugin pushes a sealed pack (frames + metadata, keyed buffers) via
+// host->emit_pack. The bus builds ONE TriggerEvent per emit and hands it to the
+// subscribed worker (the script's inspect loop). There is no correlation: a
+// source that wants several frames inspected together (e.g. a gathering stereo
+// source) puts them in the SAME pack, so the bus is a pure funnel — emit in,
+// dispatch out. (Multi-camera sync, recording/replay, and trigger policies were
+// removed in the ABI-v6 dispatch cleanup: sync is a gathering plugin, replay is
+// a buffer-replay plugin.)
 //
-// Every image handle inside a TriggerEvent is owned by the bus; the worker that
-// consumes the event releases them (and the metadata doc) after dispatch.
+// The pack handle inside a TriggerEvent is owned by the bus; the worker that
+// consumes the event releases it (via TriggerBus::release_pack_) after dispatch.
 //
 
 #include "xi_abi.h"
 #include "xi_clock.hpp"
-#include "xi_doc_registry.hpp"
 #include "xi_image_pool.hpp"
 
 #include <atomic>
+#include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -38,8 +38,8 @@ struct TriggerEvent {
     int64_t        timestamp_us = 0;          // emit (capture) timestamp
     // Stamped by the dispatcher worker the moment this event is popped off the
     // dispatch queue. Same clock as timestamp_us (system_clock µs — see
-    // xi::now_us()), so scripts can compute queue_wait_us = dequeued_at_us -
-    // timestamp_us and inspect_us = xi::now_us() - dequeued_at_us. 0 until the
+    // xi::wall_us()), so scripts can compute queue_wait_us = dequeued_at_us -
+    // timestamp_us and inspect_us = xi::wall_us() - dequeued_at_us. 0 until the
     // worker stamps it.
     int64_t        dequeued_at_us = 0;
     // Arrival/run id, assigned by the backend dispatcher when the frame is
@@ -47,37 +47,66 @@ struct TriggerEvent {
     // uses it as the run_id; a dropped frame's marker carries it too. 0 until
     // the dispatcher assigns it.
     int64_t        arrival_id = 0;
-    // Image key → handle. The key is the record's own key whenever the source
-    // supplied one (e.g. "cam_left"/"cam_right", or "frame" for a single image
-    // emitted as Record().image("frame", img)); a keyless image falls back to
-    // the emitter name. A single-image event additionally resolves by ANY key
-    // via the reader-side fallback (see trigger_image_cb). Caller releases each
-    // handle after use.
-    std::unordered_map<std::string, xi_image_handle> images;
     // The emitting instance's name — current_trigger().primary_source().
     std::string    leader_source;
     // Dispatch group (priority/concurrency lane). Stamped by the dispatcher sink
     // from the emitting instance's "group" (default_group if untagged).
     std::string    group;
-    // ABI v6: routing/context metadata from emit_record, carried by POINTER
-    // (zero-serialize) across the async dispatch — a host-owned yyjson_mut_doc*
-    // refcounted through DocRegistry, exactly as the image handles ride the
-    // ImagePool refcount. NULL when the record carried no metadata. Ownership is
-    // now TYPED: a move-only DocRef owns the event's one registry ref and releases
-    // it in its destructor, so the ref can't leak or double-free across the async
-    // dispatch. release_trigger_event_() still reset()s it at the drop/consume site
-    // (releasing the images alongside); the destructor is the backstop. The script
-    // reads it as a borrowed read-only view via current_trigger().meta().
-    DocRef meta_doc;
-};
+    // The event payload: a sealed, immutable, refcounted host pack handle (the v3
+    // keyed-buffer Pack plane). The pack carries the frames AND the metadata doc;
+    // both are read through the Pack accessors, not off the event. The
+    // ordering/EmitGate machinery keys on id + arrival_id, payload-agnostically.
+    // The bus took ONE ref on emit_pack; release_trigger_event_() drops it at the
+    // drop/consume site via TriggerBus::release_pack_(). XI_PACK_NULL marks a
+    // non-payload event (e.g. a drop marker) — see is_real().
+    xi_pack_handle pack = XI_PACK_NULL;
 
-#ifndef XI_NOW_US_DEFINED
-#define XI_NOW_US_DEFINED
-// Thin compat aliases over the canonical clock (xi_clock.hpp). now_us() = wall,
-// steady_now_us() = monotonic; see xi_clock.hpp for the wall-vs-mono contract.
-inline int64_t now_us()        { return xi::wall_us(); }
-inline int64_t steady_now_us() { return xi::mono_us(); }
-#endif
+    // Pack-aware "is this a real trigger" predicate: true iff the event carries a
+    // payload pack. Keyed on pack presence (the Record-era image/doc members that
+    // an emptiness check would have used were deleted by THE CUT).
+    bool is_real() const { return pack != XI_PACK_NULL; }
+
+    // Move semantics are USER-DECLARED so a moved-from husk truly owns nothing.
+    // `pack` is a scalar handle with no destructor, so the implicit move merely
+    // COPIED it and left the source still set: any path that moves an event into
+    // a queue and later releases the husk (a missed/late TriggerEventReleaser
+    // dismiss(), or a throw inserted between the push and the dismiss) would
+    // double-release a handle the queue now owns — a UAF waiting for a refactor.
+    // Nulling the source's pack here makes the F7 guard's documented invariant
+    // ("a move leaves ev empty, so even a missed dismiss() releases nothing —
+    // never a double-free", service_sinks.cpp) actually hold. Copy stays
+    // defaulted: a copy intentionally ALIASES the handle without taking a ref —
+    // the manual release discipline (release_trigger_event_) is unchanged.
+    // Note: like the implicit assign it replaces, move-assign does NOT release
+    // this->pack before overwriting (this header has no releaser); callers own
+    // releasing a live event before assigning over it.
+    TriggerEvent() = default;
+    TriggerEvent(const TriggerEvent&)            = default;
+    TriggerEvent& operator=(const TriggerEvent&) = default;
+    TriggerEvent(TriggerEvent&& o) noexcept
+        : id(o.id),
+          timestamp_us(o.timestamp_us),
+          dequeued_at_us(o.dequeued_at_us),
+          arrival_id(o.arrival_id),
+          leader_source(std::move(o.leader_source)),
+          group(std::move(o.group)),
+          pack(o.pack) {
+        o.pack = XI_PACK_NULL;
+    }
+    TriggerEvent& operator=(TriggerEvent&& o) noexcept {
+        if (this != &o) {
+            id             = o.id;
+            timestamp_us   = o.timestamp_us;
+            dequeued_at_us = o.dequeued_at_us;
+            arrival_id     = o.arrival_id;
+            leader_source  = std::move(o.leader_source);
+            group          = std::move(o.group);
+            pack           = o.pack;
+            o.pack         = XI_PACK_NULL;
+        }
+        return *this;
+    }
+};
 
 inline xi_trigger_id make_trigger_id() {
     // 128-bit identifier from a fast TLS PRNG. Not cryptographically random
@@ -92,7 +121,7 @@ inline xi_trigger_id make_trigger_id() {
     return t;
 }
 
-// Single-sink dispatch ingress: emit_record funnels in, ONE TriggerEvent per
+// Single-sink dispatch ingress: emit_pack funnels in, ONE TriggerEvent per
 // emit funnels out to the lone subscribed worker. No routing, no correlation,
 // no per-tid grouping (removed in the v6 dispatch cleanup) — despite the name,
 // this is a funnel, not a router/bus.
@@ -124,88 +153,89 @@ public:
         return static_cast<bool>(sink_);
     }
 
-    // emit_record routes here. meta_doc (ABI v6): the event's metadata doc, a
-    // host-owned yyjson_mut_doc*. OWNERSHIP IS TRANSFERRED — the caller hands
-    // one ref and the bus consumes it (stores it on the dispatched event, or
-    // DocRegistry::release()s it when there is no sink). nullptr ⇒ no metadata.
-    // The bus addrefs each input image handle so the source can release at once.
-    void emit(const std::string& source,
-              xi_trigger_id id_in,
-              int64_t ts_us,
-              const xi_record_image* images,
-              int image_count,
-              yyjson_mut_doc* meta_doc = nullptr)
+    // The Pack dispatch ingress. A pack-capable source hands
+    // a SEALED pack handle to dispatch. OWNERSHIP IS TRANSFERRED — the caller
+    // gives us one ref (the host xi_pack_v1.emit_pack forwarder retained the
+    // pack before calling here) and the bus consumes it: it stores the handle on
+    // the dispatched event, or releases it via the installed pack releaser when
+    // there is no sink. The pack IS the payload — its image entries and metadata
+    // doc are read through the Pack accessors, not off the event.
+    void emit_pack(const std::string& source,
+                    xi_trigger_id id_in,
+                    int64_t ts_us,
+                    xi_pack_handle pack)
     {
-        // We own the transferred meta_doc ref: every return path releases it.
-        if (image_count <= 0 || !images) {
-            DocRegistry::instance().release(meta_doc);
-            return;
-        }
-        if (ts_us == 0) ts_us = now_us();
+        if (pack == XI_PACK_NULL) return;
+        if (ts_us == 0) ts_us = wall_us();
         xi_trigger_id id = xi_trigger_id_is_null(id_in) ? make_trigger_id() : id_in;
 
-        // Liveness stamp (monotonic — NTP/DST safe): a source emitting is alive,
-        // even if there's no sink. Lets dispatch_stats expose "ms since the last
-        // frame" globally + per source, so a monitor/FE can detect a CAMERA THAT
-        // STALLED — which otherwise stops the line with zero signal (nothing else
-        // tracked last-emit). Stamped on every emit, before the sink check.
+        // Liveness stamp (monotonic — NTP/DST safe): a source emitting packs is
+        // alive, even if there's no sink. Lets dispatch_stats expose "ms since
+        // the last frame" globally + per source, so a monitor/FE can detect a
+        // CAMERA THAT STALLED. Stamped on every emit, before the sink check.
+        // B3-burr: ONE mu_ acquisition for the stamp AND the sink copy (they
+        // were two back-to-back lock_guard scopes with only local TriggerEvent
+        // field assignments between them — nothing depended on being unlocked,
+        // and stamp-then-copy order is preserved under the same lock).
+        Sink to_fire;
         {
-            int64_t mono = steady_now_us();
+            int64_t mono = mono_us();
             last_emit_mono_us_.store(mono, std::memory_order_relaxed);
             std::lock_guard<std::mutex> lk(mu_);
             source_last_emit_mono_us_[source] = mono;
+            to_fire = sink_;
         }
 
         TriggerEvent ev;
         ev.id            = id;
         ev.timestamp_us  = ts_us;
         ev.leader_source = source;
-        ev.meta_doc      = DocRef::adopt(meta_doc);   // transfer the caller's ref (no retain)
-        for (int i = 0; i < image_count; ++i) {
-            xi_image_handle h = images[i].handle;
-            ImagePool::instance().addref(h);
-            // Key every image by the record's OWN key when the source gave one
-            // (multi-image "cam_left"/"cam_right", AND a single image emitted as
-            // Record().image("frame", img) — the documented contract that
-            // cmd:run/replay also use). A keyless image collapses to the emitter
-            // name so legacy t.image("<source>") still works. Choosing the key is
-            // free — still exactly ONE string per image, no extra map entry; the
-            // reader-side sole-image fallback (trigger_image_cb) lets a single
-            // frame resolve by EITHER the record key or the instance name.
-            std::string name;
-            if (images[i].key && images[i].key[0]) {
-                name = images[i].key;
-            } else {
-                name = source;
-            }
-            // A duplicate (or empty -> source) key in a multi-image record
-            // collides on the map: emplace fails and keeps the first handle.
-            // release_trigger_event_ only iterates STORED handles, so release the
-            // ref we just added or it leaks an ImagePool slot. Warn once so the
-            // offending source gets distinct keys.
-            if (!ev.images.emplace(std::move(name), h).second) {
-                ImagePool::instance().release(h);
-                static std::atomic<bool> warned{false};
-                if (!warned.exchange(true, std::memory_order_relaxed))
-                    std::fprintf(stderr, "[xinsp2] emit('%s'): duplicate/empty image key "
-                                 "dropped — a multi-image record needs distinct keys\n",
-                                 source.c_str());
-            }
-        }
-
-        Sink to_fire;
-        { std::lock_guard<std::mutex> lk(mu_); to_fire = sink_; }
+        ev.pack          = pack;    // consume the caller's ref
 
         if (to_fire) {
             to_fire(std::move(ev));
         } else {
-            for (auto& [n, h] : ev.images) ImagePool::instance().release(h);
-            ev.meta_doc.reset();   // release the event's doc ref (dtor would too)
+            // No sink: hand the ref back to the installed releaser. A REAL pack
+            // (non-null — guaranteed by the XI_PACK_NULL guard at entry) arriving
+            // here while pack_releaser_ is still null means pack ingress was wired
+            // BEFORE set_pack_releaser ran (boot-ordering bug): release_pack_ then
+            // silently no-ops and the host PackRegistry ref leaks. Fail loud so the
+            // ordering bug surfaces instead of leaking quietly — assert in debug,
+            // and a once-only stderr warning in release.
+            if (pack_releaser_.load(std::memory_order_acquire) == nullptr) {
+                assert(false && "emit_pack: no-sink pack drop with no pack "
+                                "releaser installed — host ref leaked; wire "
+                                "set_pack_releaser before pack ingress");
+                static std::atomic<bool> warned{false};
+                if (!warned.exchange(true, std::memory_order_relaxed))
+                    std::fprintf(stderr,
+                        "[xi_trigger_bus] emit_pack dropped a real pack with no "
+                        "releaser installed — host PackRegistry ref leaked; wire "
+                        "set_pack_releaser before pack ingress.\n");
+            }
+            release_pack_(pack);   // no consumer — drop the ref we were handed
         }
     }
 
+    // Install the pack-handle releaser (xi::install_pack_abi wires it to the
+    // host PackRegistry). Kept as a bare fn-pointer so this header stays free of
+    // any dependency on xi_pack_abi.hpp / the Pack container (it speaks only the
+    // opaque xi_pack_handle from xi_abi.h). Null until installed — a bus with no
+    // pack plane simply never sees a pack event.
+    using PackReleaseFn = void (*)(xi_pack_handle);
+    void set_pack_releaser(PackReleaseFn fn) {
+        pack_releaser_.store(fn, std::memory_order_release);
+    }
+    // Release one ref on a pack handle via the installed releaser (no-op if the
+    // pack plane was never installed, or the handle is null). Used by the
+    // no-sink drop path here and by the dispatcher's release_trigger_event_.
+    void release_pack_(xi_pack_handle h) {
+        if (h == XI_PACK_NULL) return;
+        if (auto fn = pack_releaser_.load(std::memory_order_acquire)) fn(h);
+    }
+
     // Lifecycle reset (script reload / project close). There is no correlation
-    // state to drop anymore, but emit() stamps a per-source liveness entry into
+    // state to drop anymore, but emit_pack() stamps a per-source liveness entry into
     // source_last_emit_mono_us_, and that map otherwise persists for every
     // distinct source name ever seen — an unbounded host leak under
     // rename / create-remove / reopen workflows. The lifecycle callers invoke
@@ -228,14 +258,18 @@ public:
     // emitted yet. The "is the line getting frames at all" signal.
     int64_t last_emit_age_us() const {
         int64_t last = last_emit_mono_us_.load(std::memory_order_relaxed);
-        return last == 0 ? -1 : (steady_now_us() - last);
+        return last == 0 ? -1 : (mono_us() - last);
     }
     // Per-source age snapshot { source -> µs since its last emit }. Lets a monitor
     // spot which of N cameras stalled.
     std::vector<std::pair<std::string, int64_t>> source_emit_ages_us() {
         std::vector<std::pair<std::string, int64_t>> out;
-        int64_t now = steady_now_us();
         std::lock_guard<std::mutex> lk(mu_);
+        // Sample the clock AFTER taking the lock (matching last_emit_age_us,
+        // which reads the clock after the atomic load). Sampling before the lock
+        // races a concurrent emit_pack that stamps source_last_emit_mono_us_ with
+        // a mono > our now, yielding a spurious negative age for that source.
+        int64_t now = mono_us();
         out.reserve(source_last_emit_mono_us_.size());
         for (auto& [s, t] : source_last_emit_mono_us_) out.emplace_back(s, now - t);
         return out;
@@ -246,44 +280,7 @@ private:
     std::atomic<int64_t> last_emit_mono_us_{0};
     std::unordered_map<std::string, int64_t> source_last_emit_mono_us_;  // guarded by mu_
     Sink       sink_;
+    std::atomic<PackReleaseFn> pack_releaser_{nullptr};   // polaris2 wave-2
 };
-
-// Wire emit_record on a host_api struct produced by ImagePool::make_host_api().
-// Call once after constructing the api; further callers see the live bus.
-inline void install_trigger_hook(xi_host_api& api) {
-    // ABI v6: emit_record — the one dispatch verb. The record's images +
-    // metadata doc go onto the dispatch path; we hand emit() ONE owned ref to
-    // the meta doc (it consumes it). rec->doc arrives through the SDK's
-    // share_out (xi::emit_record) exactly like the process() output doc:
-    // share_out reserved one registry ref for the consumer, so we CONSUME it
-    // here (no extra retain) — adopt_shared's analogue. A doc-less record with
-    // raw JSON bytes is parsed once into a fresh host-owned doc (the only
-    // deserialize, taken only when a hand-rolled source chose data/len).
-    api.emit_record = [](const char* emitter, xi_trigger_id id,
-                         const struct xi_record* rec, int64_t ts) {
-        if (!rec) return;
-        yyjson_mut_doc* meta = nullptr;
-        if (rec->doc) {
-            // share_out reserved a ref for us; take it as the host's ref.
-            meta = (yyjson_mut_doc*)(void*)rec->doc;
-        } else if (rec->data && rec->len > 0) {
-            yyjson_doc* idoc = yyjson_read((const char*)rec->data, (size_t)rec->len, 0);
-            if (idoc) {
-                meta = yyjson_doc_mut_copy(idoc, nullptr);   // host-owned (default alc)
-                yyjson_doc_free(idoc);
-                if (meta) DocRegistry::instance().addref(meta);   // register at rc=1
-            }
-        }
-        TriggerBus::instance().emit(emitter ? emitter : "", id, ts,
-                                    rec->images, rec->image_count, meta);
-    };
-    // ABI v11: publish the wired emit_record into the process-global slot the
-    // carved xi.emit@1 interface's forwarder reads (xi_image_pool.hpp). This is
-    // the layering bridge: image_pool.hpp cannot include this header, so the door
-    // reaches the live dispatch verb only once we hand it the pointer here — so
-    // the door's emit_record and the struct field host->emit_record hit the SAME
-    // code path (freeze-guard: ImagePool::door_matches_fields).
-    ImagePool::publish_emit_record(api.emit_record);
-}
 
 } // namespace xi

@@ -81,4 +81,21 @@ struct EmitTurn {
     EmitTurn& operator=(const EmitTurn&) = delete;
 };
 
+// P1 (redteam doc 21) — the emit-half CONSISTENCY rule, one predicate so the two
+// coupled outputs can never diverge. A successful frame produces TWO outputs that
+// must be delivered together or not at all:
+//   * its staged sink pushes  — PLC actuation / expose (an ordered SIDE EFFECT,
+//     gated on my_turn: on a stop-wake the StagedEmitGuard drops them), and
+//   * its run_result verdict   — which a downstream reads as "this is what the
+//     inspection decided, and acted on".
+// Emitting the verdict while the actuation was drain-dropped (the pre-fix bug:
+// verdict gated on inspect_ok only, flush gated on my_turn) makes a reported
+// PASS imply a PLC push that never happened. Route BOTH through this predicate so
+// a stop-wake suppresses the verdict exactly when it suppresses the actuation.
+// A FAILED inspect has no staged actuation to be inconsistent with — its crash
+// Result is emitted separately so the stream has no gap.
+inline bool emit_success_outputs(bool inspect_ok, bool my_turn) {
+    return inspect_ok && my_turn;
+}
+
 } // namespace xi

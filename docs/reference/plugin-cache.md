@@ -1,15 +1,16 @@
 # `cache` plugin — frame ring buffer + replay
 
-The `cache` plugin (class `BufferReplay`, `plugins/cache/src/cache.cpp`) is the
-plugin-side **record/replay store**. It buffers the last *N* incoming records
-(image + metadata) in a bounded ring and re-emits a buffered one on command, so
-a script can re-inspect a frame it already saw **without the source re-grabbing**.
+The `cache` plugin (class `BufferReplay`, `toolbox/cache/src/cache.cpp`) is the
+plugin-side **capture/replay store**. It buffers the last *N* incoming sealed
+packs (images + metadata entries) in a bounded ring and re-emits a buffered one
+on command, so a script can re-inspect a frame it already saw **without the
+source re-grabbing**.
 
 This is the HDevelop-style **hot-param re-inspect loop**: buffer a frame, tune a
 `Param`, replay to re-run `inspect()` on the *same* frame with the new value.
 
-Since record/replay is a plugin (not a host facility), the ring lives entirely
-behind the ABI-v6 `process()` / `exchange()` surface — **zero core involvement**.
+Since capture/replay is a plugin (not a host facility), the ring lives entirely
+behind the `xi.pack@1` door + `exchange()` surface — **zero core involvement**.
 
 ## Wiring
 
@@ -20,12 +21,11 @@ script via `xi::use(...)`:
 // inspect.cpp
 auto t = xi::current_trigger();
 const std::string src = t.primary_source();          // live source, or "buffer" on replay
-auto img = t.image(src);
 if (src != "buffer")                                 // don't re-buffer a replayed frame
-    xi::use("buffer").process(xi::Record().image("img", img));
+    xi::use("buffer").process(t.pack());             // capture the current sealed pack
 ```
 
-The `src != "buffer"` guard is required: a replayed record is emitted with the
+The `src != "buffer"` guard is required: a replayed pack is emitted with the
 cache instance's own name as its source, so without the guard every replay would
 re-buffer itself and the ring would fill with duplicates.
 
@@ -35,15 +35,15 @@ Instance config (`instances/<name>/instance.json` or `project.json`):
 { "plugin": "cache", "isolation": "in_process", "config": { "capacity": 16 } }
 ```
 
-`capacity` (int, default 16, 1..1024) bounds the ring; the oldest record is
+`capacity` (int, default 16, 1..1024) bounds the ring; the oldest entry is
 evicted once it is exceeded.
 
 ## Contract
 
-### `process(record) -> {"buffered": <ring size>}`
-Deep-copies each image in the record (an input image handle is only valid for
-the duration of the call, so the plugin owns its own pixel copy) plus the
-metadata doc, and pushes it into the ring, evicting the oldest beyond `capacity`.
+### `process(pack) -> {"buffered": <ring size>}`
+RETAINS the incoming sealed pack into the ring (zero pixel copy — a retained
+sealed pack keeps itself and its pool image handles alive beyond the frame that
+produced it), evicting (= releasing) the oldest beyond `capacity`.
 
 ### `exchange({...}) -> get_def()`
 Every command returns the post-mutation `get_def()`:
@@ -70,9 +70,10 @@ good for exercising load/timing behaviour (queue pressure, overflow) against a
 recorded traffic shape. Neither reproduces byte-identical ordering; that is
 on-disk deterministic replay, a separate feature.
 
-Re-emission uses `xi::emit_record` with the cache instance's name as the source
-and a **fresh** trigger id + `ts = now` (a replay is a new dispatch event, not a
-byte-copy of the original arrival — see [record-replay design notes] if you need
+Re-emission re-emits the **same sealed pack handle** (zero copy) through the
+pack emit door, with the cache instance's name as the source and a **fresh**
+trigger id + `ts = now` (a replay is a new dispatch event, not a byte-copy of
+the original arrival — see the record-replay design notes if you need
 id/timestamp fidelity, which is a separate feature).
 
 ## Reference example

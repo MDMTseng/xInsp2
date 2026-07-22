@@ -21,10 +21,12 @@
 // image_pool_stats) — no new server, no new transport. Point-query snapshot; the
 // caller diffs successive snapshots to get rates, exactly like dispatch_stats.
 //
-// Histogram buckets are cumulative-free (each bucket counts frames that fell in
-// [prev_bound, this_bound)); the reader can compute a CDF / p-quantile estimate
-// from the bucket edges. Edges are milliseconds, chosen to span a machine-vision
-// frame budget (sub-ms fast paths up to multi-second stalls).
+// Histogram buckets are NON-cumulative (each bucket counts frames that fell in
+// [prev_bound, this_bound), NOT frames <= bound); the reader sums buckets to
+// compute a CDF / p-quantile estimate. Each bucket is keyed on the wire by
+// `bucket_ms` = its upper bound (NOT Prometheus `le`, which would imply the
+// counts are cumulative — they are not). Edges are milliseconds, chosen to span
+// a machine-vision frame budget (sub-ms fast paths up to multi-second stalls).
 //
 #ifndef XI_METRICS_HPP
 #define XI_METRICS_HPP
@@ -56,6 +58,9 @@ public:
     // `ok` distinguishes a clean finish from a crash/throw. Lock-free — safe to
     // call from any dispatch worker concurrently. relaxed ordering is fine: these
     // are independent counters, no happens-before is published through them.
+    // Because each counter is bumped separately (frames_total_ FIRST, its bucket
+    // LAST), a concurrent snapshot_json read is NOT a consistent cut — see the note
+    // there. It is self-healing once all record_frame calls have returned.
     void record_frame(double latency_ms, bool ok) noexcept {
         frames_total_.fetch_add(1, std::memory_order_relaxed);
         (ok ? frames_ok_ : frames_error_).fetch_add(1, std::memory_order_relaxed);
@@ -77,7 +82,21 @@ public:
     // Shape (stable, documented in ws-protocol.md):
     //   {"frames_total":N,"frames_ok":N,"frames_error":N,
     //    "inspect_compute_ms":{"count":N,"sum_ms":F,"mean_ms":F,
-    //      "buckets":[{"le":0.5,"count":n},...,{"le":"inf","count":n}]}}
+    //      "buckets":[{"bucket_ms":0.5,"count":n},...,{"bucket_ms":"inf","count":n}]}}
+    //
+    // Each bucket's `bucket_ms` is its NON-cumulative upper bound: `count` is frames
+    // in [prev_bound, bucket_ms), NOT frames <= bucket_ms. (Earlier this key was `le`,
+    // the Prometheus name for a CUMULATIVE ≤ edge — a mislabel, since these counts are
+    // per-bucket occupancy. Renamed to bucket_ms so a standard Prometheus consumer
+    // can't silently misread every quantile. WIRE-CONTRACT change; a consumer bound
+    // to `le` was already getting wrong data.)
+    //
+    // NON-ATOMIC multi-counter read: each counter is loaded at an independent instant
+    // with relaxed ordering, and record_frame bumps frames_total_ first then its
+    // bucket last, so a snapshot taken WHILE frames are mid-record_frame can show
+    // Σbuckets < count and frames_ok+frames_error < frames_total (each lagging total
+    // by up to the number of in-flight record_frame calls). Bounded and self-healing:
+    // the snapshot is a consistent cut only after all workers have joined/quiesced.
     //
     // BREAKING (staged, not on master): the histogram key was `latency_ms`. It was
     // renamed to `inspect_compute_ms` because the value is script inspect COMPUTE
@@ -99,10 +118,10 @@ public:
         out += ",\"buckets\":[";
         for (std::size_t i = 0; i < kBuckets; ++i) {
             if (i) out += ",";
-            out += "{\"le\":" + fmt3(kEdgesMs[i]) + ",\"count\":" +
+            out += "{\"bucket_ms\":" + fmt3(kEdgesMs[i]) + ",\"count\":" +
                    std::to_string(buckets_[i].load(std::memory_order_relaxed)) + "}";
         }
-        out += ",{\"le\":\"inf\",\"count\":" +
+        out += ",{\"bucket_ms\":\"inf\",\"count\":" +
                std::to_string(buckets_[kBuckets].load(std::memory_order_relaxed)) + "}";
         out += "]}}";
     }
@@ -137,7 +156,7 @@ private:
     std::atomic<uint64_t> frames_ok_{0};
     std::atomic<uint64_t> frames_error_{0};
     std::atomic<uint64_t> latency_sum_us_{0};
-    std::atomic<uint64_t> buckets_[kBuckets + 1];   // +1 = +inf overflow
+    std::atomic<uint64_t> buckets_[kBuckets + 1]{};   // +1 = +inf overflow
 };
 
 // Out-of-line constexpr definition (pre-C++17 ODR; harmless under C++17+).

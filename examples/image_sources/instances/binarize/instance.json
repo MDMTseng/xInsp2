@@ -1,4 +1,0 @@
-{
-  "plugin": "binarize",
-  "config": { "threshold": 128 }
-}

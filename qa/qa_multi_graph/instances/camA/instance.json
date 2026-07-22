@@ -1,0 +1,9 @@
+{
+  "plugin": "mock_camera",
+  "group": "line_a",
+  "config": {
+    "width": 64,
+    "height": 48,
+    "fps": 30
+  }
+}

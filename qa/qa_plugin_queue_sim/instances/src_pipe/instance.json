@@ -1,0 +1,1 @@
+{ "plugin": "queue_source", "isolation": "in_process", "group": "pipe", "config": { "backlog": 500, "fast_ms": 15 } }

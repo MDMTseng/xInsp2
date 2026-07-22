@@ -70,14 +70,68 @@ independent budgets, each watching a different boundary:
   plugin's `process()` — so on an unattended line the inspection could silently
   stop while the FE shows healthy. The FE arms the BE's per-inspect watchdog
   (`--watchdog=N`, off in the bare BE), which times each inspect on the worker
-  itself (continuous workers + `cmd:run`); on overrun it cooperatively cancels then
-  exits the process, and the FE respawns. Generous by default so a legitimately
+  itself (continuous workers + `cmd:run`); the watchdog is **one phase**:
+  overrun → grace window → hard `_Exit`, and the FE respawns. (The former
+  cooperative soft-cancel phase — the ticket-epoch cancel the watchdog used to
+  arm before exiting — was retired 2026-07-11, commit `93de38b`. Wire deltas: a
+  frame that exceeds its budget but returns during the grace is a **normal
+  trusted verdict** — there is no `no_verdict`/`watchdog_cancelled` result
+  anymore; a genuinely wedged frame hard-exits and respawns instead of
+  soft-aborting.) Generous by default so a legitimately
   long frame isn't killed; `--watchdog-ms=0` disables it (e.g. a dev stepping a
   long inspect). The arming is the *supervised-deployment* fail-safe — the bare BE
   default stays off.
 
 All three end in the same place: respawn, rate-limited by the consecutive-failure
 cap, which latches `"down"` when exhausted.
+
+## BE canonical health, mirrored to the FE (without a WS client)
+
+The core-owned health/state contract (`get_health` + `health_changed`, schema
+`xi.health/1`; [`../new_gen/04-health-contract.md`](../new_gen/04-health-contract.md))
+is a **WS** surface — and the backend accepts exactly **one** WS client, a slot
+reserved for the operator HMI / VS Code extension (review 09). If the FE opened a
+client to read `get_health`, it would steal that slot and lock the real UI out.
+The FE also stays dependency-light (no WS client/server at all).
+
+So the FE does **not** consume the WS contract. Instead the BE **mirrors just its
+top-level health** into a tiny file the FE already polls — the same
+*file-not-socket* pattern as the heartbeat and `fe-status.json`:
+
+- **BE side** (`--health-file=PATH`, passed by the FE): on **every**
+  `health_changed` — and only then, a lifecycle/fault-rate write, **never per
+  frame** — the health registry's notifier writes
+  `{"state","since_ms","last_reason","ts_ms"}` atomically (tmp + rename). This is
+  the whole projection the FE needs: the top-level state, when it was entered, and
+  the reason that drove the last non-ok state (`plugin_fault` / `compile_error` /
+  `watchdog_trip`, cleared on a clean return to running/loaded/boot). The full
+  component list stays on the WS `get_health` for the UI that holds the slot.
+  (`service_health.cpp` `write_health_mirror_`; `xi_health.hpp` `mirror_json`.)
+- **FE side**: each liveness probe, when the port is up, the FE reads that small
+  file (`xi_be_health.hpp` `parse_be_health`) and republishes `fe-status.json`
+  **only when the mirrored state changes** — so the FE write stays lifecycle-rate
+  too. `fe_status` then carries a `be_health` object
+  (`{state, since_ms, last_reason}`, or `null` before the first read) **alongside**
+  the FE's own process-level fields (`state`, `backend_pid`, respawn budget, last
+  death). The FE's `state` (`starting`/`healthy`/`down`/`stopped`) is process
+  liveness; `be_health.state` is the BE's own view of itself
+  (`running`/`degraded`/`fault`/…). On a BE death the FE drops `be_health` (a gone
+  process is not "running"); the respawned BE rewrites `boot`→`running` and the
+  next healthy poll re-reads it.
+
+**Why a mirror file, not the WS contract or a new socket:** it keeps the single WS
+client slot free, keeps the FE dependency-light, reuses machinery both sides
+already have (the BE writes small status files; the FE polls them), and the
+lifecycle-only write keeps the hot path untouched. The FE never becomes a WS
+client.
+
+The **headless runner** (`xinsp-runner`) consumes the same contract differently:
+it drives the BE **in-process** (no WS), so it drives the health registry directly
+through its lifecycle (`project_loaded` → script `ok`/`failed` → `running` →
+`degraded` on the first caught inspect crash), logs every `health_changed` to its
+execution log, and stamps the **final state** into `summary.health` of its JSON
+report — a crashed-then-degraded run is visible in the artifact without replaying
+the per-frame log.
 
 ## Crash history + UI modes
 
@@ -96,4 +150,5 @@ cap, which latches `"down"` when exhausted.
 
 - [`../guides/debug.md`](../guides/debug.md) — crash reports + minidumps + attach.
 - [`../guides/deploy.md`](../guides/deploy.md) — production boot order + bundle.
-- `fe_main.cpp` / `xi_crash_history.hpp` / `xi_fe_status.hpp` — sources.
+- `fe_main.cpp` / `xi_crash_history.hpp` / `xi_fe_status.hpp` / `xi_be_health.hpp` — sources.
+- `../new_gen/04-health-contract.md` — the health/state contract the mirror projects.

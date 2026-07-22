@@ -5,8 +5,11 @@ by an AI agent (or a human at a REPL). Spec: docs/reference/ws-protocol.md.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from queue import Queue, Empty
 from typing import Any, Callable
@@ -108,6 +111,27 @@ class ConnectionLostError(ConnectionError):
     pass
 
 
+class AuthError(ConnectionError):
+    """Raised when the backend rejects the WS handshake auth (HTTP 401).
+
+    The backend (started with `--auth=<secret>` or `XINSP2_AUTH`) checks a
+    shared secret entirely in the WebSocket upgrade handshake — before any
+    `cmd`/`rsp` traffic — so a bad or missing credential is a clean, immediate
+    401 close, NOT a hang: `connect()` translates the underlying
+    `websocket.WebSocketBadStatusException` into this typed error so callers
+    get a fast, catchable signal instead of a socket that dangles.
+
+    Subclass of the builtin `ConnectionError` (alongside `ConnectionLostError`
+    and the `ConnectionRefusedError` raised for a missing listener) so callers
+    using `except ConnectionError` catch every connect-time failure uniformly.
+    `.mode` records which flow was attempted ("bearer" | "hmac").
+    """
+    def __init__(self, message: str, *, mode: str | None = None, status_code: int | None = None):
+        super().__init__(message)
+        self.mode = mode
+        self.status_code = status_code
+
+
 class UnknownCommandError(ProtocolError):
     """Plugin's `exchange()` returned the canonical
     `{"error": "unknown_command", "command": "<name>"}` shape (see
@@ -130,14 +154,15 @@ class UnknownCommandError(ProtocolError):
 class PartialStatusError(ProtocolError):
     """A lifecycle cmd reported a non-success `status`.
 
-    BREAKING (already on master): `load_project` returns `ok:false` on a
-    "partial" or "rejected" status (was `ok:true` with warning arrays), and
-    `commit_group` reports `status:"partial"` after a partial commit — after
-    which the backend no longer auto-resumes dispatch. A consumer MUST NOT treat
-    either as success. The backend's `ok:false` already routes partial/rejected
-    `load_project` through `ProtocolError`; this subclass surfaces the `status`
-    (and any `data`) so callers can branch on it, and covers the
-    `commit_group` case where the rsp is `ok:true` but `status != "committed"`.
+    BREAKING (already on master): both `load_project` and `commit_group` return
+    `ok:false` on a non-success status (`load_project`: "partial"/"rejected",
+    was `ok:true` with warning arrays; `commit_group`: "partial", after which the
+    backend no longer auto-resumes dispatch). A consumer MUST NOT treat either as
+    success. The backend's `ok:false` routes both through `ProtocolError`; the
+    helpers re-raise it as this subclass, which surfaces the `status` (and any
+    `data`) so callers can branch on it. (A defensive `ok:true` + non-success
+    `status` path is also honoured, in case an older/other backend reports the
+    status without flipping `ok`.)
     """
     def __init__(self, cmd: str, status: str, *, error: str | None = None, data: Any = None):
         super().__init__(
@@ -346,9 +371,53 @@ class RunResult:
 
 
 class Client:
-    def __init__(self, url: str = "ws://127.0.0.1:7823/", timeout: float = 30.0):
+    def __init__(
+        self,
+        url: str = "ws://127.0.0.1:7823/",
+        timeout: float = 30.0,
+        *,
+        token: str | None = None,
+        auth_mode: str = "bearer",
+    ):
+        """Create a client (one client = one connection).
+
+        Auth
+        ----
+        The backend (started with `--auth=<secret>` or the `XINSP2_AUTH` env
+        var) checks a shared secret in the WebSocket upgrade handshake. Pass
+        `token=` to authenticate; leave it None for an unauthenticated backend.
+
+        The backend offers TWO handshake shapes, and which one it accepts is
+        fixed by how the *server* was started — it is NOT negotiated, and the
+        client cannot auto-detect it (both refusals are an identical bare 401).
+        Select the matching flow with `auth_mode`:
+
+        - ``"bearer"`` (default): server started `--auth=<secret>`. The client
+          sends `Authorization: Bearer <token>`; `token` is the secret itself.
+          Anyone who can sniff the handshake can replay it — loopback / trusted
+          LAN / behind a TLS proxy only.
+        - ``"hmac"``: server started `--auth=hmac:<key>`. The client sends
+          `X-Xi-Timestamp: <unix_seconds>` and
+          `Authorization: Bearer <hex(hmac_sha256(key, <unix_seconds>))>`;
+          `token` is the HMAC KEY, which never crosses the wire. The server
+          accepts it only within ±60 s of its clock, so a captured handshake
+          can be replayed for at most 60 s (post-handshake frames are still
+          plaintext — use a TLS proxy for hostile networks). Despite the
+          "challenge" framing elsewhere, there is no server-issued nonce: the
+          client timestamps and signs; the exchange is single-shot.
+
+        Do NOT try `"bearer"` against an `hmac:` server as a fallback — that
+        would put the raw HMAC key on the wire as a failed bearer attempt,
+        defeating the entire point of hmac mode. Pick the mode deliberately.
+        """
+        if auth_mode not in ("bearer", "hmac"):
+            raise ValueError(
+                f"auth_mode must be 'bearer' or 'hmac', got {auth_mode!r}"
+            )
         self.url = url
         self.timeout = timeout
+        self._token = token
+        self._auth_mode = auth_mode
         self._ws: websocket.WebSocket | None = None
         self._next_id = 1
         self._rsp_waiters: dict[int, Queue] = {}
@@ -363,9 +432,47 @@ class Client:
 
     # ---- lifecycle ----------------------------------------------------
 
+    def _auth_headers(self) -> dict[str, str]:
+        """Build the handshake auth headers for the configured mode.
+
+        Returns {} when no token is set (unauthenticated backend). Mirrors the
+        server verification in `backend/include/xi/xi_ws_server.hpp` — for hmac
+        mode the message signed is the exact decimal timestamp STRING that is
+        also sent in `X-Xi-Timestamp`, and the digest is lowercase hex.
+        """
+        if not self._token:
+            return {}
+        if self._auth_mode == "hmac":
+            ts = str(int(time.time()))
+            mac = hmac.new(
+                self._token.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256
+            ).hexdigest()
+            return {"Authorization": f"Bearer {mac}", "X-Xi-Timestamp": ts}
+        return {"Authorization": f"Bearer {self._token}"}
+
     def connect(self) -> dict:
         try:
-            self._ws = websocket.create_connection(self.url, timeout=self.timeout)
+            self._ws = websocket.create_connection(
+                self.url, timeout=self.timeout, header=self._auth_headers()
+            )
+        except websocket.WebSocketBadStatusException as e:
+            # The backend answers a bad/absent credential with an immediate
+            # HTTP 401 during the upgrade — a clean refusal, not a hang.
+            # Translate the low-level status exception into the SDK's typed
+            # AuthError so callers get an actionable, catchable signal.
+            status = getattr(e, "status_code", None)
+            if status == 401:
+                hint = (
+                    "check the token" if self._token else
+                    "this backend requires --auth; pass token=..."
+                )
+                raise AuthError(
+                    f"backend refused the handshake auth at {self.url} "
+                    f"(HTTP 401, auth_mode={self._auth_mode!r}); {hint}.",
+                    mode=self._auth_mode,
+                    status_code=status,
+                ) from e
+            raise
         except (ConnectionRefusedError, OSError) as e:
             # Translate the kernel-level "no listener" error into a
             # plain-English hint about how to start the backend. The
@@ -537,22 +644,28 @@ class Client:
     def commit_group(self, group: str | None = None, **kwargs) -> dict:
         """Commit a staged config group.
 
-        Status semantics (already on master): the response gained a `status`
-        of "committed" | "partial". After a PARTIAL commit the backend no
-        longer auto-resumes dispatch, so a consumer must not treat "partial" as
-        done — it raises `PartialStatusError` (carrying `.status` and the rsp
-        `data`) so the caller can decide how to recover (e.g. re-stage and
-        re-commit, then explicitly resume). Returns the rsp data on a clean
-        "committed".
+        Status semantics (already on master): the response carries a `status`
+        of "committed" | "partial", and a PARTIAL commit comes back as
+        `ok:false` (the backend no longer auto-resumes dispatch — it latches a
+        config fault). So `Client.call` raises `ProtocolError`, which this helper
+        re-raises as `PartialStatusError` (carrying `.status` and the rsp `data`)
+        so the caller can decide how to recover (e.g. re-stage and re-commit,
+        then explicitly resume). Returns the rsp `data` on a clean "committed".
         """
         args = dict(kwargs)
         if group is not None:
             args["group"] = group
-        data = self.call("commit_group", args)
+        try:
+            data = self.call("commit_group", args)
+        except ProtocolError as e:
+            status = e.data.get("status") if isinstance(e.data, dict) else None
+            raise PartialStatusError(
+                "commit_group", status or "partial", error=e.error, data=e.data
+            ) from e
+        # Defensive: an ok:true rsp that still reports a non-"committed" status
+        # (older/other backend that didn't flip ok) is not a clean success.
         if isinstance(data, dict):
             status = data.get("status")
-            # Older backends returned {"committed":true} without a status; a
-            # `committed:true` (or absent status) is a clean success.
             if status is not None and status != "committed":
                 raise PartialStatusError("commit_group", status, data=data)
         return data

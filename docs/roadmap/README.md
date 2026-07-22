@@ -20,7 +20,7 @@ re-describing other docs.
 | `xi::state` / `xi::async` / hot-reload / script DLL versioning | [`../guides/write-a-script.md`](../guides/write-a-script.md) |
 | Replay (buffer_replay plugin), interactive viewer, remote mode | [`../guides/extend-the-ui.md`](../guides/extend-the-ui.md) |
 
-7 plugins shipped under `plugins/`; SDK demo plugins under `sdk/examples/`. Full
+7 plugins shipped under `toolbox/`; SDK demo plugins under `sdk/examples/`. Full
 test surface: [`../../docs/testing.md`](../../docs/testing.md) (→ `testing.md` after cutover).
 
 ## Removed (don't look for these)
@@ -44,6 +44,21 @@ test surface: [`../../docs/testing.md`](../../docs/testing.md) (→ `testing.md`
   sidecar; see `../internals/fe-be.md`.
 - **ws commands `preview_instance` / `process_instance` / `compare_variants`** —
   redundant with `cmd:run`.
+- **In-process `TypedPack<Schema>` / `TypedPackBuilder` / `PackSchema`** (2026-07-11,
+  `cba51fe`) — the second in-process pack container, 0 production consumers.
+  `Pack`/`PackBuilder` is the one container; the *script-side* `ScriptTypedPack`
+  (key-based, `xi_use.hpp`) is unrelated and lives on. See
+  [`../internals/pack-plane.md`](../internals/pack-plane.md).
+- **Cooperative-cancel layer** (2026-07-11, `93de38b`) — the ticket-epoch
+  soft-cancel (`arm_cancel`/`begin_inspect`/cutoff, the `xi_script_set_global_cancel` /
+  `xi_script_inspect_begin` thunks, the `no_verdict`/`watchdog_cancelled` emit).
+  The watchdog is one phase (overrun → grace → hard `_Exit`+respawn); per-task
+  `CancelToken` + `Future::cancel()` + token-only `cancellation_requested()` kept.
+- **Ambient per-run TLS + guard family** (2026-07-11, `a293cfe`) —
+  `g_trigger_ctx_`/`TriggerCtxScope`, the silent-result guard, `g_run_id_` TLS +
+  `xi_script_set_run_id`. Replaced by ONE explicit host-side `RunContext`
+  (propagated by `xi::async`/`xi::parallel_for`/`xi::spawn_worker`); off-run
+  reads fail loud. See [`../reference/c-abi.md`](../reference/c-abi.md) §6.3.
 
 ## Decision log (locked-in)
 
@@ -92,3 +107,12 @@ Several are platform requests from RFC
   RUN mode built; compose mode + the rest forward-looking).
 - [`linux-port.md`](./linux-port.md) — cross-platform port (revisit after a stable
   Windows release).
+- [`memory-domains.md`](./memory-domains.md) — GPU/device memory domains as a
+  lib-plugin (`xi.gpu.pool`) over the reserved `loc` descriptor key; the core owes
+  ONE pool-handle finalizer primitive. Design settled 2026-07-15, need-driven.
+- [`stream-markers.md`](./stream-markers.md) — source-emitted in-band stream
+  control markers (`$eof`/`$segment`/`$count`); zero core change. Design settled
+  2026-07-15, need-driven.
+- [`video-egress.md`](./video-egress.md) — H.264 video arm on `xi.ui.egress`
+  (stateful `xi.video.encode` cap + WebCodecs client); ladder `h264(hw)→jpeg→raw`,
+  `$seq` join, subscribe-edge IDR. Design settled 2026-07-15, need-driven.

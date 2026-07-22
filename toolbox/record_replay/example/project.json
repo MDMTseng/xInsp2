@@ -1,0 +1,15 @@
+{
+  "name": "record_replay_example",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "instances": [
+    { "name": "replay", "plugin": "record_replay" },
+    { "name": "expose", "plugin": "expose" }
+  ],
+  "plugins": {}
+}

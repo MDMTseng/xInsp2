@@ -1,0 +1,9 @@
+{
+  "name": "expose_example",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam",    "plugin": "mock_camera" },
+    { "name": "expose", "plugin": "expose" }
+  ],
+  "plugins": {}
+}

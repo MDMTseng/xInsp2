@@ -1,0 +1,41 @@
+# qa_known_failing.txt - quarantine registry for tools/run_qa.py
+#
+# Format:  <qa_dir_name>: <reason>
+# Lines starting with '#' and blank lines are ignored.
+#
+# WHAT THIS IS
+# A quarantine is NOT a mute. A test listed here still RUNS every time; the gate
+# just does not go red because it failed - instead it prints a loud KNOWN-FAIL
+# line with the reason below. Two things keep the list honest:
+#   * if a quarantined test starts PASSING, run_qa reports it as an UNEXPECTED
+#     PASS and FAILS - you must delete its line here (the list cannot rot green);
+#   * `python tools/run_qa.py --strict` ignores this file entirely and treats
+#     every failure as fatal (the raw truth / the eventual clean-suite gate).
+#
+# WHY THESE ARE HERE (see docs/ci-gate-known-failures.md for the full write-up)
+# When the day-1 gate (tools/gate.py) was first stood up, 13 of 25 qa examples
+# were already red on master - the gate did its job and surfaced a pre-existing
+# broken suite. 12 of the 13 are the "dead-API scripts": their inspect.cpp still
+# uses the RETIRED VAR(...) / EMIT(...) macros and the legacy `xi_inspect_entry(
+# int frame)` entry, all removed from the SDK headers, so they no longer compile
+# (C3861 'EMIT'/'VAR' not found, C2065 'frame' undeclared). Rewriting/deleting
+# those scripts is adoption-map item 4 ("fix or delete the 32 dead-API scripts"),
+# a separate branch - NOT the CI-gate branch. They are quarantined so the gate is
+# usable now (it catches NEW breakage) and self-empties as item 4 lands.
+#
+# Retire a line the moment its script is fixed on the examples branch.
+
+# --- rebuilt 2026-07-02 on polaris_master (two strict runs; P4's example ports
+# --- cleared the 12 dead-API quarantines - 21/25 now pass strict) ---
+qa_reentrancy: flaky on master base (pass->fail across identical runs, review 07 #8 class); deterministic-failing on polaris_master so far - reclassify to strict once it proves stable
+#
+# UN-QUARANTINED 2026-07-15 on qa/flaky-trio (root-caused + fixed, kept SERIAL):
+#   * qa_cpu_affinity: the multi-core-SPREAD check was a fixed 4s window that
+#     sometimes captured too few runs under load. Fixed to poll UNTIL the bound
+#     group spreads across >1 masked core (generous deadline) + a 40ms inspect so
+#     the two lanes reliably overlap. A real single-pin regression still fails at
+#     the deadline, so coverage is intact.
+#   * qa_lifecycle_teardown: NOT actually a timing flake on this branch - THE CUT
+#     (commit 0042385) deleted both fixtures it borrowed (qa_sink_shared_doc,
+#     burst_pipeline), so it hard-failed at open_project. Repointed to a
+#     self-contained burst_source fixture under the test's own dir.

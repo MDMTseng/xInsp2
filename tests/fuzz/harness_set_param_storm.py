@@ -26,7 +26,7 @@ from _common import BackendProc, WS_URL, REPO_ROOT, fuzz_duration, drain_events 
 from xinsp2 import Client, ProtocolError  # noqa: E402
 
 DURATION_S = fuzz_duration(8)
-PROJECT = REPO_ROOT / "examples" / "multi_source_surge"
+PROJECT = REPO_ROOT / "qa" / "multi_source_surge"
 
 
 def main() -> int:

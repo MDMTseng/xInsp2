@@ -1,0 +1,11 @@
+{
+  "plugin": "json_source",
+  "config": {
+    "data": {
+      "part_id": "A-1042",
+      "width_mm": 12.7,
+      "pass_limit": 15,
+      "roi": [0, 0, 64, 64]
+    }
+  }
+}

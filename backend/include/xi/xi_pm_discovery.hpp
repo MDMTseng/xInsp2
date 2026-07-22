@@ -26,10 +26,33 @@ namespace xi {
 // is registered. An already-loaded plugin (handle != nullptr) keeps its
 // handle and resolved factory — we refresh only manifest metadata so
 // rescan_plugins doesn't leak the prior HMODULE.
-inline int PluginManager::scan_plugins(const std::string& plugins_dir) {
+inline int PluginManager::scan_plugins(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                       const std::string& plugins_dir) {
+    if (!std::filesystem::exists(plugins_dir)) return 0;
+
+    // J6: the certify step per changed-hash plugin spawns a throwaway child that
+    // blocks up to 30s (WaitForSingleObject). Running it under mu_ stalls the bus
+    // sink's instance_group() (same mu_) on the source emit hot path for up to
+    // 30s/plugin during a live rescan. So do the subprocess work in an UNLOCKED
+    // pre-pass that only WARMS the on-disk verdict cache; the locked scan below is
+    // unchanged and its certify_folder_locked_ then hits the fresh cache without
+    // spawning. certify_exe_ is set once at startup (set_certify_exe, mu_-guarded)
+    // and never mutated during a scan — snapshot it under a brief lock so the
+    // off-lock precertify_folder_ never touches the member.
+    std::string certify_exe;
+    { std::lock_guard<std::mutex> lk(mu_); certify_exe = certify_exe_; }
+    for (auto& entry : std::filesystem::directory_iterator(plugins_dir)) {
+        if (!entry.is_directory()) continue;
+        const std::string folder = entry.path().string();
+        auto manifest = std::filesystem::path(folder) / "plugin.json";
+        if (!std::filesystem::exists(manifest)) continue;
+        auto info = parse_manifest(manifest.string(), folder);
+        if (info.name.empty()) continue;
+        precertify_folder_(folder, info, certify_exe);   // up-to-30s subprocess, OFF mu_
+    }
+
     std::lock_guard<std::mutex> lk(mu_);
     int count = 0;
-    if (!std::filesystem::exists(plugins_dir)) return 0;
     for (auto& entry : std::filesystem::directory_iterator(plugins_dir)) {
         if (!entry.is_directory()) continue;
         const std::string folder = entry.path().string();
@@ -153,6 +176,40 @@ inline bool PluginManager::register_plugin_folder_locked_(const std::string& fol
         bool moved = (existing->second.folder_path != info.folder_path) ||
                      (existing->second.dll_name     != info.dll_name);
         if (moved) {
+            // SAFETY GUARD (UAF): live CAbiInstanceAdapters (project instances
+            // and machine-autoload providers) cache raw GetProcAddress pointers
+            // into this HMODULE. FreeLibrary-ing it while any such consumer is
+            // alive unmaps the module under them — the next dispatch or adapter
+            // dtor then calls into unmapped memory (SEGV). This branch is only
+            // reachable via a deliberate on-disk move/rename of an in-use
+            // plugin (e.g. an in-place prebuilt upgrade that edits "dll" in
+            // plugin.json), so REFUSE the unload+swap here instead of paying
+            // for a full detach→FreeLibrary→reattach rebuild: keep the old,
+            // still-mapped handle and registration, and tell the operator how
+            // to adopt the new binary. Same in-use predicates the autoload /
+            // reload paths use (see xi_pm_load.hpp).
+            bool in_use = project_provides_plugin_locked_(info.name) ||
+                          machine_instances_.count(info.name) > 0;
+            if (in_use) {
+                std::fprintf(stderr,
+                    "[xinsp2] plugin '%s' moved on disk (%s/%s -> %s/%s) but is IN USE "
+                    "by a live project instance or machine provider — REFUSING the "
+                    "in-place unload+swap (unloading now would leave live adapters "
+                    "calling into an unmapped DLL). The previously loaded binary stays "
+                    "active at its old location. Close the project / evict the machine "
+                    "provider, or recompile via the reload path, then rescan to adopt "
+                    "the new binary.\n",
+                    info.name.c_str(),
+                    existing->second.folder_path.c_str(), existing->second.dll_name.c_str(),
+                    info.folder_path.c_str(), info.dll_name.c_str());
+                // Do NOT touch the entry (its folder/dll must keep describing the
+                // module actually mapped) and do NOT tag it project-tracked here —
+                // retagging could let close_project FreeLibrary a handle a machine
+                // provider still holds. The plugin stays registered and valid.
+                return true;
+            }
+            // Raw FreeLibrary is fine here (no machine-provider evict needed):
+            // the in_use guard above already returned if one holds this module.
             FreeLibrary(existing->second.handle);   // TODO(linux): dlclose
             existing->second.handle    = nullptr;
             existing->second.c_factory = nullptr;
@@ -162,6 +219,7 @@ inline bool PluginManager::register_plugin_folder_locked_(const std::string& fol
             existing->second.has_ui        = info.has_ui;
             existing->second.reentrant     = info.reentrant;
             existing->second.is_sink       = info.is_sink;
+            existing->second.default_on_fault = info.default_on_fault;
             existing->second.json_fallback = info.json_fallback;
             existing->second.prebuilt      = info.prebuilt;
             existing->second.ui_path       = info.ui_path;
@@ -220,6 +278,27 @@ inline void PluginManager::resolve_external_project_plugins_locked_(
     for (auto& d : dirs_raw) roots.push_back(expand_plugin_root_(d, project_folder));
     std::vector<std::filesystem::directory_entry> to_compile;
     for (auto& ref : refs) {
+        // SECURITY (P1): ref.path is VERBATIM from project.json and is joined
+        // onto each search root below — an absolute value DISCARDS the root
+        // (operator/ semantics) and a "../" chain climbs out of it, so a
+        // semi-trusted project folder could LoadLibrary a pre-planted DLL
+        // from an arbitrary machine path (only plugin_abi_compatible gates
+        // it). Require a contained relative path; the check is lexical, so a
+        // passing ref.path stays inside WHICHEVER root resolves it. The
+        // plugin_dirs roots themselves are NOT constrained: an absolute root
+        // (machine-wide toolbox via ${ENV}/~, see expand_plugin_root_) is
+        // host-side configuration, not project-embedded data.
+        if (!path_is_contained(std::filesystem::path(project_folder), ref.path)) {
+            std::string msg =
+                "plugin path '" + ref.path + "' is absolute or escapes the "
+                "project tree ('..') — SKIPPED by the path-containment guard "
+                "(project.json plugins[].path must be relative and resolve "
+                "inside a declared plugin_dir; see path_is_contained)";
+            last_open_warnings_.push_back({ref.label, "", msg});
+            std::fprintf(stderr, "[xinsp2] plugin '%s': %s\n",
+                         ref.label.c_str(), msg.c_str());
+            continue;
+        }
         std::filesystem::path found;
         for (auto& root : roots) {
             auto cand = std::filesystem::path(root) / ref.path;
@@ -261,6 +340,7 @@ inline int PluginManager::compile_project_plugins(const std::string& project_fol
 // and no cache exists. mu_ MUST be held.
 inline certify::Verdict PluginManager::certify_folder_locked_(const std::string& folder,
                                                               const PluginInfo& info) {
+    // info.dll_name is already the platform module file (parse_manifest mapping).
     auto dll_path = (std::filesystem::path(folder) / info.dll_name).string();
     std::string hash = xi::sha256::sha256_file(dll_path);
     if (hash.empty()) return certify::Verdict::unknown;   // source-only / unbuilt — nothing to certify
@@ -273,14 +353,39 @@ inline certify::Verdict PluginManager::certify_folder_locked_(const std::string&
 
     if (certify_exe_.empty()) return certify::Verdict::unknown;   // certification disabled
 
-#ifdef _WIN32
+    // certify::run_certify_subprocess is cross-platform (CreateProcess on Windows,
+    // fork+execl on POSIX — see xi_certify.hpp), so the scan-time gate runs on both.
     auto verdict = certify::run_certify_subprocess(certify_exe_, folder);
     if (verdict != certify::Verdict::unknown)   // don't cache a spawn failure
         certify::write_cache(folder, { info.dll_name, hash, certify::verdict_str(verdict) });
     return verdict;
-#else
-    return certify::Verdict::unknown;
-#endif
+}
+
+// J6 off-lock cache-warm — mirrors certify_folder_locked_'s decision, but spawns
+// the up-to-30s certify child WITHOUT mu_ (certify_exe passed as a snapshot). It
+// only reads/writes the on-disk verdict cache; scan_plugins runs it in an unlocked
+// pre-pass so the locked certify_folder_locked_ then finds the cache fresh (hash
+// unchanged, G1.2) and returns without spawning under the lock. No-op when the DLL
+// hash is unresolvable, the cache is already fresh, or no certify exe is wired.
+inline void PluginManager::precertify_folder_(const std::string& folder,
+                                              const PluginInfo& info,
+                                              const std::string& certify_exe) {
+    // info.dll_name is already the platform module file (parse_manifest mapping).
+    auto dll_path = (std::filesystem::path(folder) / info.dll_name).string();
+    std::string hash = xi::sha256::sha256_file(dll_path);
+    if (hash.empty()) return;                       // source-only / unbuilt — nothing to certify
+
+    certify::CacheEntry cached;
+    if (certify::read_cache(folder, cached) &&
+        cached.dll == info.dll_name && cached.sha256 == hash)
+        return;                                     // G1.2 — hash unchanged, cache already fresh
+
+    if (certify_exe.empty()) return;                // certification disabled
+
+    // Cross-platform certify child (see certify_folder_locked_ above).
+    auto verdict = certify::run_certify_subprocess(certify_exe, folder);
+    if (verdict != certify::Verdict::unknown)       // don't cache a spawn failure
+        certify::write_cache(folder, { info.dll_name, hash, certify::verdict_str(verdict) });
 }
 
 } // namespace xi

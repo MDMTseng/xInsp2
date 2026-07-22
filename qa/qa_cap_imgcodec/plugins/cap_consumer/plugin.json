@@ -1,0 +1,11 @@
+{
+  "name": "cap_consumer",
+  "description": "QA consumer for the capability plane (docs/new_gen/14): its xi.pack@1 door takes a script-built image pack, asks the xi.jpeg.encode capability (host-forwarded, provided by the imgcodec lib instance) for the JPEG, round-trips the bytes through xi.image.decode, and returns jpeg + dedup counters to the script.",
+  "dll": "cap_consumer.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "requires": [
+    { "iface": "xi.pack", "min": 1 },
+    { "iface": "xi.cap", "min": 1 }
+  ]
+}

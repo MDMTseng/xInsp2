@@ -8,7 +8,7 @@
 // its own compose-mode editor below. The HMI is a GENERIC dashboard host: it
 // consumes only the run_result / run_finished / status events + dispatch_stats —
 // no preview/vars/gid decoding (a plugin's own webUI owns those frames).
-import { CARDS,
+import { CARDS, XiClient,
          isLeaf, isSplit, isTabs, weightsOf, validate,
          getNode, addSibling, setCard, setWeights, removePane,
          wrapInTabs, addTab, removeTab, renameTab, setActive } from "./lib/xi-components.esm.js";
@@ -16,12 +16,12 @@ import { CARDS,
 const qs = new URLSearchParams(location.search);
 // Default to a same-origin /ws (served by serve.mjs's proxy) so one HTTP tunnel
 // exposes both the page and the WS. Override with ?ws=ws://host:port/ for a
-// direct backend connection (e.g. serve.py's static-only mode).
+// direct backend connection to a separately-started backend).
 const WS_URL = qs.get("ws") ||
   `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 const DASH = qs.get("dashboard") || "./dashboard.json";
 
-const state = { run_id: -1, run_ms: null, status: null, result: null, groups: [] };
+const state = { run_id: -1, compute_ms: null, status: null, result: null, groups: [] };
 let cards = [];
 let raf = 0;
 
@@ -53,6 +53,61 @@ dlog(`WS_URL=${WS_URL}  (host=${location.host} proto=${location.protocol})`);
 
 const badge = () => document.getElementById("conn");
 function setConn(txt, color) { const b = badge(); if (b) { b.textContent = txt; b.style.background = color; } }
+
+// ---- canonical health/state (schema xi.health/1) ----------------------------
+// The ONE authoritative read of the backend's state machine + which component (if
+// any) is unhealthy — pulled once on connect (get_health, the delivery guarantee)
+// and kept live by the health_changed event (accelerator). This replaces the HMI
+// inferring liveness from the event stream; the connection badge stays as-is
+// (transport up/down), and this small text pill next to it carries the canonical
+// state. Degrades gracefully on an older backend that lacks get_health
+// (feature-detected via the "unknown command" rsp): the pill stays hidden.
+let healthPill = null;          // lazily inserted into the header next to #conn
+let healthSupported = true;     // set false once a backend answers "unknown command"
+let lastHealth = null;          // last full snapshot, so an event can overlay onto it
+const STATE_COLORS = {
+  boot: "#4a4a4a", project_loaded: "#3a5a7a", running: "#1e6a3a",
+  degraded: "#7a4a1e", draining: "#5a5a2e", fault: "#6a1e1e",
+};
+function ensureHealthPill() {
+  if (healthPill || !healthSupported) return healthPill;
+  const conn = document.getElementById("conn");
+  if (!conn || !conn.parentNode) return null;
+  healthPill = document.createElement("span");
+  healthPill.id = "health";
+  // Mirror the #conn pill's look so this is information, not a redesign.
+  healthPill.style.cssText = (conn.style.cssText || "") +
+    ";font-size:12px;padding:2px 10px;border-radius:10px;color:#eee;margin-left:8px";
+  healthPill.style.display = "none";
+  conn.parentNode.insertBefore(healthPill, conn.nextSibling);
+  return healthPill;
+}
+// Non-ok components as a short text list (the failing set a degraded/fault points at).
+function failingText(components) {
+  return (components || [])
+    .filter((c) => c && c.health && c.health !== "ok")
+    .map((c) => `${c.kind} "${c.name}": ${c.health}${c.reason_code ? " (" + c.reason_code + ")" : ""}`)
+    .join(", ");
+}
+// Apply a parsed health object ({state, components?, component?}). An event carries
+// only the changed `component`, so overlay it onto the last full snapshot's list.
+function setHealth(h) {
+  if (!h || typeof h !== "object") return;
+  const pill = ensureHealthPill();
+  if (!pill) return;
+  let components = Array.isArray(h.components) ? h.components.slice() : (lastHealth ? lastHealth.components.slice() : []);
+  if (h.component && h.component.name) {
+    const c = h.component, i = components.findIndex((x) => x.kind === c.kind && x.name === c.name);
+    if (i >= 0) components[i] = c; else components.push(c);
+  }
+  lastHealth = { state: h.state || "boot", components };
+  const bad = failingText(components);
+  pill.textContent = `● health: ${lastHealth.state}` + (bad ? ` — ${bad}` : "");
+  pill.style.background = STATE_COLORS[lastHealth.state] || "#4a4a4a";
+  pill.style.display = "";
+  dlog(`health: ${lastHealth.state}${bad ? " — " + bad : ""}`);
+}
+function resetHealth() { lastHealth = null; if (healthPill) healthPill.style.display = "none"; }
 
 function scheduleRender() {
   if (raf) return;
@@ -266,54 +321,108 @@ function buildControls() {
 }
 buildControls();
 
+// One transport for the whole HMI: the shared, generic XiClient shim (from the
+// vendored ui-components bundle) owns envelope parsing, request/response
+// correlation, and connection lifecycle — so this page no longer hand-rolls a
+// second envelope parser. The shim doesn't auto-reconnect (by design); the HMI
+// keeps its own 1.5 s reconnect loop and wires the shim's lifecycle events to the
+// on-page diagnostics. Binary frames are ignored (no onBinary subscription): a
+// plugin's own webUI owns preview/vars/gid decode, not this generic host.
+const client = new XiClient(WS_URL);
+let statsTimer = 0, reconnectPending = false;
+
+const stopStatsPoll = () => { if (statsTimer) { clearInterval(statsTimer); statsTimer = 0; } };
+// Poll dispatch_stats so the groups card can show live per-group concurrency.
+// Cheap, so just poll whenever connected (the reply is ignored if no groups card).
+const startStatsPoll = () => {
+  if (statsTimer) return;
+  statsTimer = setInterval(() => {
+    client.cmd("dispatch_stats")
+      .then((d) => { if (d && Array.isArray(d.groups)) { state.groups = d.groups; scheduleRender(); } })
+      .catch(() => { /* reply races a disconnect — next poll or reconnect covers it */ });
+  }, 150);
+};
+// Pull the canonical health snapshot on connect (delivery guarantee behind the
+// health_changed accelerator). Feature-detected: an older backend rejects with an
+// "unknown command" rsp → mark unsupported so the pill stays hidden and the HMI
+// keeps its prior behaviour (no version-sniffing).
+const requestHealth = () => {
+  client.cmd("get_health")
+    .then((h) => setHealth(h))
+    .catch((e) => {
+      if (e && /unknown command/i.test(e.message || "")) {
+        healthSupported = false;
+        dlog("BE has no get_health — health pill disabled (older backend)");
+      } // any other error: a reply racing a disconnect — the reconnect re-pulls
+    });
+};
+// Ask the BE for the PROJECT's dashboard so the HMI only needs the WS URL (no
+// filesystem coupling). If the project has one it overrides the static fetch.
+const requestDashboard = () => {
+  client.cmd("get_dashboard", BOARD ? { name: BOARD } : {})
+    .then((d) => {
+      if (d && d.found && d.dashboard) { dlog("dashboard from BE (project)"); applyDash(d.dashboard); }
+      else dlog("BE has no project dashboard — keeping static");
+    })
+    .catch((e) => dlog(`get_dashboard failed: ${e && e.message ? e.message : e}`));
+};
+
+client.onEvent((m) => {
+  if (m.name === "run_finished" && m.data) {
+    if (typeof m.data.run_id === "number") state.run_id = m.data.run_id;
+    // INSPECT COMPUTE time only — NOT cycle/decision latency (ws-protocol.md
+    // "run_finished"). Prefer the explicitly named `inspect_compute_us` (µs);
+    // fall back to the legacy integer `ms`. The throughput card shows this as a
+    // secondary, honestly labelled "compute … ms" readout; real parts/min comes
+    // from counting run_result events over wall-clock time, not from this.
+    if (typeof m.data.inspect_compute_us === "number") state.compute_ms = m.data.inspect_compute_us / 1000;
+    else if (typeof m.data.ms === "number") state.compute_ms = m.data.ms;
+    scheduleRender();
+  }
+  // The one per-run verdict (see docs/roadmap/run-result.md). Carries its own
+  // run_id (absent on a dropped frame) so cards can count distinct runs.
+  else if (m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
+  else if (m.name === "status") { state.status = m.data; scheduleRender(); }
+  // Canonical health/state accelerator. Ignore until get_health confirmed support
+  // (a stray event mustn't un-hide the pill on a backend we classified as too old).
+  else if (m.name === "health_changed" && healthSupported) { setHealth(m.data); }
+});
+
+client.onOpen(() => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); requestHealth(); });
+client.onClose((info) => {
+  stopStatsPoll();
+  // Health is per-connection; drop the pill + re-pull on reconnect (a stale
+  // "running" from a dead backend would mislead).
+  resetHealth();
+  if (info.busy) {
+    // Single-client reject: the backend is up and healthy but owned by another
+    // client (ws-protocol.md "Single-client enforcement"). Say so instead of a
+    // generic "disconnected" — and keep retrying, since it clears when they leave.
+    dlog(`WS CLOSE — another client owns the backend (single-client-busy; code=${info.code ?? "-"})`);
+    setConn("● another client is connected", "#7a4a1e");
+  } else {
+    dlog(`WS CLOSE code=${info.code ?? "-"} reason=${info.reason || "-"}`);
+    setConn("● disconnected", "#6a1e1e");
+  }
+  scheduleReconnect();
+});
+
+function scheduleReconnect(delay = 1500) {
+  if (reconnectPending) return;   // dedupe, so a repeated close can't stack reconnects
+  reconnectPending = true;
+  setTimeout(() => { reconnectPending = false; connect(); }, delay);
+}
+
 function connect() {
   setConn("connecting…", "#7a6a1e");
   dlog(`WS connect -> ${WS_URL}`);
-  let ws;
-  try { ws = new WebSocket(WS_URL); }
-  catch (e) { dlog(`WS constructor threw: ${e}`); setConn("● bad url", "#6a1e1e"); return; }
-  ws.binaryType = "arraybuffer";
-  // Poll dispatch_stats so the groups card can show live per-group concurrency.
-  // Cheap, so just poll whenever connected (the rsp is ignored if no groups card).
-  let statsTimer = 0, cmdId = 1, dashCmdId = -1;
-  const startStatsPoll = () => {
-    if (statsTimer) return;
-    statsTimer = setInterval(() => {
-      if (ws.readyState === 1) ws.send(JSON.stringify({ type: "cmd", id: ++cmdId, name: "dispatch_stats", args: {} }));
-    }, 150);
-  };
-  // Ask the BE for the PROJECT's dashboard so the HMI only needs the WS URL (no
-  // filesystem coupling). If the project has one it overrides the static fetch.
-  const requestDashboard = () => {
-    dashCmdId = ++cmdId;
-    ws.send(JSON.stringify({ type: "cmd", id: dashCmdId, name: "get_dashboard", args: BOARD ? { name: BOARD } : {} }));
-  };
-  ws.onopen = () => { dlog("WS OPEN ✓"); setConn("● live", "#1e6a3a"); startStatsPoll(); requestDashboard(); };
-  ws.onclose = (e) => { dlog(`WS CLOSE code=${e.code} reason=${e.reason || "-"} clean=${e.wasClean}`); if (statsTimer) { clearInterval(statsTimer); statsTimer = 0; } setConn("● disconnected", "#6a1e1e"); setTimeout(connect, 1500); };
-  ws.onerror = () => { dlog("WS ERROR event"); ws.close(); };
-  ws.onmessage = (ev) => {
-    // Generic dashboard host: only text events/replies are consumed. Binary
-    // frames (a plugin's own previews) are ignored here — the plugin's webUI
-    // owns that decode; this page carries no preview/vars/gid wiring.
-    if (typeof ev.data !== "string") return;
-    let m; try { m = JSON.parse(ev.data); } catch { return; }
-    if (m.type === "event" && m.name === "run_finished" && m.data) {
-      if (typeof m.data.run_id === "number") state.run_id = m.data.run_id;
-      if (typeof m.data.ms === "number") state.run_ms = m.data.ms;
-      scheduleRender();
-    }
-    // The one per-run verdict (see docs/roadmap/run-result.md). Carries its own
-    // run_id (absent on a dropped frame) so cards can count distinct runs.
-    else if (m.type === "event" && m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
-    else if (m.type === "event" && (m.name === "safe_state" || m.name === "status")) { state.status = m.data; scheduleRender(); }
-    // dispatch_stats reply → feed the groups card.
-    else if (m.type === "rsp" && m.data && Array.isArray(m.data.groups)) { state.groups = m.data.groups; scheduleRender(); }
-    // get_dashboard reply → the project's own dashboard wins over the static one.
-    else if (m.type === "rsp" && m.id === dashCmdId) {
-      if (m.data?.found && m.data.dashboard) { dlog("dashboard from BE (project)"); applyDash(m.data.dashboard); }
-      else dlog("BE has no project dashboard — keeping static");
-    }
-  };
+  // The shim rejects on any pre-open failure; onClose (above) already handles the
+  // badge + reconnect for a socket that reached the network, so this catch only
+  // needs to cover the no-close cases (bad URL, version mismatch) and log them.
+  client.connect().catch((e) => {
+    dlog(`WS connect rejected: ${e && e.message ? e.message : e}`);
+    if (!e || !("busy" in e)) { setConn("● bad url", "#6a1e1e"); }  // no socket ever opened/closed
+  });
 }
 
 // Run layout + connect independently so a layout error can't block the WS, and

@@ -1,8 +1,16 @@
 //
-// test_interface_domains.cpp — Phase 3 proof: the remaining capability domains
-// (xi.imaging@1 / xi.doc@1 / xi.emit@1 / xi.log@1) are carved out of the v9
-// monolith as frozen, segregated interfaces reached through host->get_interface,
-// each one byte-for-byte IDENTICAL to the legacy xi_host_api fields it groups.
+// test_interface_domains.cpp — Phase 3 proof: the SURVIVING capability domains
+// (xi.imaging@1 / xi.imaging_rw@1 / xi.emit@1 [emit_binary only] / xi.log@1) are
+// carved out of the v9 monolith as frozen, segregated interfaces reached through
+// host->get_interface, each one byte-for-byte IDENTICAL to the legacy xi_host_api
+// fields it groups.
+//
+// THE CUT (v12) retired several planes that this test used to cover: the
+// xi.doc@1 interface (doc_chunk_*/doc_retain/release/refcount), the emit_record
+// slot on xi.emit@1, and the read_image_file host slot (evicted to the
+// xi.image.decode capability, dropped from xi.imaging@1). Every section/assert
+// that referenced those DELETED planes has been removed; only the live-domain
+// coverage remains.
 //
 // core_fix_plan.md §12 Phase 3. The carve is PURELY ADDITIVE: it does not move
 // any xi_host_api field (the freeze guard in test_abi_freeze.cpp stays green).
@@ -16,7 +24,6 @@
 #include <xi/xi_abi.h>
 #include <xi/xi_abi.hpp>          // xi::Plugin (SDK wrappers)
 #include <xi/xi_image_pool.hpp>   // xi::ImagePool::make_host_api
-#include <xi/xi_trigger_bus.hpp>  // xi::install_trigger_hook (wires emit_record)
 #include <xi/xi_binary_sink.hpp>
 #include <xi/xi_status_sink.hpp>
 
@@ -35,12 +42,6 @@ static int g_failures = 0;
         }                                                                      \
     } while (0)
 
-// A sentinel read_image_file so the imaging interface has a non-null entry to
-// compare (and the SDK read_image_file wrapper has something to forward to).
-static xi_image_handle fake_read_image(const char* path) {
-    return path && std::strcmp(path, "ok") == 0 ? (xi_image_handle)0xABCD : XI_IMAGE_NULL;
-}
-
 // Observers for the emit/log domains so the SDK wrappers can be seen to forward.
 static int     g_binary_calls = 0;
 static int     g_binary_len   = 0;
@@ -51,14 +52,10 @@ static void    obs_status(const char* s, const char* t) {
 }
 
 int main() {
-    std::printf("[test] xi.imaging/xi.doc/xi.emit/xi.log @1 — carved interfaces "
-                "== legacy fields, byte for byte\n");
+    std::printf("[test] xi.imaging/xi.imaging_rw/xi.emit/xi.log @1 — surviving "
+                "carved interfaces == legacy fields, byte for byte\n");
     static_assert(XI_ABI_VERSION >= 10, "domain carve assumes the v10 door");
 
-    // Install a reader BEFORE building the table so read_image_file is non-null in
-    // both the test's host table and the host's canonical (interface-backing)
-    // table — they must capture the same installed pointer to match.
-    xi::ImagePool::install_read_image_file(&fake_read_image);
     xi::binary_sink() = &obs_binary;
     xi::status_sink() = &obs_status;
 
@@ -66,6 +63,9 @@ int main() {
     CHECK(host.get_interface != nullptr);
 
     // ---- (1) xi.imaging@1 resolves and matches the legacy fields ------------
+    // [ABI v12 — read_image_file was DROPPED from xi.imaging@1 at THE CUT; its
+    //  host slot is evicted to the xi.image.decode capability. Only the image
+    //  pool entries remain.]
     {
         const auto* iv = static_cast<const xi_imaging_v1*>(
             host.get_interface("xi.imaging", 1));
@@ -79,8 +79,6 @@ int main() {
             CHECK(iv->image_height    == host.image_height);
             CHECK(iv->image_channels  == host.image_channels);
             CHECK(iv->image_stride    == host.image_stride);
-            CHECK(iv->read_image_file == host.read_image_file);
-            CHECK(iv->read_image_file == &fake_read_image);
         }
     }
 
@@ -125,51 +123,42 @@ int main() {
         }
     }
 
-    // ---- (2) xi.doc@1 resolves and matches -----------------------------------
-    {
-        const auto* dv = static_cast<const xi_doc_v1*>(host.get_interface("xi.doc", 1));
-        CHECK(dv != nullptr);
-        if (dv) {
-            CHECK(dv->doc_chunk_alloc   == host.doc_chunk_alloc);
-            CHECK(dv->doc_chunk_realloc == host.doc_chunk_realloc);
-            CHECK(dv->doc_chunk_free    == host.doc_chunk_free);
-            CHECK(dv->doc_retain        == host.doc_retain);
-            CHECK(dv->doc_release       == host.doc_release);
-            CHECK(dv->doc_refcount      == host.doc_refcount);
-        }
-    }
+    // ---- (2) [ABI v12 — the xi.doc@1 block was DELETED at THE CUT.] ----------
+    // xi_doc_v1 and its doc_chunk_alloc/realloc/free + doc_retain/release/
+    // refcount host slots are gone with the Record yyjson-doc dispatch path.
+    // get_interface("xi.doc", *) no longer resolves.
 
-    // ---- (3) xi.emit@1 resolves; emit_binary matches, emit_record is a LIVE door
+    // ---- (3) xi.emit@1 resolves; emit_binary matches ------------------------
+    // [ABI v12 — emit_record was DROPPED from xi.emit@1 at THE CUT; a source now
+    //  emits a sealed pack via xi_pack_v1::emit_pack. xi.emit@1 carries only the
+    //  WS binary push.]
     {
         const auto* ev = static_cast<const xi_emit_v1*>(host.get_interface("xi.emit", 1));
         CHECK(ev != nullptr);
         if (ev) {
             CHECK(ev->emit_binary == host.emit_binary);
-            // emit_record is served as a STABLE forwarder (not the raw field): the
-            // door hands out a NON-NULL pointer even on a bare table, so a future
-            // plugin that trusts the door never gets the old permanent null. The
-            // forwarder reads a slot install_trigger_hook publishes (see 3b).
-            CHECK(ev->emit_record != nullptr);
         }
     }
 
-    // ---- (3b) on a FULLY WIRED table the door's emit_record reaches the bus ----
-    // install_trigger_hook wires host.emit_record AND publishes it into the slot
-    // the door's forwarder reads. The freeze-guard proves every carved entry still
-    // tracks its struct-field twin (emit_record functionally: slot == wired field).
+    // ---- (3a) xi.emit@2 resolves; emit_binary_owned present (perf/ws-lean) -----
+    // The zero-copy owned-emit door is an ADDITIVE supplement to @1; it is NOT a
+    // host_api struct field (the v12 layout is frozen), so it has no field twin to
+    // match — just assert it resolves and carries the verb.
     {
-        xi_host_api wired = xi::ImagePool::make_host_api();
-        xi::install_trigger_hook(wired);
-        CHECK(wired.emit_record != nullptr);
-        const auto* ev = static_cast<const xi_emit_v1*>(wired.get_interface("xi.emit", 1));
-        CHECK(ev != nullptr);
-        if (ev) {
-            CHECK(ev->emit_record != nullptr);            // the stable forwarder
-            CHECK(ev->emit_binary == wired.emit_binary);  // still the same field
-        }
-        // The forwarder's target (published slot) now equals the wired field, and
-        // every other carved entry equals its struct field — freeze-guard green.
-        CHECK(xi::ImagePool::door_matches_fields(wired));
+        const auto* ev2 = static_cast<const xi_emit_v2*>(host.get_interface("xi.emit", 2));
+        CHECK(ev2 != nullptr);
+        if (ev2) CHECK(ev2->emit_binary_owned != nullptr);
+    }
+
+    // ---- (3b) freeze-guard: every carved entry tracks its struct-field twin --
+    // [ABI v12 — install_trigger_hook + the emit_record forwarder were DELETED
+    //  at THE CUT, so there is no longer a "wired" table to build; the carved
+    //  interfaces are pure pointer copies of make_host_api()'s fields.]
+    // door_matches_fields survives and asserts every surviving carved interface
+    // fn-pointer equals its xi_host_api struct-field twin, so the door and the
+    // field can never silently drift onto different code paths.
+    {
+        CHECK(xi::ImagePool::door_matches_fields(host));
     }
 
     // ---- (4) xi.log@1 resolves and matches -----------------------------------
@@ -192,23 +181,13 @@ int main() {
 
     // ---- (6) unknown id / wrong version -> null ------------------------------
     CHECK(host.get_interface("xi.imaging", 2) == nullptr);
-    CHECK(host.get_interface("xi.doc", 0)     == nullptr);
+    CHECK(host.get_interface("xi.log", 99)    == nullptr);  // live domain, wrong version
     CHECK(host.get_interface("xi.emit", 99)   == nullptr);
     CHECK(host.get_interface("xi.nope", 1)    == nullptr);
 
     // ---- (7) SDK wrappers: v10 host uses the interface -----------------------
     {
         xi::Plugin plug(&host, "domains_v10");
-        // imaging: read_image_file forwards to the installed reader.
-        CHECK(plug.read_image_file("ok") == (xi_image_handle)0xABCD);
-        CHECK(plug.read_image_file("no") == XI_IMAGE_NULL);
-        // doc: alloc/refcount roundtrip through the host allocator.
-        void* p = plug.doc_chunk_alloc(64);
-        CHECK(p != nullptr);
-        p = plug.doc_chunk_realloc(p, 128);
-        CHECK(p != nullptr);
-        plug.doc_chunk_free(p);
-        CHECK(plug.doc_refcount(nullptr) == 0);   // unregistered doc -> 0
         // emit: emit_binary forwards to the installed binary sink.
         g_binary_calls = 0;
         std::vector<uint8_t> frame{1, 2, 3, 4};
@@ -237,10 +216,6 @@ int main() {
         old_host.get_interface = nullptr;            // pre-v10: no query door
         xi::Plugin plug(&old_host, "domains_legacy");
         // All wrappers must fall back to the legacy fields and behave identically.
-        CHECK(plug.read_image_file("ok") == (xi_image_handle)0xABCD);
-        void* p = plug.doc_chunk_alloc(32);
-        CHECK(p != nullptr);
-        plug.doc_chunk_free(p);
         g_binary_calls = 0;
         std::vector<uint8_t> frame{9, 9};
         plug.emit_binary(frame);

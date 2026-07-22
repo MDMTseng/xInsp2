@@ -20,6 +20,9 @@
     #define WIN32_LEAN_AND_MEAN
   #endif
   #include <windows.h>
+#else
+  #include <sys/wait.h>   // WIFEXITED / WEXITSTATUS for popen'd compile
+  #include <unistd.h>
 #endif
 
 #include <atomic>
@@ -34,7 +37,37 @@
 #include <string>
 #include <vector>
 
+#include "xi_proc.hpp"   // round-3 #6: the ONE bounded win32 spawn
+
 namespace xi::script {
+
+// Reap per-PID script-build dirs left by DEAD backends under `base` (J1). Each
+// per-PID dir holds a ~200 MB PCH, so without reaping they pile up across every run
+// and fill the disk — the parallel-QA harness alone spawns dozens. A `<pid>` subdir
+// is reapable when no live process owns that pid. Called at startup so each new
+// backend collects its dead predecessors; best-effort (skip anything unclassifiable
+// or in-use). Never removes a live backend's dir (concurrent starts see each other
+// as alive).
+inline void reap_stale_build_dirs(const std::filesystem::path& base) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(base, ec)) return;
+    for (const auto& e : fs::directory_iterator(base, ec)) {
+        if (ec) break;
+        if (!e.is_directory(ec)) continue;
+        unsigned long pid = 0;
+        try { pid = std::stoul(e.path().filename().string()); }
+        catch (...) { continue; }   // not a <pid> dir — leave it
+        bool alive = false;
+#ifdef _WIN32
+        if (HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid)) {
+            alive = (WaitForSingleObject(h, 0) == WAIT_TIMEOUT);
+            CloseHandle(h);
+        }
+#endif
+        if (!alive) fs::remove_all(e.path(), ec);
+    }
+}
 
 // What kind of DLL we're building. Affects:
 //   - which header gets force-included (script vs plugin support)
@@ -69,6 +102,14 @@ struct CompileRequest {
     // One knob = on/off AND the oversubscription ceiling. Links vcomp140.dll
     // (in System32, no extra deploy). See docs/guides/write-a-script.md.
     int openmp_max_threads = 0;
+    // Blessed-concurrency guard (adoption map item 11): a raw OpenMP pragma
+    // written directly in a SCRIPT's own source is rejected at compile time and
+    // the author is steered to xi::parallel_for / xi::async (which install the
+    // SEH translator + image-pool owner on every worker). false = reject (default,
+    // Script mode only); true = an explicit project.json "allow_raw_omp" opt-out
+    // for a power user who accepts the worker-thread safety rules. Ignored for
+    // plugin modes (plugins own their own threads + crash posture).
+    bool allow_raw_omp = false;
     // OpenCV install root — REQUIRED. Plugins/scripts include
     // <opencv2/opencv.hpp> directly via xi.hpp / xi_plugin_support.hpp,
     // so the compile step needs the include + lib paths wired in.
@@ -148,6 +189,16 @@ inline std::string ensure_utf8(std::string s) {
         }
     }
     if (!converted)
+        for (auto& c : s)
+            if (static_cast<unsigned char>(c) >= 0x80) c = '?';
+#else
+    // POSIX: gcc/clang emit UTF-8, so valid diagnostics pass through untouched.
+    // The invariant is that the RESULT is always valid UTF-8 (the WS frame is
+    // UTF-8) — there is no code-page transcode to do, but if a diagnostic ever
+    // carries non-UTF-8 bytes (a mislocalized external toolchain, a stray byte),
+    // replace the non-ASCII bytes so nothing invalid reaches the wire. The ASCII
+    // skeleton (error codes, quotes, paths) survives intact.
+    if (!s.empty() && !is_valid_utf8(s))
         for (auto& c : s)
             if (static_cast<unsigned char>(c) >= 0x80) c = '?';
 #endif
@@ -244,6 +295,75 @@ inline std::vector<Diagnostic> parse_diagnostics(const std::string& log) {
     return out;
 }
 
+// Parse gcc/clang diagnostics (the POSIX compile driver). The format is:
+//   foo.cpp:42:15: error: 'x' was not declared in this scope
+//   foo.cpp:42: warning: ...            (no column)
+//   foo.cpp:42:15: note: ...
+//   /usr/bin/ld: foo.o: undefined reference to 'bar'   (linker — no line/col)
+// The severity marker is " <sev>: " after the "file:line:col" prefix. Caret /
+// "In file included from" / "candidate:" continuation lines carry no marker and
+// are skipped, matching the MSVC parser's line-oriented behaviour.
+inline std::vector<Diagnostic> parse_diagnostics_gcc(const std::string& log) {
+    std::vector<Diagnostic> out;
+    auto is_num = [](const std::string& s) {
+        if (s.empty()) return false;
+        for (char c : s) if (c < '0' || c > '9') return false;
+        return true;
+    };
+    struct SevMatch { const char* tag; const char* sev; };
+    const SevMatch sevs[] = {
+        { ": fatal error: ", "error"   },
+        { ": error: ",       "error"   },
+        { ": warning: ",     "warning" },
+        { ": note: ",        "note"    },
+    };
+    size_t pos = 0;
+    while (pos < log.size()) {
+        size_t eol = log.find('\n', pos);
+        std::string line = log.substr(pos, (eol == std::string::npos ? log.size() : eol) - pos);
+        pos = (eol == std::string::npos) ? log.size() : eol + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        size_t sev_at = std::string::npos;
+        const char* sev_name = nullptr;
+        size_t sev_len = 0;
+        for (auto& s : sevs) {
+            size_t hit = line.find(s.tag);
+            if (hit != std::string::npos && (sev_at == std::string::npos || hit < sev_at)) {
+                sev_at = hit; sev_name = s.sev; sev_len = std::strlen(s.tag);
+            }
+        }
+        if (sev_at == std::string::npos) continue;
+
+        Diagnostic d;
+        d.severity = sev_name;
+        d.message  = line.substr(sev_at + sev_len);
+
+        // Left of the marker: "<file>", "<file>:<line>", or "<file>:<line>:<col>".
+        std::string left = line.substr(0, sev_at);
+        size_t c1 = left.rfind(':');
+        if (c1 != std::string::npos && is_num(left.substr(c1 + 1))) {
+            std::string last = left.substr(c1 + 1);
+            size_t c2 = (c1 == 0) ? std::string::npos : left.rfind(':', c1 - 1);
+            std::string mid = (c2 == std::string::npos) ? std::string() : left.substr(c2 + 1, c1 - c2 - 1);
+            try {
+                if (c2 != std::string::npos && is_num(mid)) {
+                    d.file = left.substr(0, c2);
+                    d.line = std::stoi(mid);
+                    d.col  = std::stoi(last);
+                } else {
+                    d.file = left.substr(0, c1);
+                    d.line = std::stoi(last);
+                }
+            } catch (...) { d.file = left; }
+        } else {
+            d.file = left;   // linker / driver error with no line info
+        }
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+
 // VAR(name, expr) expands to `auto name = ...`, so the SAME name twice in one
 // scope is a plain C++ redefinition — cl reports a terse "'name': redefinition"
 // (C2374/C2086/...) pointing at the macro, which is easy to misread. This maps
@@ -305,6 +425,60 @@ inline void augment_var_redefinitions(std::vector<Diagnostic>& diags,
                 "value without re-declaring.";
         d.message += "\n" + hint;
     }
+}
+
+// Blessed-concurrency guard (adoption map item 11 / concurrency review finding 4).
+// Return the 1-based line numbers of RAW OpenMP directives (`#pragma omp ...`)
+// found in a script's own source text.
+//
+// Why reject rather than translate: a hardware fault inside a raw `#pragma omp`
+// region runs on a vcomp worker thread that has NO per-thread SEH translator, so
+// it is not converted to a catchable xi::seh_exception — it terminates the whole
+// backend — and pool images the region creates are tagged owner=0 and escape the
+// per-script leak sweep. The blessed xi::parallel_for / xi::async wrappers install
+// the translator + owner on every worker; nothing else guarantees it (the DLL-load
+// warmup in xi_script_support.hpp is a best-effort floor, not airtight for nested /
+// dynamic / grown teams). We can't simply drop /openmp to neutralize the raw form:
+// those same wrappers are header-only and expand `#pragma omp parallel` INTO the
+// script TU, so they REQUIRE /openmp to actually parallelize. The precise boundary
+// is therefore a scan of the AUTHOR's own source (never the xi headers, which carry
+// the blessed pragma) that steers a raw directive to the wrappers.
+//
+// Detection is line-based on preprocessor-directive shape: optional leading
+// whitespace, '#', optional whitespace, "pragma", whitespace, "omp". That is
+// exactly how a real `#pragma omp ...` must appear (directives are line-oriented),
+// so it never matches "omp" inside a string/identifier on a code line. A trailing
+// `//` line comment is stripped first so a commented-out example isn't flagged.
+// (A raw-string literal spanning lines whose content mimics a directive is a known
+// false positive — rare in inspect scripts, and the "allow_raw_omp" opt-out covers
+// the author who genuinely needs it.)
+inline std::vector<int> raw_omp_pragma_lines(const std::string& src) {
+    std::vector<int> hits;
+    size_t pos = 0;
+    int lineno = 0;
+    while (pos <= src.size()) {
+        size_t eol = src.find('\n', pos);
+        std::string line = src.substr(pos, (eol == std::string::npos ? src.size() : eol) - pos);
+        pos = (eol == std::string::npos) ? src.size() + 1 : eol + 1;
+        ++lineno;
+        // Strip a // line comment (naive — fine for directive detection).
+        size_t slashes = line.find("//");
+        if (slashes != std::string::npos) line.resize(slashes);
+        size_t i = 0;
+        auto skip_ws = [&] { while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i; };
+        skip_ws();
+        if (i >= line.size() || line[i] != '#') continue;
+        ++i; skip_ws();
+        if (line.compare(i, 6, "pragma") != 0) continue;
+        i += 6;
+        if (i < line.size() && line[i] != ' ' && line[i] != '\t') continue;  // "pragmaX"
+        skip_ws();
+        if (line.compare(i, 3, "omp") != 0) continue;
+        i += 3;
+        if (i < line.size() && line[i] != ' ' && line[i] != '\t') continue;  // "ompX"
+        hits.push_back(lineno);
+    }
+    return hits;
 }
 
 namespace detail {
@@ -400,7 +574,7 @@ inline const std::vector<char>* vcvars_env_block(const std::string& vcvars) {
         return it->second.size() > 1 ? &it->second : nullptr;
 
     std::vector<char> block;
-    std::string cmd = "cmd /C \"\"" + vcvars + "\" >nul 2>nul && set\"";
+    std::string cmd = "cmd /C \"" + xi::proc::quote_arg(vcvars) + " >nul 2>nul && set\"";
     if (FILE* pipe = _popen(cmd.c_str(), "r")) {
         char line[32768];
         bool have_vslang = false;
@@ -424,21 +598,32 @@ inline const std::vector<char>* vcvars_env_block(const std::string& vcvars) {
     return slot.size() > 1 ? &slot : nullptr;
 }
 
-// Run a command line under a custom environment block; returns the process exit
-// code, or -1 if it couldn't be launched. (cl.exe is invoked via `cmd /C` so the
-// env's PATH resolves cl + the redirection works.)
-inline int run_with_env(const std::string& cmdline, const std::vector<char>& env) {
-    std::vector<char> mut(cmdline.begin(), cmdline.end());
-    mut.push_back('\0');
-    STARTUPINFOA si{}; si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessA(nullptr, mut.data(), nullptr, nullptr, FALSE, 0,
-                        (LPVOID)env.data(), nullptr, &si, &pi))
-        return -1;
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 0; GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-    return (int)code;
+// Generous ceiling on a single cl.exe invocation. A wedged toolchain (mspdbsrv
+// contention, an AV-locked link output, a hung vcvars child) must NOT freeze the
+// poll thread — and thus ALL WS commands — indefinitely. On timeout we kill the
+// child and treat it as a compile failure (mirrors the certify path's
+// WaitForSingleObject-with-timeout + TerminateProcess in xi_certify.hpp).
+static constexpr DWORD kCompileTimeoutMs = 300000;   // 5 min
+
+// Run a command line under a custom environment block (nullptr = inherit the
+// parent's); returns the process exit code, or -1 if it couldn't be launched,
+// or -2 if it exceeded kCompileTimeoutMs (the caller reports a "toolchain
+// timed out" diagnostic). (cl.exe is invoked via `cmd /C` so the env's PATH
+// resolves cl + the redirection works.)
+//
+// Round-3 #6: delegates to xi::proc::spawn_bounded. Two gaps closed:
+//   * the old copy killed only the immediate cmd.exe on timeout — orphaned
+//     cl.exe/mspdbsrv kept the .dll/.pdb locked; the job object now reaps the
+//     whole tree;
+//   * both compile paths fell back to UNBOUNDED std::system when the vcvars
+//     env capture failed — a wedged cl pinned the poll thread forever (the
+//     exact class kCompileTimeoutMs was added to kill). The fallback is now a
+//     bounded inherit-env spawn (the command line routes vcvars inline, so
+//     inherit-env is the std::system-equivalent), env == nullptr here.
+// Return-code semantics (0/exit-code, -1 spawn failure, -2 timeout) are
+// unchanged for all callers.
+inline int run_with_env(const std::string& cmdline, const std::vector<char>* env) {
+    return xi::proc::spawn_bounded(cmdline, kCompileTimeoutMs, env, /*capture=*/nullptr);
 }
 
 // Build (once, cached by a flag+exe signature) a precompiled header for the
@@ -474,17 +659,46 @@ inline PchResult ensure_pch(const std::string& output_dir, const std::string& fl
             return { pch.string(), obj.string() };
     }
     { std::ofstream o(stub); o << "#include <" << through << ">\n"; }
+    const auto q = &xi::proc::quote_arg;   // round-3 W2 #7: the shared quoter
     std::string cmd = "cmd /C \"";
-    if (!env) cmd += "\"" + vcvars + "\" >nul 2>nul && set VSLANG=1033 && ";
-    cmd += "cl.exe " + flags + " /c /Yc\"" + through + "\" /Fp\"" + pch.string()
-         + "\" /Fo\"" + obj.string() + "\" \"" + stub.string() + "\""
-         + " > \"" + plog.string() + "\" 2>&1\"";
-    int rc = env ? run_with_env(cmd, *env) : std::system(cmd.c_str());
+    if (!env) cmd += q(vcvars) + " >nul 2>nul && set VSLANG=1033 && ";
+    cmd += "cl.exe " + flags + " /c /Yc" + q(through) + " /Fp" + q(pch.string())
+         + " /Fo" + q(obj.string()) + " " + q(stub.string())
+         + " > " + q(plog.string()) + " 2>&1\"";
+    // Round-3 #6: no more std::system fallback — env == nullptr spawns bounded
+    // with the parent env inherited (the cmd line routes vcvars inline).
+    int rc = run_with_env(cmd, env);
     if (rc != 0 || !fs::exists(pch) || !fs::exists(obj)) return {};
     { std::ofstream o(sigf); o << sig; }
     return { pch.string(), obj.string() };
 }
 #endif // _WIN32
+
+#ifndef _WIN32
+// Run a shell command, capturing combined stdout+stderr into `out`. Returns the
+// child's exit code, or -1 if it could not be spawned / exited abnormally.
+inline int run_capture_posix(const std::string& cmd, std::string& out) {
+    std::string full = cmd + " 2>&1";
+    FILE* p = ::popen(full.c_str(), "r");
+    if (!p) return -1;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), p)) > 0) out.append(buf, n);
+    int rc = ::pclose(p);
+    if (rc == -1) return -1;
+    return WIFEXITED(rc) ? WEXITSTATUS(rc) : 128;
+}
+
+// Query pkg-config (e.g. "--cflags opencv4"); returns the trimmed output, or ""
+// if pkg-config fails / the package is missing.
+inline std::string pkgconfig(const std::string& args) {
+    std::string out;
+    if (run_capture_posix("pkg-config " + args, out) != 0) return {};
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' '))
+        out.pop_back();
+    return out;
+}
+#endif // !_WIN32
 
 } // namespace detail
 
@@ -503,6 +717,117 @@ inline bool is_safe_path(const std::string& p) {
     }
     return true;
 }
+
+#ifndef _WIN32
+// POSIX compile driver: g++/clang++ -fPIC -shared, the Linux/macOS replacement
+// for the cl.exe path below. Produces a .so; OpenCV via pkg-config; the yyjson
+// codec is compiled straight from its single vendored .c; force-includes mirror
+// the cl.exe /FI order (OpenCV umbrella, then the mode's support header). Called
+// by compile() AFTER the shared, portable validation + raw-OpenMP guard have run,
+// so it assumes validated input and just builds. (The cl.exe path's _vN prune is
+// a Windows disk-churn mitigation not replicated here — ELF has no DLL file lock.)
+inline CompileResult compile_posix_build_(const CompileRequest& req) {
+    namespace fs = std::filesystem;
+    CompileResult r;
+
+    static std::atomic<int> s_version{0};
+    std::string stem = fs::path(req.source_path).stem().string();
+    int ver = s_version++;
+    std::string versioned_stem = stem + "_v" + std::to_string(ver);
+    fs::path out_so   = fs::path(req.output_dir) / (versioned_stem + ".so");
+    fs::path log_path = fs::path(req.output_dir) / (versioned_stem + ".log");
+    std::error_code ec;
+    fs::remove(out_so, ec);
+
+    // OpenCV via pkg-config — the Linux analogue of the Windows opencv_dir probe.
+    std::string ocv_cflags = detail::pkgconfig("--cflags opencv4");
+    std::string ocv_libs   = detail::pkgconfig("--libs opencv4");
+    if (ocv_libs.empty()) {
+        r.build_log = "OpenCV not found (pkg-config opencv4 failed); install "
+                      "libopencv-dev (or set PKG_CONFIG_PATH)";
+        return r;
+    }
+
+    const char* cxx_env = std::getenv("CXX");
+    std::string cxx = (cxx_env && *cxx_env) ? cxx_env : "g++";
+
+    // Codegen per mode (closest flag equivalents to the cl.exe modes).
+    //   -fnon-call-exceptions + -fno-gnu-unique: the fault→seh_exception unwind
+    //   and hot-reload-unload contracts the backend build documents — a script/
+    //   plugin MUST carry them too (the host catches its faults; the loader
+    //   unloads it). -fvisibility=default keeps the XI_EXPORT thunks exported.
+    std::string opt =
+        (req.mode == CompileMode::PluginDev)          ? "-O0 -g"
+      : (req.mode == CompileMode::Script && req.fast) ? "-O0 -g"
+      :                                                 "-O2 -g";
+
+    const auto q = &xi::proc::quote_arg;   // round-3 W2 #7: the shared quoter
+    // -fpermissive: the script/plugin support headers declare the per-module
+    // globals (g_use_host_api_ etc.) `extern` in xi_io/xi_use then DEFINE them
+    // `static` in xi_script_support (each module needs its own copy). MSVC accepts
+    // that extern→static narrowing natively; g++ rejects it unless -fpermissive
+    // downgrades this specific linkage-conformance class to a warning. It does NOT
+    // relax diagnostics for ordinary user errors (undeclared names, type errors),
+    // so a real mistake in the author's inspect.cpp still fails the compile.
+    std::string cmd = cxx + " -std=c++20 -fPIC -shared -fexceptions -fpermissive"
+                            " -fnon-call-exceptions -fno-gnu-unique -fvisibility=default "
+                    + opt;
+    if (req.openmp_max_threads != 0) cmd += " -fopenmp";
+
+    cmd += " -I" + q(req.include_dir);
+    fs::path vendor_dir = fs::path(req.include_dir).parent_path() / "vendor";
+    if (fs::exists(vendor_dir)) cmd += " -I" + q(vendor_dir.string());
+    fs::path yyjson_inc = vendor_dir / "yyjson";
+    if (fs::exists(yyjson_inc)) cmd += " -I" + q(yyjson_inc.string());
+    for (auto& d : req.include_dirs) cmd += " -I" + q(d);
+    cmd += " " + ocv_cflags;
+
+    if (req.openmp_max_threads > 0)
+        cmd += " -D XI_OMP_MAX_THREADS=" + std::to_string(req.openmp_max_threads);
+
+    cmd += " -include opencv2/opencv.hpp";
+    cmd += (req.mode == CompileMode::Script) ? " -include xi/xi_script_support.hpp"
+                                             : " -include xi/xi_plugin_support.hpp";
+
+    cmd += " -o " + q(out_so.string());
+    cmd += " " + q(req.source_path);
+    for (auto& s : req.extra_sources) cmd += " " + q(s);
+
+    // yyjson codec: some SDK headers pull it in. It is C, so it CANNOT share this
+    // command — the C++-only force-includes (-include opencv2/opencv.hpp) apply to
+    // every input and would break a C file ("must be compiled as C++"). Compile it
+    // to a cached object in its own C invocation (no force-includes), then link
+    // that object in. Best-effort: if the object build fails the link just omits
+    // it (a script that truly needs yyjson then fails at link with a clear error).
+    fs::path yyjson_c = yyjson_inc / "yyjson.c";
+    if (fs::exists(yyjson_c)) {
+        fs::path yyjson_o = fs::path(req.output_dir) / "xi_yyjson_c.o";
+        if (!fs::exists(yyjson_o, ec)) {
+            std::string cc = cxx + " -x c -c -fPIC -O2 -fvisibility=default -I"
+                           + q(yyjson_inc.string())
+                           + " -o " + q(yyjson_o.string()) + " " + q(yyjson_c.string());
+            std::string clog;
+            detail::run_capture_posix(cc, clog);
+        }
+        if (fs::exists(yyjson_o, ec)) cmd += " " + q(yyjson_o.string());
+    }
+
+    cmd += " " + ocv_libs;
+    if (req.openmp_max_threads != 0) cmd += " -fopenmp";
+    for (auto& l : req.link_libs) cmd += " " + q(l);
+
+    cmd += " > " + q(log_path.string()) + " 2>&1";
+
+    int rc = std::system(cmd.c_str());
+    r.build_log   = detail::read_file(log_path.string());   // gcc/clang emit UTF-8
+    r.diagnostics = parse_diagnostics_gcc(r.build_log);
+    if (rc == 0 && fs::exists(out_so)) {
+        r.ok = true;
+        r.dll_path = out_so.string();
+    }
+    return r;
+}
+#endif // !_WIN32
 
 inline CompileResult compile(const CompileRequest& req) {
     CompileResult r;
@@ -531,7 +856,58 @@ inline CompileResult compile(const CompileRequest& req) {
     if (!check(req.ipp_root,       "ipp_root"))       return r;
     if (!check(req.vcvars_path,    "vcvars_path"))    return r;
 
+    // Blessed-concurrency guard (adoption map item 11): reject a raw `#pragma omp`
+    // in a SCRIPT's own source BEFORE cl.exe runs, routing the author to the
+    // SEH-safe xi::parallel_for / xi::async wrappers. Script mode only (plugins own
+    // their own threads); an explicit project.json "allow_raw_omp": true opts out.
+    // The scan reads only the author's source (source_path + extra_sources), never
+    // the xi headers — so xi_parallel.hpp's own blessed `#pragma omp` is untouched.
+    if (req.mode == CompileMode::Script && !req.allow_raw_omp) {
+        std::vector<Diagnostic> omp_diags;
+        auto scan_one = [&](const std::string& path) {
+            std::string text = detail::read_file(path);
+            for (int ln : raw_omp_pragma_lines(text)) {
+                Diagnostic d;
+                d.file     = path;
+                d.line     = ln;
+                d.col      = 0;
+                d.severity = "error";
+                d.code     = "XI9001";
+                d.message  =
+                    "raw OpenMP pragma is not allowed in an inspection script. A hardware "
+                    "fault inside a raw '#pragma omp' region runs on a worker thread with no "
+                    "SEH translator, so it bypasses crash isolation and terminates the whole "
+                    "backend, and pool images it creates leak (owner=0). Use "
+                    "xi::parallel_for(n, [&](int i){ ... }) for a pixel/row loop, or "
+                    "xi::async(...) for independent fan-out -- both install the SEH translator "
+                    "and image-pool owner on every worker. See docs/guides/write-a-script.md "
+                    "(Parallelism safety). To override at your own risk, set "
+                    "\"allow_raw_omp\": true in project.json.";
+                omp_diags.push_back(std::move(d));
+            }
+        };
+        scan_one(req.source_path);
+        for (auto& s : req.extra_sources) scan_one(s);
+        if (!omp_diags.empty()) {
+            std::string log =
+                "xInsp2: raw OpenMP pragma rejected in script -- use xi::parallel_for / "
+                "xi::async (see docs/guides/write-a-script.md):\n";
+            for (auto& d : omp_diags)
+                log += "  " + d.file + "(" + std::to_string(d.line) + ")\n";
+            r.ok          = false;
+            r.build_log   = std::move(log);
+            r.diagnostics = std::move(omp_diags);
+            return r;
+        }
+    }
+
     std::filesystem::create_directories(req.output_dir);
+
+#ifndef _WIN32
+    // POSIX: hand off to the g++/clang++ driver. The portable validation +
+    // raw-OpenMP guard above have already run; everything below is cl.exe-only.
+    return compile_posix_build_(req);
+#endif
 
     std::string vcvars = req.vcvars_path;
     if (vcvars.empty()) vcvars = detail::auto_find_vcvars();
@@ -595,10 +971,11 @@ inline CompileResult compile(const CompileRequest& req) {
 #else
     const std::vector<char>* cl_env = nullptr;
 #endif
+    const auto q = &xi::proc::quote_arg;   // round-3 W2 #7: the shared quoter
     std::string cmd;
     cmd += "cmd /C \"";
     if (!cl_env) {
-        cmd += "\"" + vcvars + "\"";
+        cmd += q(vcvars);
         cmd += " >nul 2>nul && ";
         // Force English diagnostics regardless of system locale (cl localizes to
         // the OS UI language → mojibake / unparseable on non-en hosts). VSLANG=1033
@@ -640,18 +1017,19 @@ inline CompileResult compile(const CompileRequest& req) {
     // on the consume compile below (NOT in front — keeps the PCH from re-keying
     // per cap value). TODO(linux): emit -fopenmp for gcc/clang instead.
     if (req.openmp_max_threads != 0) front += " /openmp";
-    front += " /I\"" + req.include_dir + "\"";
+    front += " /I" + q(req.include_dir);
     // vendor dir (stb, etc.) — sibling of include/
     auto vendor_dir = std::filesystem::path(req.include_dir).parent_path() / "vendor";
-    if (std::filesystem::exists(vendor_dir)) front += " /I\"" + vendor_dir.string() + "\"";
-    // yyjson lives in vendor/yyjson/ — xi_record.hpp does #include "yyjson.h"
+    if (std::filesystem::exists(vendor_dir)) front += " /I" + q(vendor_dir.string());
+    // yyjson lives in vendor/yyjson/ — xi_json.hpp (and a script's own direct
+    // #include "yyjson.h") needs it on the include path.
     auto yyjson_inc = vendor_dir / "yyjson";
-    if (std::filesystem::exists(yyjson_inc)) front += " /I\"" + yyjson_inc.string() + "\"";
-    for (auto& d : req.include_dirs) front += " /I\"" + d + "\"";   // project extra includes
-    front += " /I\"" + req.opencv_dir + "\\include\"";
+    if (std::filesystem::exists(yyjson_inc)) front += " /I" + q(yyjson_inc.string());
+    for (auto& d : req.include_dirs) front += " /I" + q(d);   // project extra includes
+    front += " /I" + q(req.opencv_dir + "\\include");
     if (!req.turbojpeg_root.empty()) {
         front += " /D XINSP2_HAS_TURBOJPEG=1";
-        front += " /I\"" + req.turbojpeg_root + "\\include\"";
+        front += " /I" + q(req.turbojpeg_root + "\\include");
     }
 
     // Precompiled header for the OpenCV umbrella — the dominant parse cost. Best-
@@ -664,7 +1042,7 @@ inline CompileResult compile(const CompileRequest& req) {
         if (!p.pch.empty()) {
             // /FI the umbrella FIRST (the /Yu boundary); xi headers re-include it
             // harmlessly (include-guarded). Then the script support header.
-            front += " /FIopencv2/opencv.hpp /Yu\"opencv2/opencv.hpp\" /Fp\"" + p.pch + "\"";
+            front += " /FIopencv2/opencv.hpp /Yu" + q("opencv2/opencv.hpp") + " /Fp" + q(p.pch);
             pch_obj = p.obj;
         }
     }
@@ -679,14 +1057,14 @@ inline CompileResult compile(const CompileRequest& req) {
     // load (omp_set_num_threads). Post-PCH so the PCH isn't keyed per cap value.
     if (req.openmp_max_threads > 0)
         cmd += " /D XI_OMP_MAX_THREADS=" + std::to_string(req.openmp_max_threads);
-    cmd += " /Fo\"" + req.output_dir + "\\\\\"";
-    cmd += " /Fe\"" + out_dll.string() + "\"";
-    cmd += " \"" + req.source_path + "\"";
+    cmd += " /Fo" + q(req.output_dir + "\\\\");
+    cmd += " /Fe" + q(out_dll.string());
+    cmd += " " + q(req.source_path);
     // Additional source files
     for (auto& s : req.extra_sources) {
-        cmd += " \"" + s + "\"";
+        cmd += " " + q(s);
     }
-    cmd += " /link /IMPLIB:\"" + (std::filesystem::path(req.output_dir) / (versioned_stem + ".lib")).string() + "\"";
+    cmd += " /link /IMPLIB:" + q((std::filesystem::path(req.output_dir) / (versioned_stem + ".lib")).string());
     // Emit a versioned program PDB matched to this DLL so crash
     // minidumps resolve script frames to file:line. /DEBUG makes the
     // linker write the debug directory into the DLL pointing at this
@@ -694,15 +1072,28 @@ inline CompileResult compile(const CompileRequest& req) {
     // paired with the live DLL; no shared vc*.pdb contention.
     // PluginDev/PluginExport already carry /Zi; adding /DEBUG here is
     // harmless for them and required for the Script (/Z7) path.
-    cmd += " /DEBUG /PDB:\"" + (std::filesystem::path(req.output_dir)
-                               / (versioned_stem + ".pdb")).string() + "\"";
-    // Link against pre-built yyjson.lib (the Record DOM/codec, via xi_record.hpp).
-    auto yyjson_lib = std::filesystem::path(req.include_dir).parent_path() / "build" / "Release" / "yyjson.lib";
-    if (std::filesystem::exists(yyjson_lib)) {
-        cmd += " \"" + yyjson_lib.string() + "\"";
+    cmd += " /DEBUG /PDB:" + q((std::filesystem::path(req.output_dir)
+                               / (versioned_stem + ".pdb")).string());
+    // Link against the pre-built yyjson.lib from the backend's own build tree.
+    // yyjson backs xi_json.hpp (the JSON/config/manifest layer) and any direct
+    // #include "yyjson.h" in a script — NOT the long-deleted xi_record.hpp this
+    // comment used to cite; the dependency outlived THE CUT. Round-3 W2 #10:
+    // the path was hardcoded to build/Release/, so a Debug-only build tree
+    // silently linked nothing and every yyjson_* symbol failed at script link
+    // time. Ninja Multi-Config emits one lib per config subdir — probe Release
+    // first (the shipped/dev-default config), then Debug.
+    {
+        auto build_dir = std::filesystem::path(req.include_dir).parent_path() / "build";
+        for (const char* cfg : { "Release", "Debug" }) {
+            auto yyjson_lib = build_dir / cfg / "yyjson.lib";
+            if (std::filesystem::exists(yyjson_lib)) {
+                cmd += " " + q(yyjson_lib.string());
+                break;
+            }
+        }
     }
     // The PCH's own object (from /Yc) must be linked when consuming via /Yu.
-    if (!pch_obj.empty()) cmd += " \"" + pch_obj + "\"";
+    if (!pch_obj.empty()) cmd += " " + q(pch_obj);
     // Accelerator import libs — match the /D defines added above.
     if (!req.opencv_dir.empty()) {
         // Pre-built OpenCV ships opencv_world<ver>.lib at x64/vc16/lib.
@@ -715,7 +1106,7 @@ inline CompileResult compile(const CompileRequest& req) {
                 if (n.rfind("opencv_world", 0) == 0 && n.size() > 4 &&
                     n.substr(n.size() - 4) == ".lib" &&
                     n.find('d') != n.size() - 5 /*skip *_d.lib debug*/) {
-                    cmd += " \"" + f.path().string() + "\"";
+                    cmd += " " + q(f.path().string());
                     break;
                 }
             }
@@ -724,23 +1115,26 @@ inline CompileResult compile(const CompileRequest& req) {
     }
     if (!req.turbojpeg_root.empty()) {
         auto tj = std::filesystem::path(req.turbojpeg_root) / "lib" / "turbojpeg.lib";
-        if (std::filesystem::exists(tj)) cmd += " \"" + tj.string() + "\"";
+        if (std::filesystem::exists(tj)) cmd += " " + q(tj.string());
     }
     if (!req.ipp_root.empty()) {
         for (auto& n : { "ippcore.lib", "ippi.lib", "ippcv.lib", "ippcc.lib" }) {
             auto p = std::filesystem::path(req.ipp_root) / "lib" / n;
-            if (std::filesystem::exists(p)) cmd += " \"" + p.string() + "\"";
+            if (std::filesystem::exists(p)) cmd += " " + q(p.string());
         }
     }
     // User-declared import libs (project.json "link_libs"). Already resolved to
     // absolute paths by the caller. Lets a script/plugin link an external SDK
     // without a full-path #pragma comment(lib) in the source.
-    for (auto& l : req.link_libs) cmd += " \"" + l + "\"";
-    cmd += " > \"" + log_path.string() + "\" 2>&1";
+    for (auto& l : req.link_libs) cmd += " " + q(l);
+    cmd += " > " + q(log_path.string()) + " 2>&1";
     cmd += "\"";
 
 #ifdef _WIN32
-    int rc = cl_env ? detail::run_with_env(cmd, *cl_env) : std::system(cmd.c_str());
+    // Round-3 #6: no more std::system fallback — cl_env == nullptr spawns
+    // bounded with the parent env inherited (the cmd line routes vcvars
+    // inline), so a wedged toolchain is killed either way.
+    int rc = detail::run_with_env(cmd, cl_env);
 #else
     int rc = std::system(cmd.c_str());
 #endif
@@ -749,6 +1143,16 @@ inline CompileResult compile(const CompileRequest& req) {
     // page; ensure_utf8 transcodes them so they're never mojibake on the wire.
     // (TODO(linux): gcc/clang emit UTF-8 already; ensure_utf8 is a no-op there.)
     r.build_log = ensure_utf8(detail::read_file(log_path.string()));
+#ifdef _WIN32
+    if (rc == -2) {
+        // run_with_env killed a wedged toolchain (see kCompileTimeoutMs). Whatever
+        // partial log survives is prefixed with a plain-language diagnostic so the
+        // client sees a "toolchain timed out" failure rather than a silent stall.
+        r.build_log = "[xi] toolchain timed out after " +
+                      std::to_string(detail::kCompileTimeoutMs / 1000) +
+                      "s and was terminated\n" + r.build_log;
+    }
+#endif
 
     if (rc == 0 && std::filesystem::exists(out_dll)) {
         r.ok = true;
@@ -762,6 +1166,18 @@ inline CompileResult compile(const CompileRequest& req) {
         //
         // We keep:
         //  - the just-written ver (current `ver`)
+        //  - the actual PREVIOUS same-stem version = the highest `<stem>_v<n>`
+        //    with n < ver present on disk. This prune runs INSIDE compile(),
+        //    BEFORE load_script + the g_eng.script swap, so that previous build
+        //    is still the LIVE mapped script; its .dll delete fails safely
+        //    (mapped → sharing violation, ignored) but deleting its
+        //    .pdb/.lib/.exp/.obj would leave a crash in the swap window unable
+        //    to resolve the old script's frames. NOTE (M2): it is NOT `ver-1` —
+        //    `s_version` is a single process-global counter shared across ALL
+        //    compile modes (inspect scripts + project plugins + AOT), so an
+        //    intervening plugin build makes the real previous script build
+        //    `ver-2` or lower. We scan for it per stem instead of assuming
+        //    consecutive numbering.
         //  - any file whose <stem>_v prefix doesn't match (defensive
         //    — different scripts share the build dir)
         //
@@ -771,7 +1187,25 @@ inline CompileResult compile(const CompileRequest& req) {
         std::error_code prune_ec;
         std::string prefix = stem + "_v";
         auto out_dir = std::filesystem::path(req.output_dir);
+        // Parse `<stem>_v<n>.<ext>` → n, or -1 if it doesn't match this stem.
+        auto parse_stem_ver = [&](const std::string& fn) -> int {
+            if (fn.size() <= prefix.size() || fn.compare(0, prefix.size(), prefix) != 0) return -1;
+            size_t av = prefix.size(); size_t d = fn.find('.', av);
+            if (d == std::string::npos || d == av) return -1;
+            try { return std::stoi(fn.substr(av, d - av)); } catch (...) { return -1; }
+        };
         if (std::filesystem::exists(out_dir, prune_ec)) {
+            // M2: the real previous same-stem version is the highest n < ver on disk,
+            // NOT `ver-1` (the global s_version counter is bumped by plugin/AOT builds
+            // too, so script versions are not consecutive per stem).
+            int prev_ver = -1;
+            for (auto& entry : std::filesystem::directory_iterator(
+                     out_dir, std::filesystem::directory_options::skip_permission_denied, prune_ec)) {
+                if (prune_ec) break;
+                if (!entry.is_regular_file(prune_ec)) continue;
+                int fv = parse_stem_ver(entry.path().filename().string());
+                if (fv >= 0 && fv < ver && fv > prev_ver) prev_ver = fv;
+            }
             for (auto& entry : std::filesystem::directory_iterator(
                      out_dir, std::filesystem::directory_options::skip_permission_denied, prune_ec)) {
                 if (prune_ec) break;
@@ -788,7 +1222,8 @@ inline CompileResult compile(const CompileRequest& req) {
                 try {
                     file_ver = std::stoi(fname.substr(after_v, dot - after_v));
                 } catch (...) { continue; }
-                if (file_ver == ver) continue;  // keep current
+                if (file_ver == ver) continue;       // keep current (N)
+                if (file_ver == prev_ver) continue;  // keep the real previous same-stem version (M2)
                 std::error_code rm_ec;
                 std::filesystem::remove(entry.path(), rm_ec);
                 // Best-effort: ignore rm_ec (AV lock, etc.) — next

@@ -1,4 +1,0 @@
-{
-  "plugin": "adder",
-  "config": { "addend": 10 }
-}

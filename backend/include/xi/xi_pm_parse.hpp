@@ -15,6 +15,7 @@
 //
 #include "yyjson.h"
 #include "xi_cabi_adapter.hpp"   // PluginInfo (parse_manifest result)
+#include "xi_dynlib.hpp"         // platform_module_path (.dll -> .so/.dylib)
 
 #include <cstdio>
 #include <cstdlib>
@@ -153,6 +154,52 @@ inline std::vector<IfaceReq> parse_iface_reqs(const std::string& json,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// SECURITY (P1) — path-containment guard for semi-trusted project-folder
+// path strings.
+//
+// ROOT CAUSE: path strings read VERBATIM from project.json / plugin.json
+// (`plugins[].path`, `script`, manifest `dll`) were joined onto a trusted base
+// with std::filesystem::operator/ and used with NO containment check.
+// operator/ with an ABSOLUTE right-hand side silently DISCARDS the base, and
+// a "../" chain climbs out of it — so a project folder obtained from a
+// semi-trusted source (unzipped customer project, network share, repo
+// checkout) could address ANY path on the machine.
+// THREAT: LoadLibrary of a PRE-PLANTED out-of-tree DLL (the only remaining
+// gate is plugin_abi_compatible), or handing cl.exe an OUT-OF-TREE source
+// file to compile and run.
+//
+// The guard: the candidate must be RELATIVE — no root directory and no root
+// name, which also rejects drive-relative "C:foo" and UNC "//server/share"
+// forms is_absolute() alone can miss on Windows — and
+// (base / candidate).lexically_normal() must still start with
+// base.lexically_normal(), i.e. no ".."-escape. Purely LEXICAL by design:
+// it constrains what the untrusted STRING can address; symlink traversal is
+// out of scope here (planting a symlink already requires machine access).
+inline bool path_is_contained(const std::filesystem::path& base,
+                              const std::filesystem::path& candidate) {
+    if (candidate.is_absolute() ||
+        candidate.has_root_name() || candidate.has_root_directory())
+        return false;
+    const auto b   = base.lexically_normal();
+    const auto rel = (b / candidate).lexically_normal().lexically_relative(b);
+    if (rel.empty()) return false;      // not expressible under base at all
+    return *rel.begin() != "..";        // leading ".." = climbed out of base
+}
+
+// Companion (same P1): a plugin.json `dll` must be a BARE FILENAME, resolved
+// inside the plugin's own folder. Any separator, ".." or drive prefix would
+// let a semi-trusted manifest point the LoadLibrary target outside the plugin
+// dir (e.g. "../../../Windows/Temp/evil.dll").
+inline bool dll_name_is_bare(const std::string& n) {
+    if (n.empty()) return false;
+    if (n.find('/')  != std::string::npos ||
+        n.find('\\') != std::string::npos ||
+        n.find("..") != std::string::npos)
+        return false;
+    return !std::filesystem::path(n).has_root_name();   // "C:evil.dll"
+}
+
 inline PluginInfo parse_manifest(const std::string& path, const std::string& folder) {
     PluginInfo pi;
     std::ifstream f(path);
@@ -167,8 +214,37 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
 
     if (name) pi.name = *name;
     if (desc) pi.description = *desc;
+    // SECURITY (P1): a manifest `dll` is used verbatim to build the
+    // LoadLibrary target (<folder>/<dll_name> at every load/certify site), so
+    // a separator / ".." / drive prefix escapes the plugin's own folder and
+    // loads a pre-planted binary from anywhere. Require a bare filename;
+    // otherwise warn loudly and INVALIDATE the plugin (empty name — the
+    // established "invalid manifest" signal every parse_manifest caller
+    // already skips on). See dll_name_is_bare / path_is_contained above.
+    if (dll && !dll_name_is_bare(*dll)) {
+        std::fprintf(stderr,
+            "[xinsp2] plugin.json %s: \"dll\": \"%s\" is not a bare filename "
+            "(contains a path separator, '..' or a drive prefix) — a manifest "
+            "dll must name a file in the plugin's own folder. REJECTING "
+            "plugin '%s' (path-containment guard).\n",
+            path.c_str(), dll->c_str(), pi.name.c_str());
+        pi.name.clear();   // invalid manifest — callers skip on empty name
+        return pi;
+    }
     if (dll)  pi.dll_name = *dll;
     else      pi.dll_name = pi.name + ".dll";
+    // fs-aware platform module mapping at the single parse point, so every
+    // downstream fs::exists / load / sha256 / cert-cache compare uses one
+    // consistent name. Prefer the native module (xi-<name>.so/.dylib) ONLY when it
+    // actually exists in the plugin folder: that maps a real prebuilt plugin
+    // (built as .so) while leaving a fixture that ships a .dll-named module — or a
+    // simply-unbuilt plugin — under its manifest name so the load site reports an
+    // honest missing-module error. No-op on Windows (platform_module_path is
+    // identity, so mapped == name and the branch is skipped).
+    if (std::string mapped = platform_module_path(pi.dll_name);
+        mapped != pi.dll_name &&
+        std::filesystem::exists(std::filesystem::path(folder) / mapped))
+        pi.dll_name = mapped;
     if (fact) pi.factory_symbol = *fact;
     else      pi.factory_symbol = "xi_plugin_create";
 
@@ -186,6 +262,17 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
     // gates use(<instance>).process() so the sink's side effect lands in frame order.
     pi.is_sink = json_flag_true(content, "sink") ||
                  (extract_string(content, "role").value_or("") == "sink");
+    // doc 14 lib-plugin marker (informational) + V3 machine-autoload gate
+    // (doc 19 V3): `"lib": true` flags a capability provider with no data plane;
+    // `"autoload": true` makes the host instantiate it once at boot under a
+    // machine owner so its capabilities are available without a per-project
+    // instance (PluginManager::autoload_machine_providers). See PluginInfo.
+    pi.is_lib   = json_flag_true(content, "lib");
+    pi.autoload = json_flag_true(content, "autoload");
+    // item 14: per-plugin post-fault policy DEFAULT ("on_fault"). An instance.json
+    // "on_fault" overrides it per instance. Absent/unknown → Reuse (unchanged).
+    pi.default_on_fault = parse_on_fault(extract_string(content, "on_fault").value_or(""),
+                                         OnFault::Reuse);
     // LV2-style capability handshake: required interfaces gate the load; optional
     // ones are advisory (the plugin null-checks them at runtime). See parse_iface_reqs.
     pi.required_ifaces = parse_iface_reqs(content, "requires");

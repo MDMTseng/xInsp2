@@ -1,0 +1,9 @@
+{
+  "name": "qa_use_pack_door",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam", "plugin": "mock_camera" },
+    { "name": "det", "plugin": "blob_analysis" },
+    { "name": "expose", "plugin": "expose" }
+  ]
+}

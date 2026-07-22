@@ -1,0 +1,13 @@
+# perf baseline for bench_pack.exe
+# captured by perf_gate.cmake UPDATE_BASELINE=ON — slower-is-worse integer metrics
+#fp schema xi.perf-baseline/1
+#fp cpu 14 core 2400 MHz GenuineIntel Pentium III (0.18 micron) With 1 Or 2 MB On-Die L2 Cache
+#fp logical_cores 20
+#fp os Windows
+#fp build_type release
+#fp opencv none
+#fp jpeg_backend stb
+#fp xinsp_commit e779bf5
+frame_micro_framebuilder_ns 798
+frame_micro_slab_read_ns 38
+frame_hotpath_frame_p50_us_320x240x3_p1 2

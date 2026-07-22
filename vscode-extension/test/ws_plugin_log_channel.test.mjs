@@ -79,12 +79,12 @@ test('plugin/script ERROR log reaches the WS log channel + recent_errors', { tim
     const script = join(dir, 'logger.cpp');
     writeFileSync(script,
         '#include <xi/xi.hpp>\n' +
-        '#include <xi/xi_record.hpp>\n' +
         '#include <xi/xi_use.hpp>\n' +
         'XI_SCRIPT_EXPORT\n' +
         'void xi_inspect_entry(int frame) {\n' +
         '    // No such instance -> host_api->log(ERROR) via warn_use_miss_ (the P1-3 path).\n' +
-        '    xi::use("__p1_3_no_such_instance__").process(xi::Record{});\n' +
+        '    // (v12: exchange() drives the miss; the Record process overload is gone.)\n' +
+        '    xi::use("__p1_3_no_such_instance__").exchange("{\\"command\\":\\"ping\\"}");\n' +
         '}\n');
 
     await withBackend(async (c) => {

@@ -11,7 +11,13 @@
 
 #include <yyjson.h>
 
+#include <xi/xi_pack_abi.hpp>   // v12: cmd:run injects a sealed pack (pack_v1_iface)
+
 #include "service_internal.hpp"
+
+// Item-14 caught-fault policy helpers are DEFINED in service_sinks.cpp and
+// declared in service_internal.hpp (guarded_plugin_call — the shared plugin-
+// entry fault boundary — needs them from every cmd TU now).
 
 // ---- dispatch-control ------------------------------------------------------
 void cmd_set_timer_fps_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
@@ -61,10 +67,10 @@ void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // a source's emit_record would, with no source plugin needed.
         std::string meta_json;
         {
-            std::string m; const char* after = nullptr;
+            std::string m;
             if (xp::detail::find_key(parsed->args_json.data(),
                                      parsed->args_json.data() + parsed->args_json.size(),
-                                     "meta", m, after)) {
+                                     "meta", m)) {
                 meta_json = std::move(m);
             }
         }
@@ -98,35 +104,78 @@ void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
             xi::install_seh_translator();
             std::lock_guard<std::mutex> lk(g_eng.run_mu);
 
-            // Stage 1b: build a one-shot record (frame image + meta) and expose
-            // it as this run's current_trigger — the same path the dispatch
-            // worker uses (thread_local g_current_trigger). Only injected when
+            // Stage 1b (v12, pack-only): build a one-shot sealed PACK (frame image
+            // + flat meta entries) and expose it as this run's current_trigger —
+            // the same payload shape a source's emit_pack produces, with no source
+            // plugin needed. The script reads it via t.pack(). Only injected when
             // there's something to inject, so a plain cmd:run keeps the previous
             // "no trigger" behaviour (current_trigger().is_active() == false).
+            // [THE CUT: the Record image-map + meta_doc injection is gone. Nested
+            //  meta objects are NOT converted (no in-tree caller uses them) — only
+            //  top-level scalars (str/i64/f64/bool) become pack entries.]
             xi::TriggerEvent ev;
             bool inject = false;
-            if (!frame_path.empty()) {
-                if (auto fn = xi::ImagePool::read_image_file_fn()) {
-                    if (xi_image_handle h = fn(frame_path.c_str())) {
-                        ev.images["frame"] = h;   // read under current_trigger().image("frame")
-                        inject = true;
+            const xi_pack_v1* pf = xi::pack_v1_iface();
+            xi_pack_builder pb = pf ? pf->builder_new() : XI_PACK_BUILDER_NULL;
+            if (pb != XI_PACK_BUILDER_NULL) {
+                if (!frame_path.empty()) {
+                    // Decode via the internal host helper (capability-only at v12:
+                    // requires an xi.image.decode provider — imgcodec instance or
+                    // --autoload-lib). 0 handle ⇒ nothing to inject.
+                    if (auto fn = xi::ImagePool::decode_image_fn()) {
+                        if (xi_image_handle h = fn(frame_path.c_str())) {
+                            int32_t w = 0, hh = 0, c = 0;
+                            {
+                                const xi_host_api* ha = script_host_api_();
+                                w  = ha->image_width(h);
+                                hh = ha->image_height(h);
+                                c  = ha->image_channels(h);
+                            }
+                            // adopt_image consumes OUR pool ref into the pack.
+                            pf->builder_adopt_image(pb, "frame", w, hh, c, h);
+                            inject = true;
+                        }
                     }
                 }
-            }
-            if (!meta_json.empty()) {
-                if (yyjson_doc* idoc = yyjson_read(meta_json.data(), meta_json.size(), 0)) {
-                    yyjson_mut_doc* meta = yyjson_doc_mut_copy(idoc, nullptr);
-                    yyjson_doc_free(idoc);
-                    if (meta) {
-                        xi::DocRegistry::instance().addref(meta);   // register at rc=1
-                        ev.meta_doc = xi::DocRef::adopt(meta);
-                        inject = true;
+                if (!meta_json.empty()) {
+                    if (yyjson_doc* idoc = yyjson_read(meta_json.data(), meta_json.size(), 0)) {
+                        yyjson_val* root = yyjson_doc_get_root(idoc);
+                        if (root && yyjson_is_obj(root)) {
+                            size_t idx, max;
+                            yyjson_val *k, *v;
+                            yyjson_obj_foreach(root, idx, max, k, v) {
+                                const char* key = yyjson_get_str(k);
+                                if (!key) continue;
+                                if (yyjson_is_str(v)) {
+                                    const char* s = yyjson_get_str(v);
+                                    pf->builder_add_str(pb, key, s, (int32_t)std::strlen(s));
+                                    inject = true;
+                                } else if (yyjson_is_bool(v) && pf->builder_add_bool) {
+                                    pf->builder_add_bool(pb, key, yyjson_get_bool(v) ? 1 : 0);
+                                    inject = true;
+                                } else if (yyjson_is_int(v)) {
+                                    pf->builder_add_i64(pb, key, yyjson_get_sint(v));
+                                    inject = true;
+                                } else if (yyjson_is_real(v)) {
+                                    pf->builder_add_f64(pb, key, yyjson_get_real(v));
+                                    inject = true;
+                                }
+                                // nested obj/arr: skipped (see note above)
+                            }
+                        }
+                        yyjson_doc_free(idoc);
                     }
+                }
+                if (inject) {
+                    ev.pack = pf->builder_seal(pb);   // rc=1; the event owns our ref
+                    inject = (ev.pack != XI_PACK_NULL);
+                } else {
+                    pf->builder_abandon(pb);
                 }
             }
             if (inject) {
                 ev.id = { (uint64_t)run_id, 0 };   // synthesized, unique per run
-                CurrentTriggerScope trig(ev);      // clears g_current_trigger + releases ev on scope exit
+                CurrentTriggerScope trig(ev);      // clears g_current_trigger + releases ev.pack on scope exit
                 run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
             } else {
                 run_one_inspection(srv, /*frame_hint=*/1, run_id, frame_path);
@@ -188,12 +237,15 @@ void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         spawn_group_pool_(&srv, interval_ms);
 
         // The watchdog now tracks a per-inspect slot, so it protects every
-        // worker under N>1 (no longer bypassed). On a hard trip the backend
-        // exits for the FE to respawn; under N>1 the cooperative-cancel phase
-        // is global (aborts all in-flight frames that round). See
-        // run_one_inspection() + docs/guides/write-a-script.md.
+        // worker under N>1 (no longer bypassed). An overrunning inspect gets a
+        // grace window; if the same frame is still wedged after it, the backend
+        // exits for the FE to respawn. See the watchdog monitor thread in
+        // service_main.cpp + docs/guides/write-a-script.md.
 
         int n_threads = std::max(1, g_eng.plugin_mgr.project().dispatch_threads);
+        // Health contract: dispatch is live → `running` (recompute may immediately
+        // fold it to `degraded` if a component is already unhealthy).
+        xi::health().set_state(xi::SysState::Running);
         char buf[64];
         std::snprintf(buf, sizeof(buf),
                       R"({"started":true,"dispatch_threads":%d})", n_threads);
@@ -201,9 +253,22 @@ void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
 }
 
 void cmd_stop_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
+        // Health contract: draining the pool → `draining`, then `project_loaded`
+        // once the lanes are joined and their queues drained.
+        xi::health().set_state(xi::SysState::Draining);
         g_eng.continuous = false;
         xi::TriggerBus::instance().clear_sink();
         stop_dispatch_pool_();   // joins lanes + drains their queues (handles released)
+        // Re-install the trigger sink now that the pool is stopped. clear_sink above
+        // only exists to stop the lanes being fed WHILE they drain; leaving the bus
+        // sink-less would kill the trigger-driven one-shot model (issue/replay works
+        // WITHOUT cmd:start — see install_trigger_sink_) until the next
+        // compile_and_load: every subsequent source emit would take the silent
+        // no-sink drop path. With g_eng.continuous now false the re-installed sink
+        // routes each emit through dispatch_one_shot_, exactly like the post-
+        // compile_and_load state and the lifecycle guard's restore_sink_ resume.
+        install_trigger_sink_(&srv);
+        xi::health().set_state(xi::SysState::ProjectLoaded);
         send_rsp_ok(srv, id, R"({"stopped":true})");
 }
 
@@ -222,36 +287,54 @@ void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         std::string cmd_str;
-        const char* after;
         if (xp::detail::find_key(parsed->args_json.data(),
                                   parsed->args_json.data() + parsed->args_json.size(),
-                                  "cmd", cmd_str, after)) {
+                                  "cmd", cmd_str)) {
         } else {
             cmd_str = "{}";
         }
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
-            try {
-                std::string result = inst->exchange(cmd_str);
+            // Item-14 fault surface — the SAME guarded_plugin_call boundary as
+            // the script-side exchange (use_exchange_cb) / pack-door surfaces:
+            // quarantined → refuse WITHOUT entering plugin code (data plane ⇒
+            // gated); a pending (on_fault=reinit) rebuild is applied first; a
+            // caught crash feeds note_instance_crash_ + apply_on_fault_policy_
+            // so an exchange()-only crash-loop trips health/reinit/refuse.
+            auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+            std::string result;
+            auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
+                                         "exchange()", /*gate_quarantined=*/true, [&] {
+                result = inst->exchange(cmd_str);
+            });
+            switch (r.kind) {
+            case PluginCallResult::Kind::Ok:
                 send_rsp_ok(srv, id, result);
-            } catch (const seh_exception& e) {
+                break;
+            case PluginCallResult::Kind::Quarantined:
+                send_rsp_err(srv, id, "instance quarantined (on_fault=refuse): " + *iname);
+                break;
+            case PluginCallResult::Kind::Crashed: {
                 char msg[256];
                 std::snprintf(msg, sizeof(msg), "exchange '%s' crashed: 0x%08X (%s)",
-                             iname->c_str(), e.code, e.what());
+                             iname->c_str(), r.seh_code, r.what.c_str());
                 send_rsp_err(srv, id, msg);
-            } catch (const std::exception& e) {
-                send_rsp_err(srv, id, std::string("exchange error: ") + e.what());
+                break;
+            }
+            case PluginCallResult::Kind::Threw:
+                send_rsp_err(srv, id, "exchange error: " + r.what);
+                break;
             }
         } else {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             if (g_eng.script.ok() && g_eng.script.exchange_instance) {
                 try {
                     std::vector<char> rsp(256 * 1024);
-                    int n = g_eng.script.exchange_instance(iname->c_str(), cmd_str.c_str(),
-                                                       rsp.data(), (int)rsp.size());
-                    if (n < 0) { rsp.resize((size_t)(-(int64_t)n) + 1024);
-                                 n = g_eng.script.exchange_instance(iname->c_str(), cmd_str.c_str(),
-                                                                rsp.data(), (int)rsp.size()); }
+                    // -1 = instance not found (terminal); other negatives = grow+retry.
+                    int n = script_grow_retry(rsp, /*minus_one_is_terminal=*/true,
+                        [&](char* b, int len) {
+                            return g_eng.script.exchange_instance(iname->c_str(), cmd_str.c_str(), b, len);
+                        });
                     if (n >= 0) send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "exchange_instance failed");
                 } catch (const seh_exception& e) {
@@ -259,6 +342,7 @@ void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd
                     std::snprintf(msg, sizeof(msg), "script exchange '%s' crashed: 0x%08X (%s)",
                                  iname->c_str(), e.code, e.what());
                     send_rsp_err(srv, id, msg);
+                    xi::recover_seh_stack_or_die(e.code, "cmd script exchange_instance");
                 }
             } else {
                 send_rsp_err(srv, id, "instance not found: " + *iname);
@@ -278,25 +362,57 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         std::string def_str;
-        const char* after;
         if (!xp::detail::find_key(parsed->args_json.data(),
                                   parsed->args_json.data() + parsed->args_json.size(),
-                                  "def", def_str, after)) {
+                                  "def", def_str)) {
             def_str = "{}";
         }
         auto folder = xp::get_string_field(parsed->args_json, "folder");
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
+            // Wave-2 #1: this site had DRIFTED to a bare `catch (const
+            // std::exception&)` — seh_exception derives from std::exception, so
+            // an SEH fault WAS caught here but recover_seh_stack_or_die never
+            // ran (a plugin STACK_OVERFLOW left this WS thread's stack guard
+            // page consumed → the next deep call corrupted memory instead of
+            // faulting), and there was no quarantine gate / crash bookkeeping.
+            // guarded_plugin_call restores the full ritual. prepare() is
+            // quarantine-UNGATED (round-3 S1 fix): the previous round gated it on
+            // the theory that prepare's success path never sets InstState::Active
+            // so it "can't lift a quarantine" — but for a STAGED plugin the
+            // DOCUMENTED on_fault=refuse remedy is prepare_instance →
+            // commit_group, and gating prepare dead-ended that recovery at step 1
+            // (commit alone cannot re-stage). Same config-plane rationale as
+            // set_def/commit — see the gate_quarantined comment in
+            // service_internal.hpp.
+            auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
             bool ok = false;
-            try { ok = inst->prepare(def_str, folder ? *folder : std::string()); }
-            catch (const std::exception& e) {
-                set_inst_state(*iname, InstState::Faulted, e.what());
-                send_rsp_err(srv, id, std::string("prepare error: ") + e.what());
-                return;
+            auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
+                                         "prepare()", /*gate_quarantined=*/false, [&] {
+                ok = inst->prepare(def_str, folder ? *folder : std::string());
+            });
+            switch (r.kind) {
+            case PluginCallResult::Kind::Ok:
+                if (ok) send_rsp_ok(srv, id);
+                else { set_inst_state(*iname, InstState::Faulted, "prepare returned false");
+                       send_rsp_err(srv, id, "prepare returned false"); }
+                break;
+            case PluginCallResult::Kind::Quarantined:
+                send_rsp_err(srv, id, "instance quarantined (on_fault=refuse): " + *iname);
+                break;
+            case PluginCallResult::Kind::Crashed: {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg), "prepare '%s' crashed: 0x%08X (%s)",
+                             iname->c_str(), r.seh_code, r.what.c_str());
+                set_inst_state(*iname, InstState::Faulted, msg);
+                send_rsp_err(srv, id, msg);
+                break;
             }
-            if (ok) send_rsp_ok(srv, id);
-            else { set_inst_state(*iname, InstState::Faulted, "prepare returned false");
-                   send_rsp_err(srv, id, "prepare returned false"); }
+            case PluginCallResult::Kind::Threw:
+                set_inst_state(*iname, InstState::Faulted, r.what);
+                send_rsp_err(srv, id, "prepare error: " + r.what);
+                break;
+            }
         } else {
             // Script-side: exchange convention {command:"prepare", def, folder}.
             std::string cmd = "{\"command\":\"prepare\",\"def\":" + def_str;
@@ -308,11 +424,11 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                 // path above (and exchange_instance) so a throw/fault isn't fatal.
                 try {
                     std::vector<char> buf(64 * 1024);
-                    int n = g_eng.script.exchange_instance(iname->c_str(), cmd.c_str(),
-                                                       buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                                 n = g_eng.script.exchange_instance(iname->c_str(), cmd.c_str(),
-                                                                buf.data(), (int)buf.size()); }
+                    // -1 = instance not found (terminal); other negatives = grow+retry.
+                    int n = script_grow_retry(buf, /*minus_one_is_terminal=*/true,
+                        [&](char* b, int len) {
+                            return g_eng.script.exchange_instance(iname->c_str(), cmd.c_str(), b, len);
+                        });
                     if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "prepare failed");
                 } catch (const seh_exception& e) {
@@ -320,6 +436,7 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                     std::snprintf(msg, sizeof(msg), "script prepare '%s' crashed: 0x%08X (%s)",
                                  iname->c_str(), e.code, e.what());
                     send_rsp_err(srv, id, msg);
+                    xi::recover_seh_stack_or_die(e.code, "cmd script prepare_instance");
                 } catch (const std::exception& e) {
                     send_rsp_err(srv, id, std::string("script prepare error: ") + e.what());
                 }
@@ -394,9 +511,26 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
                 // First-class commit() slot (ABI v7): swap staging → live. The
                 // result echoes the now-live def. A plugin with no double-slot
                 // gets the InstanceBase no-op (it already swapped in set_def).
-                try { inst->commit(); r = inst->get_def(); ok = true; }
-                catch (const std::exception& e) {
-                    r = std::string("{\"error\":\"") + e.what() + "\"}";
+                // Wave-2 #1: this site had the same drifted bare std::exception
+                // catch as cmd_prepare_instance_ (no stack-guard recovery after
+                // an SEH fault, no crash bookkeeping) — inside the drain
+                // barrier. guarded_plugin_call restores the full ritual.
+                // NOT quarantine-gated: a successful commit runs
+                // set_inst_state(Active) below, which is the DOCUMENTED
+                // operator re-enable for an on_fault=refuse quarantine (the
+                // quarantine error message itself names commit_group) — gating
+                // it would make quarantine unrecoverable via its own remedy.
+                auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+                auto gr = guarded_plugin_call(targets[i].c_str(), adapter, inst->plugin_name(),
+                                              "commit()", /*gate_quarantined=*/false, [&] {
+                    inst->commit(); r = inst->get_def(); ok = true;
+                });
+                if (gr.kind == PluginCallResult::Kind::Crashed) {
+                    char em[256];
+                    std::snprintf(em, sizeof(em), "{\"error\":\"commit crashed: 0x%08X\"}", gr.seh_code);
+                    r = em; ok = false;
+                } else if (gr.kind == PluginCallResult::Kind::Threw) {
+                    r = "{\"error\":\"" + gr.what + "\"}"; ok = false;
                 }
             } else {
                 // Script-side instances keep the exchange convention.
@@ -408,16 +542,17 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
                     try {
                         const char* commit_cmd = R"({"command":"commit"})";
                         std::vector<char> buf(64 * 1024);
-                        int n = g_eng.script.exchange_instance(targets[i].c_str(), commit_cmd,
-                                                           buf.data(), (int)buf.size());
-                        if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);
-                                     n = g_eng.script.exchange_instance(targets[i].c_str(), commit_cmd,
-                                                                    buf.data(), (int)buf.size()); }
+                        // -1 = instance not found (terminal); other negatives = grow+retry.
+                        int n = script_grow_retry(buf, /*minus_one_is_terminal=*/true,
+                            [&](char* b, int len) {
+                                return g_eng.script.exchange_instance(targets[i].c_str(), commit_cmd, b, len);
+                            });
                         if (n >= 0) { r.assign(buf.data(), (size_t)n); ok = true; }
                     } catch (const seh_exception& e) {
                         char em[256];
                         std::snprintf(em, sizeof(em), "{\"error\":\"commit crashed: 0x%08X\"}", e.code);
                         r = em;
+                        xi::recover_seh_stack_or_die(e.code, "cmd script commit");
                     } catch (const std::exception& e) {
                         r = std::string("{\"error\":\"") + e.what() + "\"}";
                     }
@@ -442,22 +577,21 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             // group and the line silently ran a mix of new+old config. That is the
             // dishonest auto-resume: on a partial commit we must NOT resume.
             //
-            // dismiss() makes the guard leave dispatch STOPPED (it does not re-install
-            // the trigger sink or respawn continuous mode; it only re-enables one-shot
-            // launches) — so continuous production stays halted and an operator must
+            // skip_resume() makes the guard leave dispatch STOPPED at scope end (it does
+            // not re-install the trigger sink or respawn continuous mode; one-shot
+            // launches are re-enabled when the guard's destructor releases the launch
+            // pause) — so continuous production stays halted and an operator must
             // intervene. We also latch a sticky config-fault status under "@commit" so a
             // status poll / the FE sees the degraded state after this rsp returns.
             // NOTE: this fixes the dishonest resume + result status only; the all-or-none
             // commit SEMANTICS (targets still commit sequentially, no rollback of the
             // ones that took) are the deferred atomic-recipe rework and are unchanged.
-            guard.dismiss();
+            guard.skip_resume();
             set_status_internal("@commit",
                 "config fault: partial commit — dispatch stopped, operator intervention required");
-            xp::Rsp r; r.id = id; r.ok = false;
-            r.error = "one or more commits failed — partial commit, dispatch stopped (config fault latched)";
-            r.data_json = data;
-            srv.send_text(r.to_json());
-            push_recent_error("rsp", r.error, id);
+            send_rsp_err(srv, id,
+                "one or more commits failed — partial commit, dispatch stopped (config fault latched)",
+                data);
         } else {
             // All committed — clear any prior latched commit fault and let `guard`
             // resume dispatch at the prior fps at end-of-scope (config switch must not

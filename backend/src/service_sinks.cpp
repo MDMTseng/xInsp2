@@ -11,8 +11,8 @@
 #include <string>
 #include <vector>
 
-#include <yyjson.h>
-#include <xi/xi_graph_capture.hpp>
+#include <xi/xi_pack_abi.hpp>   // PackRegistry retain/release (use_push_pack_cb)
+#include <xi/xi_pack_contract.hpp> // U1 fault short-circuit (use_pack_process_cb, doc 15)
 
 #include "service_internal.hpp"
 
@@ -32,75 +32,63 @@
 // manager lock is taken only when the active plugin on this thread changes.
 // stamp_culprit_ declared in service_internal.hpp.
 
-// The inline cross-instance process() path: run the target plugin's process() NOW,
-// on this thread. Used directly for a normal xi::use(x).process() (input wiring) and
-// by the staged-sink flush. A sink target is intercepted by use_process_cb (below)
-// and never reaches here inline mid-inspect.
-static int use_process_inline_(const char* name,
-                          const void* input_doc,
-                          const uint8_t* input_data, int32_t input_len,
-                          const xi_record_image* input_images, int input_image_count,
-                          xi_record_out* output) {
-    auto inst = xi::InstanceRegistry::instance().find(name);
-    if (!inst) return -1;
+// ---- item 14: post-fault quarantine policy (adoption-map item 14) -----------
+// The health-overlay + escalation POLICY lives HERE, at the fault boundary; the
+// CAbiInstanceAdapter carries the mechanical per-instance state (the policy value,
+// the quarantine flag, the in-place rebuild) because its per-instance CallScope
+// gate is the natural serialization point. See xi_fault_policy.hpp +
+// docs/new_gen/04-health-contract.md (§ "Quarantine policy").
 
-    // All plugins run in-process (process isolation removed 2026-05).
-    // Check if it's a C ABI adapter with process_fn
-    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
-    if (adapter && adapter->process_fn()) {
-        // G2.1 — stamp the crash culprit before entering plugin code. If this
-        // process() faults, the FE's crash report names this plugin (cross-checked
-        // against the faulting module) and can quarantine it.
-        stamp_culprit_(name, inst->plugin_name());
-        xi_record in_rec{};   // zero-init so the v3 `doc` field is null (JSON path)
-        in_rec.images = input_images;
-        in_rec.image_count = input_image_count;
-        // γ in-process fast path: when the target plugin shares our yyjson
-        // layout, hand it the borrowed doc directly (zero serialize / zero
-        // parse). Otherwise serialise the doc to JSON HERE (the caller skipped
-        // data_json) so a foreign/older plugin still gets valid bytes. Owns the
-        // serialized buffer for the duration of the call.
-        std::string in_js;
-        if (input_doc && adapter->doc_input_ok()) {
-            in_rec.doc = input_doc;
-        } else if (input_doc) {
-            size_t jl = 0;
-            char* js = yyjson_mut_write((yyjson_mut_doc*)input_doc, 0, &jl);
-            if (js) { in_js.assign(js, jl); free(js); }
-            in_rec.data = (const uint8_t*)in_js.data();
-            in_rec.len  = (int32_t)in_js.size();
-            // γ-4: UseProxy share_out'd this input and reserved a ref for an
-            // adopter; this JSON-fallback target serializes instead of adopting,
-            // so balance that reserved ref. No-op if it wasn't registry-managed.
-            xi::DocRegistry::instance().release((yyjson_mut_doc*)input_doc);
-        } else {
-            in_rec.data = input_data;   // explicit-JSON caller (in_doc null)
-            in_rec.len  = input_len;
-        }
-        // adapter->process() owns the owner_id tagging (image-leak sweep) AND,
-        // for a non-reentrant plugin, the per-instance lock that serializes
-        // concurrent dispatch workers. We keep the SEH try/catch boundary here.
-        try {
-            int rc = adapter->process(&in_rec, output);
-            // Graph capture (off by default): record this call's image handles
-            // for dataflow-edge reconstruction. Handles are still valid here —
-            // the script side adopts/releases the outputs after we return.
-            if (rc >= 0 && xi::GraphCapture::instance().enabled())
-                xi::GraphCapture::instance().record(name, input_images, input_image_count, output);
-            return rc;
-        } catch (const seh_exception& e) {
-            std::fprintf(stderr, "[xinsp2] use_process('%s') crashed: 0x%08X (%s)\n",
-                         name, e.code, e.what());
-            char why[96]; std::snprintf(why, sizeof(why), "process() crashed: 0x%08X", e.code);
-            note_instance_crash_(name, why);   // visible via get_state (crash-loop alerting)
-            return -2;
-        } catch (...) {
-            std::fprintf(stderr, "[xinsp2] use_process('%s') threw exception\n", name);
-            note_instance_crash_(name, "process() threw an exception");
-            return -2;
-        }
+// on_fault=refuse: pull the instance out of service. Sets the fail-fast gate,
+// marks it failed/quarantined in the health contract, and surfaces ONE operator-
+// visible error. Idempotent — a per-frame refuse never re-emits (the gate + the
+// health overlay both coalesce), so it can't spam.
+static void quarantine_instance_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+    if (adapter->quarantined()) return;
+    adapter->set_quarantined(true);
+    xi::health().mark_instance_fault(name, xi::CompHealth::Failed, xi::kReasonQuarantined);
+    push_recent_error(name,
+        "instance quarantined (on_fault=refuse) — pulled from service after a caught "
+        "process() fault; re-enable by re-committing its config (set_instance_def / "
+        "commit_group)");
+}
+
+// Consult the caught-fault policy AFTER note_instance_crash_ has already marked the
+// instance runtime-`degraded`. reuse: nothing more (stays in service). reinit:
+// request a rebuild before the instance's next use. refuse: quarantine now.
+// External linkage (not static): cmd_exchange_instance_ (service_cmd_dispatch.cpp)
+// shares this fault boundary for its own plugin-entering exchange() call.
+void apply_on_fault_policy_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+    switch (adapter->on_fault()) {
+        case xi::OnFault::Reuse:  break;
+        case xi::OnFault::Reinit: adapter->request_reinit(); break;
+        case xi::OnFault::Refuse: quarantine_instance_(name, adapter); break;
     }
-    return -1;
+}
+
+// Perform a requested (on_fault=reinit) rebuild before the next process(). A clean
+// rebuild clears the runtime-fault overlay (the instance is healthy again); a
+// failed rebuild keeps the old instance live and escalates to refuse after
+// kReinitEscalateAfter consecutive failures. Runs on the caller thread just before
+// process(); reinit() serializes itself via the instance's CallScope.
+// External linkage (not static): shared with cmd_exchange_instance_ — see
+// apply_on_fault_policy_ above.
+void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter) {
+    // H5: CONSUME the pending flag with one atomic test-and-clear before rebuilding.
+    // Two callers can both observe reinit_pending()==true and reach here (the outer
+    // check is a cheap fast-path, not a gate); the exchange lets exactly ONE win.
+    // A loser returns without touching reinit()/escalation, so one fault → exactly
+    // ONE rebuild and the escalation counter is owned by a single thread per fault
+    // episode (no note_reinit_fail crossing the quarantine threshold ahead of a
+    // concurrent reset_reinit_fails). The winner runs the whole rebuild + accounting
+    // sequence below, exactly as the single-fault case always did.
+    if (!adapter->consume_reinit_pending()) return;
+    if (adapter->reinit()) {
+        adapter->reset_reinit_fails();
+        xi::health().clear_instance_degraded(name);   // recovered → ok / running
+    } else if (adapter->note_reinit_fail() >= xi::kReinitEscalateAfter) {
+        quarantine_instance_(name, adapter);
+    }
 }
 
 // ---- ordered output sinks: stage during inspect, flush in frame order -----------
@@ -116,91 +104,191 @@ static int use_process_inline_(const char* name,
 // StagedEmit struct moved to service_internal.hpp; g_staged DEFINED here.
 thread_local std::vector<StagedEmit> g_staged;
 
-// Stage a sink call: adopt the input's doc + image refs so they outlive use()'s
-// return (the SDK releases its own refs right after we return), then queue it.
-// Mirrors install_trigger_hook / the bus adopt logic. Returns 0 with an empty reply
-// (sinks are fire-and-forget — the script ignores the return Record).
-static int stage_sink_emit_(const char* name, const void* input_doc,
-                            const uint8_t* input_data, int32_t input_len,
-                            const xi_record_image* input_images, int input_image_count,
-                            xi_record_out* output) {
-    if (output) xi_record_out_init(output);   // empty reply
-    StagedEmit item;
-    item.target = name;
-    if (input_doc) {
-        // take the share_out'd ref (already reserved for us — adopt, no retain)
-        item.rec.meta_doc = xi::DocRef::adopt((yyjson_mut_doc*)(void*)input_doc);
-    } else if (input_data && input_len > 0) {
-        yyjson_doc* idoc = yyjson_read((const char*)input_data, (size_t)input_len, 0);
-        if (idoc) {
-            yyjson_mut_doc* m = yyjson_doc_mut_copy(idoc, nullptr);
-            yyjson_doc_free(idoc);
-            if (m) {
-                xi::DocRegistry::instance().addref(m);   // register at rc=1
-                item.rec.meta_doc = xi::DocRef::adopt(m);
-            }
-        }
-    }
-    // Preserve the record's ORIGINAL image keys exactly — staging replaces an inline
-    // use().process() call, so the sink must see the same keys ("inverted", "edges",
-    // …) the inline path would have delivered. (NOT the bus lone-image→source-name
-    // convention; that's for emit_trigger, not use(sink).process().)
-    for (int i = 0; input_images && i < input_image_count; ++i) {
-        xi_image_handle h = input_images[i].handle;
-        xi::ImagePool::instance().addref(h);
-        std::string key = (input_images[i].key && input_images[i].key[0])
-                            ? std::string(input_images[i].key) : ("img" + std::to_string(i));
-        if (!item.rec.images.emplace(std::move(key), h).second)
-            xi::ImagePool::instance().release(h);   // dup/empty key: drop the extra ref
-    }
-    g_staged.push_back(std::move(item));
+// ---- polaris2 gate P2: expose-from-script (use(sink).push(pack)) ----------------
+// Deliver a SEALED pack to `name`'s xi.pack@1 door NOW, on this thread. The pack
+// handle is BORROWED (caller keeps its ref; run_pack_door borrows too) and crosses
+// AS-IS — no re-encode, no $seq stamping (a sealed pack is immutable, and identity
+// with a direct host-side dump is the contract; $channel/$seq ride as pack entries).
+// The ack pack the door returns is dropped (fire-and-forget, mirroring how the
+// staged Record flush drops the sink's reply). Same fault discipline as
+// use_process_inline_: quarantine gate, pending reinit, culprit stamp, SEH boundary
+// (a crashed door -> -2, on_fault policy applied; the borrowed input handle is
+// still ours, so nothing leaks). Return codes: 0 delivered; -1 no such instance;
+// -2 door crashed; -3 quarantined; -4 no xi.pack@1 door.
+static int use_push_pack_inline_(const char* name, xi_pack_handle pack) {
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    if (!adapter || !adapter->has_pack_door()) return -4;
+    // Wave-2 #1: the six-step ritual now lives in guarded_plugin_call (data
+    // plane ⇒ quarantine-gated). The ack pack is dropped (fire-and-forget).
+    auto r = guarded_plugin_call(name, adapter, inst->plugin_name(), "pack door",
+                                 /*gate_quarantined=*/true, [&] {
+        xi_pack_handle ack = adapter->run_pack_door(pack);
+        if (ack != XI_PACK_NULL) xi::PackRegistry::instance().release(ack);
+    });
+    if (r.kind == PluginCallResult::Kind::Quarantined) return -3;
+    if (!r.ok()) return -2;
     return 0;
 }
 
-// xi::use().process() entry wired into the script DLL. A declared ORDERED SINK target
-// is staged (frame-ordered flush); every other target runs inline as before.
-int use_process_cb(const char* name,
-                          const void* input_doc,
-                          const uint8_t* input_data, int32_t input_len,
-                          const xi_record_image* input_images, int input_image_count,
-                          xi_record_out* output) {
-    if (name) {
-        if (auto inst = xi::InstanceRegistry::instance().find(name)) {
-            auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
-            if (a && a->is_sink())
-                return stage_sink_emit_(name, input_doc, input_data, input_len,
-                                        input_images, input_image_count, output);
-        }
+// J4: reject a use(sink).push() issued off the dispatch thread. Defined below,
+// next to the READ-path guard (warn_trigger_off_thread_) whose A4 RunContext
+// (g_run_ctx owner_tid) they reuse — forward-declared here so use_push_pack_cb
+// can call them before those context helpers are defined.
+static bool push_off_dispatch_thread_();
+static void warn_push_off_thread_(const char* name);
+
+// xi::use().push(pack) entry wired into the script DLL (optional symbol —
+// xi_script_set_use_pack_callback). A declared ORDERED SINK target is staged and
+// flushed after the inspect in frame order: StagedEmit.rec is a TriggerEvent, whose `pack` slot carries our
+// RETAINED ref (release_trigger_event_ / drain_staged_emits_ already release it
+// on every flush/drop path — the dual-carry discipline, reused). A non-sink
+// pack-door target runs inline. Fail-fast at call time (missing instance / no
+// door) so the script's push() gets an honest false instead of a silent
+// flush-time drop.
+int use_push_pack_cb(const char* name, xi_pack_handle pack) {
+    if (!name || pack == XI_PACK_NULL) return -1;
+    // J4: push() STAGES into g_staged, which is drained ONLY on the dispatch thread
+    // that runs the inspect (drain_/flush_staged_emits_). A push from a xi::parallel_for
+    // / xi::async CHILD worker would stage into THAT child's thread_local g_staged,
+    // which is never flushed → the retained pack ref leaks (→ exhaustion under OpenMP
+    // pool reuse) and the delivery is silently dropped. push() is valid ONLY on the
+    // trigger/dispatch thread; off-thread is a fail-loud programming error (the WRITE
+    // analogue of the READ guard on current_trigger()). Reject BEFORE retaining, loudly
+    // + once per sink name.
+    if (push_off_dispatch_thread_()) { warn_push_off_thread_(name); return -6; }
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    if (!a || !a->has_pack_door()) return -4;
+    if (a->is_sink()) {
+        // Our staged ref: the script's own ScriptPack ref may die right after
+        // push() returns, so retain BEFORE returning. Balanced by
+        // release_trigger_event_ at flush/drain.
+        //
+        // L2 (historical): under the old counted ledger this HAD to be
+        // retain_untagged to avoid stranding a phantom script-owner bucket.
+        // Under the single-creator-tag registry every retain is an untracked
+        // ++rc, so this pairs trivially with the bus releaser
+        // (release_trigger_event_ → f_release_for_bus → release_as(pack, 0)).
+        xi::PackRegistry::instance().retain_untagged(pack);
+        StagedEmit item;
+        item.target   = name;
+        item.rec.pack = pack;
+        g_staged.push_back(std::move(item));
+        return 0;
     }
-    return use_process_inline_(name, input_doc, input_data, input_len,
-                              input_images, input_image_count, output);
+    return use_push_pack_inline_(name, pack);
 }
 
+// Script→plugin request/reply (xi::use(name).exchange(cmd)). exchange() ENTERS
+// PLUGIN CODE, so it carries the same item-14 fault surface as its siblings
+// (use_push_pack_inline_ / use_pack_process_cb): refuse → -3 without entering
+// plugin code, pending reinit applied first, culprit stamped, and a caught
+// crash feeds note_instance_crash_ + apply_on_fault_policy_ — otherwise a
+// quarantined instance is still entered every frame via exchange(), and an
+// exchange()-only crash-loop never trips health/reinit/refuse.
+// NOTE on the crash return: this surface keeps -1 (NOT the pack path's -2).
+// The script-side caller (UseProxy::exchange, xi_use.hpp) treats -1 as the
+// terminal miss and RETRIES any other negative as "buffer too small, need -n
+// bytes" — a -2 would re-enter a just-crashed plugin once more. The -3
+// quarantine refuse is safe under that retry: the retry hits this gate again
+// and is refused without touching the plugin.
 int use_exchange_cb(const char* name, const char* cmd,
                            char* rsp, int rsplen) {
-    try {
-        auto inst = xi::InstanceRegistry::instance().find(name);
-        if (!inst) return -1;
+    if (!name) return -1;
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    // Item-14 gates live on the C-ABI adapter; a non-adapter instance has no
+    // quarantine/reinit state — guarded_plugin_call skips the gates/policy for
+    // a null adapter but keeps the culprit stamp + catch + stack recovery.
+    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    int n = 0;
+    auto r = guarded_plugin_call(name, adapter, inst->plugin_name(), "exchange()",
+                                 /*gate_quarantined=*/true, [&] {
         std::string result = inst->exchange(cmd);
-        int n = (int)result.size();
-        if (rsplen < n + 1) return -n;
+        int need = (int)result.size();
+        if (rsplen < need + 1) { n = -need; return; }
         std::memcpy(rsp, result.data(), result.size());
         rsp[result.size()] = 0;
-        return n;
-    } catch (const seh_exception& e) {
-        std::fprintf(stderr, "[xinsp2] use_exchange('%s') crashed: 0x%08X (%s)\n",
-                     name, e.code, e.what());
-        return -1;
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "[xinsp2] use_exchange('%s') threw: %s\n", name, e.what());
-        return -1;
-    }
+        n = need;
+    });
+    if (r.kind == PluginCallResult::Kind::Quarantined) return -3;
+    if (!r.ok()) return -1;   // crash/throw stays -1 — see the retry note above
+    return n;
 }
 
-// grab() was the legacy pull model (xi::ImageSource queue). Sources now PUSH via
-// emit_record and scripts read current_trigger(), so there's nothing to grab.
-xi_image_handle use_grab_cb(const char* /*name*/, int /*timeout_ms*/) {
-    return XI_IMAGE_NULL;
+// polaris2 Gate P2 — xi::use(...).process(ScriptPack) wired into the script DLL:
+// drive the target plugin's xi.pack@1 pack door with a sealed host pack. Runs
+// INLINE on this thread under the same item-14 fault gates as the Record path
+// (use_process_inline_): refuse → -3 without entering plugin code, pending
+// reinit applied first, culprit stamped, SEH/throw caught → -2 with the same
+// crash bookkeeping + on-fault policy. `in` is borrowed (script keeps its ref);
+// on 0 `*out` is a NEW sealed handle the SCRIPT owns (or XI_PACK_NULL if the
+// door hard-failed). No pack analogue of the DocRegistry ref accounting is
+// needed: pack lifetime is pure handle refcount (PackRegistry), nothing is
+// reserved for an adopter up front.
+//
+// U3 (docs/new_gen/17): the v0 "sink target runs inline" gap is CLOSED by
+// doctrine, not by staging — a process() call on a declared ORDERED SINK is
+// rejected at call time (-5, fail-loud). process() is the request-reply
+// surface; a staged call's reply cannot exist until the post-inspect flush,
+// so staging here would force an empty return indistinguishable from the
+// documented "door hard failure" empty — a silent semantic fork on the
+// target's declared role. The sink feed is use(sink).push(pack) (staged +
+// flushed in frame order, use_push_pack_cb above). The script side maps -5 to
+// an empty pack + a once-per-name error log naming push().
+int use_pack_process_cb(const char* name, xi_pack_handle in, xi_pack_handle* out) {
+    if (out) *out = XI_PACK_NULL;
+    if (!name || !out) return -1;
+    // U1 fault SHORT-CIRCUIT (docs/new_gen/15): a poison input never enters
+    // plugin code. The funnel mints a NEW sealed fault pack — the original
+    // "$fault"/"$fault_key"/"$fault_detail" (+ "$seq") with this hop stamped
+    // as "$src" and appended to the "$prov" chain — and returns it as the
+    // call's result (rc 0). This is the pack mirror of the Record path's
+    // `if (input.is_na()) return Record::na(reason).set_src(name)`
+    // (UseProxy::process, xi_use.hpp), and like it, it runs BEFORE the
+    // instance lookup: poison propagates even through a typo'd, quarantined
+    // or door-less name — the frame's failure is already explained by the
+    // carried reason, and the plugin must not run either way.
+    if (xi::pack_contract::is_fault(xi::pack_v1_iface(), in)) {
+        *out = xi::pack_contract::propagate_fault(xi::pack_v1_iface(), in, name);
+        return 0;
+    }
+    auto inst = xi::InstanceRegistry::instance().find(name);
+    if (!inst) return -1;
+    auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+    if (!adapter) return -4;                       // non-C-ABI instance: no door
+    // U3: static misuse — checked BEFORE the fault gates (the plugin is never
+    // entered, no health/quarantine state is touched).
+    if (adapter->is_sink()) return -5;
+    // Round-3 S4: the Wave-2 consolidation moved the -4 no-pack-door check
+    // BEFORE the quarantine gate (which lives inside guarded_plugin_call), so a
+    // quarantined door-less instance started answering -4 where the old
+    // contract said -3 — scripts branching on -3 ("refused, operator action
+    // needed") vs -4 ("wrong target, fix the script") saw the wrong bucket.
+    // Restore the old precedence: gates first, door check after. The pre-gate
+    // duplicates guarded_plugin_call's check on purpose (it must run before the
+    // -4 check, which in turn must run before the plugin is entered); the
+    // re-check inside guarded_plugin_call is a harmless no-op.
+    if (adapter->quarantined()) return -3;
+    if (adapter->reinit_pending()) {
+        apply_pending_reinit_(name, adapter);
+        if (adapter->quarantined()) return -3;
+    }
+    if (!adapter->has_pack_door()) return -4;      // Record-only plugin
+    // Wave-2 #1: shared fault boundary (data plane ⇒ quarantine-gated).
+    auto r = guarded_plugin_call(name, adapter, inst->plugin_name(), "pack door",
+                                 /*gate_quarantined=*/true, [&] {
+        *out = adapter->run_pack_door(in);         // OwnerGuard + CallScope inside
+    });
+    if (r.kind == PluginCallResult::Kind::Quarantined) return -3;
+    if (!r.ok()) {
+        *out = XI_PACK_NULL;                       // a torn result is never handed out
+        return -2;
+    }
+    return 0;
 }
 
 // ---- Trigger loop state ----
@@ -280,13 +368,12 @@ xi::crash::Context& crash_ctx() { return xi::crash::ctx(); }
 // Per-worker deadlines: the parallel dispatch pool (parallelism.dispatch_threads
 // > 1) runs N inspects at once, so the watchdog tracks a SLOT per in-flight
 // inspect (each arms a free slot on entry, clears it on exit). The monitor scans
-// all slots. On a deadline breach it first asks the script to cancel cooperatively
-// (a GLOBAL flag — under N>1 this aborts every in-flight frame, which is the
-// intended "something's wedged, bail this round" signal); if the script ignores
-// that for the grace window, the process is unrecoverable (a forced thread kill
-// would leak the per-instance lock + risk heap corruption), so the backend
-// exits and the FE supervisor respawns a clean one. See docs/guides/writing-a-
-// script.md (Parallel dispatch) + internals/fe-be.md.
+// all slots. On a deadline breach the overrunning inspect gets a grace window
+// (a merely-slow frame finishes and is left alone); if the SAME inspect is
+// still overrun after the grace it is wedged, and the process is unrecoverable
+// (a forced thread kill would leak the per-instance lock + risk heap
+// corruption), so the backend exits and the FE supervisor respawns a clean one.
+// See docs/guides/writing-a-script.md (Parallel dispatch) + internals/fe-be.md.
 // Per-slot inspect deadline (steady_clock epoch-ms); 0 = free. Written by the
 // dispatch/run thread that owns the slot, read by the watchdog thread.
 // WATCHDOG_EXIT_CODE moved to service_internal.hpp.
@@ -319,26 +406,25 @@ void wd_disarm(int slot) { if (slot >= 0) g_eng.wd_deadlines[slot].store(0); }  
 // dispatch threads can each have their own current trigger.
 thread_local const xi::TriggerEvent* g_current_trigger = nullptr;   // DEFINED here (decl in header)
 
-// A1: owning thread id of the in-flight CurrentTriggerScope — NON-thread-local
-// (unlike g_current_trigger above) so any thread can tell "is a trigger active
-// somewhere?" apart from "is one active on MY thread?". GetCurrentThreadId() is
-// never 0 for a live thread, so 0 unambiguously means "no trigger in flight".
-//
-// This disambiguates the two cases a trigger thunk's `!g_current_trigger` branch
-// used to conflate (see Problem A in docs/internals/core_fix_plan.md):
-//   * g_eng.inspect_tid == 0  → genuinely no trigger (plain cmd:run, timer tick):
-//     keep the historical empty / XI_IMAGE_NULL semantics.
-//   * g_eng.inspect_tid != 0  → a trigger IS active, but the caller is on a DIFFERENT
-//     thread — an xi::async task or #pragma omp body that read the ambient
-//     trigger off the inspect thread. That is the silent-bug class; fail loud.
-
-// A1: invoked from a trigger thunk's "no current trigger" branch. If a trigger is
-// actually in flight (on another thread), the caller used current_trigger() off
-// the inspect thread — abort with a named message in debug, log-once in release.
-// If no trigger is in flight at all, returns quietly so the thunk preserves its
-// pre-existing empty / XI_IMAGE_NULL semantics (legitimate cmd:run / timer paths).
+// F4: invoked from the trigger info thunk's "no current trigger" branch. The
+// relational detection now rides the A4 explicit RunContext (g_run_ctx) instead
+// of a separate integer marker: the context is installed on the dispatch thread
+// (carrying owner_tid + had_trigger) and PROPAGATED BY VALUE onto xi::async /
+// xi::parallel_for / xi::spawn_worker workers, while g_current_trigger stays
+// thread_local and is NOT inherited. So the ambient current_trigger() is null on
+// a worker even though the context is present. Fire ONLY when this is a worker of
+// a TRIGGERED run — the context is present, its owner_tid differs from this
+// thread (⇒ a spawned worker, not the dispatch thread), and the run carried a
+// trigger (had_trigger). A dispatch thread of a triggered frame never reaches
+// here (g_current_trigger != null); a timer-tick / plain cmd:run thread has
+// had_trigger == false, so reading current_trigger() there is the legitimate "no
+// trigger" case → quiet. A hand-rolled `#pragma omp` region (NOT the blessed
+// primitives) keeps the context of the thread it runs on, so an off-thread read
+// from one is not flagged — the same documented trade as before.
 static void warn_trigger_off_thread_() {
-    if (g_eng.inspect_tid.load(std::memory_order_acquire) == 0) return;   // genuinely no trigger
+    if (!(g_run_ctx && g_run_ctx->had_trigger &&
+          g_run_ctx->owner_tid != std::this_thread::get_id()))
+        return;   // dispatch thread, or no triggered run in this thread's lineage
     static constexpr const char* kMsg =
         "[xinsp2] current_trigger() called off the inspect thread — read the "
         "trigger ON the inspect thread and capture into the parallel body "
@@ -355,13 +441,73 @@ static void warn_trigger_off_thread_() {
 #endif
 }
 
-// Release every host resource a finished trigger event owns: image handle refs
-// (ImagePool) + the ABI-v5 metadata doc ref (DocRegistry). Call exactly once
-// per event when it's done — dispatched or dropped — mirroring the bus's own
-// per-drop-site discipline so a metadata doc carried on the bus can't leak.
+// J4: WRITE-path analogue of the READ guard above — is this use(sink).push()
+// running off the dispatch thread? push() STAGES into the dispatch thread's
+// thread_local g_staged, which is drained ONLY on that thread (drain_/flush_
+// staged_emits_); a push from a spawned worker would stage into THAT worker's
+// never-flushed g_staged (leaked ref + dropped delivery). Staging genuinely
+// cannot be made worker-safe here, so the rejection is PRESERVED — but now driven
+// off the A4 RunContext, not the retired marker: the context carries owner_tid
+// (the dispatch thread that owns g_staged) and is propagated by value onto
+// workers, so a tid mismatch means "spawned worker" for BOTH triggered and
+// timer-tick / cmd:run dispatch threads (each installs its own owner_tid). Off a
+// run entirely (g_run_ctx == null) nothing is staged, so allow. A DETACHED SNAPSHOT
+// (a spawn_worker context — result_slot nulled) is rejected on the result_slot
+// marker FIRST (structural — independent of the owner_tid comparison). Wave-2 #5:
+// the snapshot now keeps the PARENT's owner_tid (A4 symmetry — the READ guard
+// warn_trigger_off_thread_ needs the tid mismatch to fire on a spawn_worker like
+// on async/parallel_for); this rejection never depended on the worker-tid stamp.
+static bool push_off_dispatch_thread_() {
+    if (!g_run_ctx) return false;               // off any run: nothing staged here
+    if (!g_run_ctx->result_slot) return true;   // detached snapshot (spawn_worker): never flushed → reject
+    return g_run_ctx->owner_tid != std::this_thread::get_id();
+}
+
+// Once-per-sink-name loud rejection of an off-dispatch-thread push. Mirrors
+// warn_trigger_off_thread_ (abort in Debug; warn-once in Release), but keyed per
+// SINK NAME so each mis-wired sink surfaces once. The push was NOT retained and the
+// callback returns -6 (script push() → false), so a dropped delivery is now a
+// visible programming error instead of a silent leak.
+static void warn_push_off_thread_(const char* name) {
+    std::string key = name ? name : "";
+#ifdef NDEBUG
+    // E1 (burr audit): check-then-build, matching the xi_use.hpp warn-once
+    // siblings — the message string is only assembled on the FIRST (warning)
+    // pass per sink name; the steady-state repeat path does the map probe only.
+    static std::mutex mu;
+    static std::unordered_map<std::string, bool> warned;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (!warned.emplace(key, true).second) return;   // warned this sink already
+    }
+#endif
+    std::string msg =
+        "xi::use(\"" + key + "\").push(pack) called off the inspect/dispatch thread — "
+        "push() stages into the dispatch thread's ordered-sink queue, which is never "
+        "flushed on a xi::async / xi::parallel_for worker (the ref would leak and the "
+        "delivery drop). Push ON the inspect thread — capture the pack and push after "
+        "the parallel region, not from inside it.";
+#ifndef NDEBUG
+    std::fprintf(stderr, "FATAL: %s\n", msg.c_str());
+    std::fflush(stderr);
+    std::abort();
+#else
+    std::fprintf(stderr, "ERROR: %s\n", msg.c_str());
+#endif
+}
+
+// Release every host resource a finished trigger event owns: the sealed payload
+// pack ref (via the installed PackRegistry releaser). Call exactly once per event
+// when it's done — dispatched or dropped — mirroring the bus's own per-drop-site
+// discipline so a pack carried on the bus can't leak. (THE CUT: the Record-era
+// image-handle + metadata-doc releases are gone with those TriggerEvent members.)
 void release_trigger_event_(xi::TriggerEvent& ev) {   // decl in header (cross-TU)
-    for (auto& [s, h] : ev.images) xi::ImagePool::instance().release(h);
-    ev.meta_doc.reset();   // release the event's doc ref + null it (dtor then no-ops)
+    // release_pack_ routes to the installed PackRegistry releaser; XI_PACK_NULL
+    // after so a double call can't re-release. No-op for a non-payload event.
+    if (ev.pack != XI_PACK_NULL) {
+        xi::TriggerBus::instance().release_pack_(ev.pack);
+        ev.pack = XI_PACK_NULL;
+    }
 }
 
 // RAII for "this thread's inspect sees `ev` as its trigger". Sets g_current_trigger
@@ -377,12 +523,14 @@ void release_trigger_event_(xi::TriggerEvent& ev) {   // decl in header (cross-T
 // (they touch the file-local release_trigger_event_).
 CurrentTriggerScope::CurrentTriggerScope(xi::TriggerEvent& ev) : ev_(ev) {
     g_current_trigger = &ev;
-    // A1: publish the owning thread id so a trigger thunk fired on another
-    // thread can tell "wrong thread" (loud bug) from "no trigger" (legit).
-    g_eng.inspect_tid.store(GetCurrentThreadId(), std::memory_order_release);
+    // F4: the "this run carried a trigger" signal now rides the A4 RunContext
+    // (RunContextScope, installed by run_inspection_compute_ with had_trigger =
+    // g_current_trigger != null) instead of a separate marker set here — so the
+    // scopes stay decoupled and there is one carrier. g_current_trigger remains
+    // thread_local + not propagated (its off-thread nullness is what the read
+    // guard keys on).
 }
 CurrentTriggerScope::~CurrentTriggerScope() {
-    g_eng.inspect_tid.store(0, std::memory_order_release);
     g_current_trigger = nullptr;
     release_trigger_event_(ev_);
 }
@@ -396,10 +544,10 @@ CurrentTriggerScope::~CurrentTriggerScope() {
 // double-free.) Same shape as DispatchPoolGuard.
 // TriggerEventReleaser moved to service_internal.hpp (used by dispatch TU).
 
-// ---- staged-sink drain / flush (paired with stage_sink_emit_ above) -------------
-// Drain WITHOUT delivering — release every staged item's image/doc refs. The
-// backstop for paths that staged but won't flush (no script, inspect crash, early
-// return): StagedEmitGuard runs it on scope exit.
+// ---- staged-sink drain / flush (paired with use_push_pack_cb staging above) -----
+// Drain WITHOUT delivering — release every staged item's pack ref. The backstop for
+// paths that staged but won't flush (no script, inspect crash, early return):
+// StagedEmitGuard runs it on scope exit.
 void drain_staged_emits_() {   // decl in header
     for (auto& it : g_staged) release_trigger_event_(it.rec);
     g_staged.clear();
@@ -412,102 +560,40 @@ void drain_staged_emits_() {   // decl in header
 // each record so a sink can correlate the packet to its frame. Fire-and-forget: the
 // reply is dropped. On return g_staged is empty so StagedEmitGuard then no-ops.
 void flush_staged_emits_(int64_t run_id) {   // decl in header
+    (void)run_id;   // THE CUT: only pack pushes are staged now; a sealed pack is
+                    // delivered AS-IS with no host-side $seq stamping (see below).
     // Move out first so g_staged is empty BEFORE any release: a throw mid-flush must
     // not let StagedEmitGuard re-release an item we already freed (worst case: a leak
     // of the not-yet-flushed tail under OOM, never a double-free).
     std::vector<StagedEmit> staged = std::move(g_staged);
     g_staged.clear();
-    std::vector<xi_record_image> in_imgs;
-    // RAII: xi_record_out_free (+ the consumer-ref releases the plugin handed back)
-    // must run on EVERY exit path. They used to sit at the tail of the try, on the
-    // happy path only — a throw between the process() call and there (e.g. a release
-    // on a corrupt handle, or bad_alloc) jumped to the catch and skipped them, leaking
-    // the out_doc + pool handles. Same cleanup-by-default shape as copy_ref /
-    // TriggerEventReleaser. Dtor swallows: cleanup must not throw during unwinding.
-    struct RecordOutGuard {
-        xi_record_out* out;
-        bool release_refs = false;   // armed once prc>=0: the returned refs are ours to drop
-        explicit RecordOutGuard(xi_record_out* o) : out(o) {}
-        ~RecordOutGuard() {
-            try {
-                if (release_refs) {
-                    if (out->out_doc)
-                        xi::DocRegistry::instance().release((yyjson_mut_doc*)out->out_doc);
-                    for (int i = 0; i < out->image_count; ++i)
-                        if (out->images[i].handle)
-                            xi::ImagePool::instance().release(out->images[i].handle);
-                }
-            } catch (...) { /* releases are effectively noexcept; never let one propagate */ }
-            xi_record_out_free(out);
-        }
-        RecordOutGuard(const RecordOutGuard&) = delete;
-        RecordOutGuard& operator=(const RecordOutGuard&) = delete;
-    };
     for (auto& it : staged) {
-        // Non-null iff we delivered a PRIVATE COW copy this iteration: released on every
-        // exit path below (declared out here so a throw mid-flush can't leak it).
-        yyjson_mut_doc* copy_ref = nullptr;
-        try {
-            // Pick the doc to deliver. it.rec.meta_doc is registry-refcounted and may be
-            // SHARED: a script can stage the SAME Record to several sinks (each share_out's
-            // the one underlying doc), or build the record from a borrowed trigger/plugin
-            // doc still held elsewhere. Stamping $seq into a shared doc would (a) mutate a
-            // doc a concurrent holder reads and (b) double-stamp when two staged items point
-            // at it. So COW only when actually shared (rc>1); the common single-sink path
-            // (rc==1, sole owner) stamps in place with no copy — speed-first. (rc can only
-            // fall, never rise, behind our back here: we hold the sole non-shared ref and
-            // don't hand the doc out before stamping, so the rc==1 fast path is safe.)
-            yyjson_mut_doc* deliver = it.rec.meta_doc.get();
-            if (deliver && xi::DocRegistry::instance().refcount(deliver) > 1) {
-                if (yyjson_mut_doc* copy = yyjson_mut_doc_mut_copy(deliver, nullptr)) {
-                    xi::DocRegistry::instance().addref(copy);   // register at rc=1 (our ref)
-                    deliver  = copy;
-                    copy_ref = copy;
-                }
-                // Copy failed (OOM): fall through and stamp the original — a best-effort
-                // $seq beats dropping the frame; the duplicate-key risk is the lesser evil.
-            }
-            // Frame correlation: stamp the arrival/run id with PUT semantics — remove any
-            // existing $seq first so a re-stamp (or a doc that already carried $seq) can't
-            // accumulate duplicate keys. Best-effort — skip if the doc isn't an object.
-            if (deliver) {
-                yyjson_mut_val* root = yyjson_mut_doc_get_root(deliver);
-                if (root && yyjson_mut_is_obj(root)) {
-                    yyjson_mut_obj_remove_str(root, "$seq");
-                    yyjson_mut_obj_add_int(deliver, root, "$seq", run_id);
-                }
-            }
-            in_imgs.clear();
-            in_imgs.reserve(it.rec.images.size());
-            for (auto& [k, h] : it.rec.images) in_imgs.push_back(xi_record_image{k.c_str(), h});
-            // Reserve one doc ref for the consumer (adopt or serialize-release both
-            // CONSUME one); our own ref (original via release_trigger_event_ below, or the
-            // COW copy via copy_ref) balances the other.
-            if (deliver) xi::DocRegistry::instance().addref(deliver);
-            xi_record_out output; xi_record_out_init(&output);
-            RecordOutGuard out_guard{&output};   // frees + drops the returned refs on ALL paths
-            int prc = use_process_inline_(it.target.c_str(), deliver, nullptr, 0,
-                                          in_imgs.data(), (int)in_imgs.size(), &output);
-            // prc == -1: target gone before touching the input doc → our reserved ref
-            // wasn't consumed; release it. prc == -2 (crash) may have — don't second-
-            // guess a torn call (mirrors xi_use.hpp).
-            if (deliver && prc == -1) xi::DocRegistry::instance().release(deliver);
-            // Arm the guard to also drop the out_doc + output image refs (prc>=0 only —
-            // a torn/crashed call's output is untrustworthy; leave its refs alone).
-            if (prc >= 0) out_guard.release_refs = true;
-        } catch (const seh_exception& e) {
-            std::fprintf(stderr, "[xinsp2] sink '%s' flush crashed: 0x%08X (%s)\n",
-                         it.target.c_str(), e.code, e.what());
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "[xinsp2] sink '%s' flush threw: %s\n", it.target.c_str(), e.what());
-        } catch (...) {
-            std::fprintf(stderr, "[xinsp2] sink '%s' flush threw a non-std exception\n", it.target.c_str());
-        }
-        // Our COW ref (if any) — the consumer ref was reserved+consumed above; this drops
-        // OUR ref, freeing the copy. The original meta_doc is released untouched next.
-        if (copy_ref) xi::DocRegistry::instance().release(copy_ref);
-        release_trigger_event_(it.rec);   // our owned image + ORIGINAL doc refs — every path
+        // polaris2 gate P2: a staged PACK push (use(sink).push(pack)). The sealed
+        // pack is delivered AS-IS — no $seq stamping (immutable; and byte-identity
+        // between this push and a direct host-side dump of the same pack is the
+        // contract — the pack's own $channel/$seq entries carry routing/ordering).
+        // U3 contract (docs/new_gen/17): delivery ORDER here — inside the EmitTurn
+        // gate, in staging order — is the envelope's authoritative guarantee to
+        // the sink; in-band IDENTITY is producer-stamped before seal ($seq =
+        // xi::run_id() for the host arrival id). The envelope never backfills
+        // entries.
+        // use_push_pack_inline_ owns the SEH boundary + fault policy; -1/-3/-4
+        // need no ref rebalance here because the door BORROWS the handle either
+        // way. release_trigger_event_ drops our staged ref on every path.
+        if (it.rec.pack != XI_PACK_NULL)
+            use_push_pack_inline_(it.target.c_str(), it.rec.pack);
+        release_trigger_event_(it.rec);   // drops our staged pack ref on every path
     }
+    // B4 (burr audit): hand the local's CAPACITY back to g_staged so the next
+    // frame's push() doesn't re-allocate from zero (the move-out above stripped
+    // it every frame). Every element was released in the loop, so clear() drops
+    // no live ref. Guarded on g_staged.empty(): staging during the flush can't
+    // happen today (use(...).push is script-only and a sink's pack door can't
+    // re-enter the script), but if that ever changes a re-staged item must not
+    // be swapped away. On a mid-flush throw we skip the swap — losing capacity
+    // is fine; the throw-safety the move-out bought is unchanged.
+    staged.clear();
+    if (g_staged.empty()) g_staged.swap(staged);
 }
 
 // CurrentTriggerInfoC struct moved to service_internal.hpp.
@@ -521,75 +607,13 @@ void trigger_info_cb(CurrentTriggerInfoC* out) {
     out->dequeued_at_us = g_current_trigger->dequeued_at_us;
 }
 
-xi_image_handle trigger_image_cb(const char* source) {
-    if (!g_current_trigger) { warn_trigger_off_thread_(); return XI_IMAGE_NULL; }
-    if (!source) return XI_IMAGE_NULL;
-    auto it = g_current_trigger->images.find(source);
-    if (it == g_current_trigger->images.end()) {
-        // Reader-side sole-image fallback (cold path — only on an exact-key
-        // MISS, so the hot emit path stays allocation-free with NO second map
-        // entry per frame). A single-image event resolves by ANY key: the
-        // record's own key (e.g. "frame" — the documented contract + cmd:run
-        // inject) AND the emitter instance name (legacy reads) both land on the
-        // lone frame. A multi-image event keeps strict exact-key routing.
-        if (g_current_trigger->images.size() == 1)
-            it = g_current_trigger->images.begin();
-        else
-            return XI_IMAGE_NULL;
-    }
-    // Caller (script) releases via host_api->image_release after copying
-    // pixels — addref so our own release on dispatch-end doesn't free it
-    // out from under them.
-    xi::ImagePool::instance().addref(it->second);
-    return it->second;
-}
-
-int32_t trigger_sources_cb(char* buf, int32_t buflen) {
-    if (!g_current_trigger) { warn_trigger_off_thread_(); return 0; }
-    if (!buf) return 0;
-    std::string out;
-    bool first = true;
-    for (auto& [src, h] : g_current_trigger->images) {
-        if (!first) out.push_back('\n');
-        first = false;
-        out += src;
-    }
-    int32_t n = (int32_t)out.size();
-    if (buflen < n + 1) return -n;
-    std::memcpy(buf, out.data(), n);
-    buf[n] = 0;
-    return n;
-}
-
-// P2-2: expose TriggerEvent::leader_source to scripts. leader_source is
-// simply the emitting instance's name (the source that emit_record'd this
-// event); scripts consult sources() for the full set. Same -needed_bytes
-// convention as trigger_sources_cb so scripts can resize and retry.
-int32_t trigger_leader_cb(char* buf, int32_t buflen) {
-    if (!g_current_trigger) { warn_trigger_off_thread_(); return 0; }
-    if (!buf) return 0;
-    const std::string& s = g_current_trigger->leader_source;
-    int32_t n = (int32_t)s.size();
-    if (n == 0) return 0;
-    if (buflen < n + 1) return -n;
-    std::memcpy(buf, s.data(), n);
-    buf[n] = 0;
-    return n;
-}
-
-// ABI v5: hand the script the event's metadata doc (emit_trigger_record) as a
-// borrowed read-only view — zero-serialize. We RESERVE one ref (retain) for the
-// script's adopt_shared to consume, exactly as Record::share_out reserves a ref
-// for record_from_c's adopt_shared on the process()-input doc. The script-side
-// xi::Trigger::meta() adopt_shared's it and doc_release's when its Record dies,
-// balancing this reserve; the worker still holds the event's own ref until
-// release_trigger_event_. Returns null when the trigger carries no metadata.
-void* trigger_meta_cb() {
-    if (!g_current_trigger) { warn_trigger_off_thread_(); return nullptr; }
-    if (!g_current_trigger->meta_doc) return nullptr;
-    xi::DocRegistry::instance().addref(g_current_trigger->meta_doc.get());
-    return (void*)g_current_trigger->meta_doc.get();
-}
+// THE CUT: the Record trigger-access script callbacks — trigger_image_cb,
+// trigger_sources_cb, trigger_leader_cb, trigger_meta_cb — are DELETED. They read
+// the TriggerEvent's Record-era image map / leader_source / metadata doc, which no
+// longer exist; scripts now read the frame payload through t.pack() off the pack
+// plane. trigger_info_cb (identity/timestamp only) stays. The wiring that installed
+// these (set_trigger_*_callback in service_cmd_lifecycle.cpp, decls in
+// service_internal.hpp) is reconciled with THE CUT.
 
 // ---- Image-pool owner get/set thunks (C1) ----------------------------------
 // Bridge the backend's ImagePool owner thread_local across the ABI seam so SDK
@@ -607,16 +631,40 @@ void owner_set_cb(uint32_t id) {
 }
 
 // The single script-facing host_api (image_* + doc_* over the live singleton
-// ImagePool, with the trigger/emit hook installed). Shared by set_use_callbacks
-// (wired into the script's g_use_host_api_) AND the A4 explicit-trigger entry
-// (put into the xi_trigger_view so the SDK can resolve the passed image/meta
-// handles). One instance so both paths address the same pool/registry.
+// ImagePool). Shared by set_use_callbacks (wired into the script's
+// g_use_host_api_) AND the A4 explicit-trigger entry. One instance so both paths
+// address the same pool/registry. THE CUT: install_trigger_hook (the Record
+// emit_record/emit_trigger wiring, deleted from xi_trigger_bus.hpp) is no longer
+// installed here — the data plane is the xi.pack@1 door.
 const xi_host_api* script_host_api_() {
-    static xi_host_api use_host = [] {
-        auto a = xi::ImagePool::make_host_api();
-        xi::install_trigger_hook(a);
-        return a;
-    }();
+    static xi_host_api use_host = xi::ImagePool::make_host_api();
     return &use_host;
+}
+
+// ---- project-boundary reset (Wave-2 #3) --------------------------------------
+// Drop every piece of engine state that belongs to the project being replaced:
+//   * the bus sink + per-source emit-time map (source names are per-project;
+//     a stale sink can fire into a torn-down project, and the emit-time map
+//     otherwise accumulates across every open→emit→close cycle);
+//   * the script replay shadows (param_cache / instance_def_cache) and the U2
+//     kv channel. open/close/create_project do NOT unload the inspection script
+//     DLL (script lifecycle is independent of the project's plugin DLLs), so
+//     without this the next project's compile_and_load would capture the PRIOR
+//     project's xi::kv() and replay the prior project's tuned param/def values
+//     over any same-named declarations — running project B with project A's
+//     calibration and silently mis-verdicting (the documented cross-project
+//     leak class).
+// Root cause of the extraction: this block was duplicated verbatim in
+// cmd_open_project_ and cmd_close_project_, and MISSING from
+// cmd_create_project_ (which also replaces the project) — one primitive, three
+// callers, no third copy to drift.
+void reset_project_boundary_state_() {   // decl in header (cross-TU)
+    xi::TriggerBus::instance().clear_sink();
+    xi::TriggerBus::instance().reset();
+    std::lock_guard<std::mutex> lk(g_eng.script_mu);
+    g_eng.param_cache.clear();
+    g_eng.instance_def_cache.clear();
+    g_eng.persistent_kv_bytes.clear();
+    g_eng.persistent_kv_schema = 0;
 }
 

@@ -1,0 +1,112 @@
+{
+  "$comment": "TRANSCRIBED from toolbox/mock_camera/mock_camera_keys.h + _io.h. mock_camera is a SOURCE: no process() input Record — its script/UI-facing contract is its CONFIG (get_def/set_def), its COMMANDS (exchange), and the OUTPUT frame it emits. See contract/codegen/README.md.",
+  "plugin": "mock_camera",
+  "namespace": "xi::mock_camera",
+  "schema_version": 1,
+  "role": "source",
+  "title": "mock_camera — synthetic RGB frame source (config + command surface).",
+  "config": [
+    {
+      "key": "width",
+      "type": "int",
+      "doc": "int"
+    },
+    {
+      "key": "height",
+      "type": "int",
+      "doc": "int"
+    },
+    {
+      "key": "fps",
+      "type": "int",
+      "doc": "int"
+    },
+    {
+      "key": "streaming",
+      "type": "bool",
+      "readonly": true,
+      "doc": "bool (get_def only, read-only)"
+    },
+    {
+      "key": "gain",
+      "type": "double",
+      "doc": "double (default 1.0; clamped [0.05, 8.0]) — brightness multiplier applied to emitted pixels (saturating at 255)"
+    }
+  ],
+  "commands": {
+    "selector_key": "command",
+    "value_key": "value",
+    "list": [
+      {
+        "name": "start"
+      },
+      {
+        "name": "stop"
+      },
+      {
+        "name": "get_status"
+      },
+      {
+        "name": "set_fps",
+        "params": [
+          {
+            "key": "value",
+            "arg": "v",
+            "type": "int"
+          }
+        ]
+      },
+      {
+        "name": "set_resolution",
+        "params": [
+          {
+            "key": "width",
+            "arg": "w",
+            "type": "int"
+          },
+          {
+            "key": "height",
+            "arg": "h",
+            "type": "int"
+          }
+        ]
+      },
+      {
+        "name": "set_gain",
+        "params": [
+          {
+            "key": "value",
+            "arg": "v",
+            "type": "double"
+          }
+        ]
+      }
+    ]
+  },
+  "outputs": [
+    {
+      "key": "ack",
+      "type": "string",
+      "doc": "string (pack-door ack: echoes the applied command name, e.g. \"set_gain\")"
+    }
+  ],
+  "output_frame": [
+    {
+      "key": "frame",
+      "type": "image",
+      "accessor": "image",
+      "has_accessor": "has_frame",
+      "doc": "image (emitted RGB frame)"
+    },
+    {
+      "key": "seq",
+      "type": "int",
+      "doc": "int (frame counter; pack-mode entry)"
+    },
+    {
+      "key": "gain",
+      "type": "double",
+      "doc": "double (pack-mode entry: the brightness gain in effect for THIS frame — the closed-loop echo)"
+    }
+  ]
+}

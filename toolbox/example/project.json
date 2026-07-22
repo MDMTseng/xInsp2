@@ -1,0 +1,12 @@
+{
+  "name": "toolbox_station",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam",   "plugin": "mock_camera" },
+    { "name": "det",   "plugin": "blob_analysis" },
+    { "name": "ring",  "plugin": "cache" },
+    { "name": "saver", "plugin": "record_save" },
+    { "name": "view",  "plugin": "expose" }
+  ],
+  "plugins": {}
+}

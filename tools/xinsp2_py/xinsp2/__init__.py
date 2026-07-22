@@ -3,6 +3,7 @@ from .client import (
     ProtocolError,
     CmdTimeoutError,
     ConnectionLostError,
+    AuthError,
     UnknownCommandError,
     PartialStatusError,
     RunResult,
@@ -25,7 +26,7 @@ from .screenshot import screenshot
 
 __all__ = [
     "Client", "ProtocolError",
-    "CmdTimeoutError", "ConnectionLostError", "UnknownCommandError",
+    "CmdTimeoutError", "ConnectionLostError", "AuthError", "UnknownCommandError",
     "PartialStatusError",
     "RunResult", "RunOutcome", "RunFinished",
     "outcome_class_for_code", "RUN_RESULT_SCHEMA",

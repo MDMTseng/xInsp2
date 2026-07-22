@@ -23,10 +23,10 @@
 // to scripts without an explicit include. (The xi.hpp umbrella itself stays
 // OpenCV-free; only this script force-include and xi_cv.hpp pull OpenCV.)
 #include "xi_cv.hpp"
-#include "xi_record.hpp"
 #include "xi_script.hpp"
+#include "xi_kv.hpp"      // U2: xi::kv() thunk bodies (xi_script_kv_* exports below)
+#include "xi_json_escape.hpp"  // the ONE JSON string-escape primitive (esc forwarder)
 #include "xi_seh.hpp"     // B2 warmup installs the SEH translator on the omp pool
-#include "xi_state.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -70,30 +70,10 @@ inline int g_omp_cap_applied_ = apply_omp_thread_cap_();  // runs at DLL load
 
 namespace xi_script_detail {
 
-// Trivial JSON string escape for names and string values. Same rules as
-// the backend's xi_protocol.hpp but inlined here to keep this header
-// independent of that file.
+// JSON string escape for names and string values — one-line forwarder to the
+// ONE escape primitive (xi_json_escape.hpp, std-only leaf); call sites unchanged.
 inline void esc(std::string& out, const char* s) {
-    out.push_back('"');
-    for (; *s; ++s) {
-        char c = *s;
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if ((unsigned char)c < 0x20) {
-                    char b[8];
-                    std::snprintf(b, sizeof(b), "\\u%04x", (unsigned)c);
-                    out += b;
-                } else {
-                    out.push_back(c);
-                }
-        }
-    }
-    out.push_back('"');
+    xi::json_escape_into(out, s ? s : "");
 }
 
 } // namespace xi_script_detail
@@ -192,9 +172,7 @@ XI_SCRIPT_EXPORT int xi_script_exchange_instance(const char* name, const char* c
 // and consumed from script code until DLL unload. The host MUST NOT
 // retain any pointer into these after calling FreeLibrary — all
 // reads happen inside the script's address space only.
-static void* g_use_process_fn_   = nullptr;
 static void* g_use_exchange_fn_  = nullptr;
-static void* g_use_grab_fn_      = nullptr;
 // Pointer to backend's xi_host_api — image_create / image_data /
 // image_release etc. all operate on the BACKEND's ImagePool, which is the
 // only pool plugins see via their own host_api. Without this, the script's
@@ -209,7 +187,6 @@ static void* g_trigger_info_fn_     = nullptr;
 static void* g_trigger_image_fn_    = nullptr;
 static void* g_trigger_sources_fn_  = nullptr;
 static void* g_trigger_leader_fn_   = nullptr;
-static void* g_trigger_meta_fn_     = nullptr;   // ABI v5: emit_trigger_record metadata doc
 
 // Status callback. Host sets this so xi::status(text) publishes the script's
 // latest status string to the host status registry. Signature: void(const char*).
@@ -237,30 +214,41 @@ static void* g_status_fn_           = nullptr;
 // verdict. Signature: void(int code, const char* msg).
 static void* g_result_fn_           = nullptr;
 
-// Per-run context. Set by the host before each xi_inspect_entry call,
-// cleared after. Currently just the optional `frame_path` arg from
-// cmd:run; future per-run fields (run_id, request id, etc.) join here.
-//
-// Scripts read these via accessors in xi_io.hpp — never touch the raw
-// globals. Host writes them via xi_script_set_run_context.
-//
-// `g_run_frame_path_` is sized to 1024 — paths longer than that are
-// truncated. Plenty for any reasonable file system.
-//
-// thread_local so multiple dispatcher threads (project.json
-// `parallelism.dispatch_threads > 1`) each see their own per-run
-// path. Each thread's `xi_script_set_run_context` writes its own
-// slot; `xi::current_frame_path()` reads it back from the same
-// thread.
-static thread_local char g_run_frame_path_[1024] = {0};
+// polaris2 gate P2 (expose-from-script): xi::use(sink).push(pack) host thunk.
+// Signature (cast in xi_use.hpp): int(const char* name, xi_pack_handle pack).
+// Null on an older host ⇒ push() returns false.
+static void* g_use_push_pack_fn_    = nullptr;
+
+// A4 explicit per-run context read thunks. The per-run identity (run_id +
+// frame_path) no longer lives in an ambient thread_local the host pushes into the
+// script; instead it rides ONE host-side RunContext that the host installs on the
+// dispatch thread and PROPAGATES BY VALUE onto xi::async / xi::parallel_for /
+// xi::spawn_worker workers (via the run_ctx get/set thunks in xi_async.hpp). These
+// two pointers let xi::run_id() / xi::current_frame_path() (xi_io.hpp) READ that
+// context host-side — correct on any worker thread, and fail-loud off a run. Null
+// until the host wires them (xi_script_set_run_ctx_callbacks); an older host
+// leaves them null and the accessors return the 0/"" sentinel. Storage for the
+// get/set PROPAGATION thunks lives in xi_async.hpp (g_run_ctx_get_fn_/set_fn_).
+static void* g_run_ctx_run_id_fn_     = nullptr;   // long long(*)()
+static void* g_run_ctx_frame_path_fn_ = nullptr;   // const char*(*)()
 
 XI_SCRIPT_EXPORT void xi_script_set_use_callbacks(
     void* process_fn, void* exchange_fn, void* grab_fn,
     void* host_api)
 {
-    g_use_process_fn_   = process_fn;
+    // process_fn: THE CUT (v12) removed the Record use()->process bridge that
+    // consumed this slot (g_use_process_fn_ is gone; xi::use(...).process now
+    // rides the pack door, see set_use_pack_callback). The ABI parameter is
+    // retained (dropping it is a coordinated host<->script signature change) but
+    // the host now passes null and nothing stores it.
+    (void)process_fn;
     g_use_exchange_fn_  = exchange_fn;
-    g_use_grab_fn_      = grab_fn;
+    // grab_fn: the host now passes nullptr — the SDK-side landing pad
+    // (g_use_grab_fn_) is gone and the pull-style xi::grab() that read it was
+    // removed in the v11 push-only cleanup (see xi_use.hpp), so nothing consumes
+    // it. The ABI parameter is retained (dropping it is a coordinated
+    // host<->script signature change) but never stored.
+    (void)grab_fn;
     g_use_host_api_     = host_api;
 }
 
@@ -283,13 +271,6 @@ XI_SCRIPT_EXPORT void xi_script_set_trigger_leader_callback(void* leader_fn) {
     g_trigger_leader_fn_ = leader_fn;
 }
 
-// ABI v5: metadata-doc callback (emit_trigger_record). Separate symbol for the
-// same back-compat reason as the leader callback; missing ⇒ meta unavailable
-// and xi::Trigger::meta() returns an empty Record.
-XI_SCRIPT_EXPORT void xi_script_set_trigger_meta_callback(void* meta_fn) {
-    g_trigger_meta_fn_ = meta_fn;
-}
-
 // Optional: install a status callback for xi::status(text). Scripts that don't
 // include xi_status.hpp leave this null.
 XI_SCRIPT_EXPORT void xi_script_set_status_callback(void* fn) {
@@ -306,109 +287,108 @@ XI_SCRIPT_EXPORT void xi_script_set_owner_callbacks(void* get_fn, void* set_fn) 
     g_owner_set_fn_ = set_fn;
 }
 
+// A4: install the explicit per-run context thunks. Separate optional symbol (same
+// back-compat reasoning as the owner callbacks) so an older host that doesn't know
+// about the explicit context simply leaves them all null: propagation is a no-op
+// and xi::run_id()/current_frame_path() return the 0/"" sentinel. get_fn/set_fn
+// marshal the opaque host RunContext* for the xi::async / xi::parallel_for pointer
+// path (stored in xi_async.hpp); run_id_fn/frame_path_fn are the READ thunks
+// xi::run_id() / xi::current_frame_path() call; snapshot_fn/install_worker_fn/free_fn
+// are the xi::spawn_worker BY-VALUE (worker-owned snapshot) path. Signatures:
+// get_fn: const void*(void); set_fn: void(const void*); run_id_fn: long long(void);
+// frame_path_fn: const char*(void); snapshot_fn: void*(void);
+// install_worker_fn: void(void*); free_fn: void(void*).
+XI_SCRIPT_EXPORT void xi_script_set_run_ctx_callbacks(void* get_fn, void* set_fn,
+                                                      void* run_id_fn, void* frame_path_fn,
+                                                      void* snapshot_fn, void* install_worker_fn,
+                                                      void* free_fn) {
+    g_run_ctx_get_fn_             = get_fn;
+    g_run_ctx_set_fn_             = set_fn;
+    g_run_ctx_run_id_fn_         = run_id_fn;
+    g_run_ctx_frame_path_fn_     = frame_path_fn;
+    g_run_ctx_snapshot_fn_       = snapshot_fn;
+    g_run_ctx_install_worker_fn_ = install_worker_fn;
+    g_run_ctx_free_fn_           = free_fn;
+}
+
 // Optional: install a result callback for xi::result(code,msg). Scripts that
 // don't include xi_result.hpp leave this null.
 XI_SCRIPT_EXPORT void xi_script_set_result_callback(void* fn) {
     g_result_fn_ = fn;
 }
 
-// Per-run context setter (called by host before each xi_inspect_entry,
-// optional cleanup after). `frame_path` may be null/empty when the
-// caller didn't provide one — scripts get back an empty string from
-// xi::current_frame_path() in that case.
-XI_SCRIPT_EXPORT void xi_script_set_run_context(const char* frame_path) {
-    if (!frame_path) frame_path = "";
-    size_t n = 0;
-    while (frame_path[n] && n + 1 < sizeof(g_run_frame_path_)) {
-        g_run_frame_path_[n] = frame_path[n];
-        ++n;
-    }
-    g_run_frame_path_[n] = 0;
+// polaris2 gate P2 (expose-from-script): install the use-pack push thunk for
+// xi::use(sink).push(pack). Separate symbol (same back-compat reasoning as the
+// leader/meta callbacks): an older host that doesn't know about the pack plane
+// never calls this, the global stays null, and push() degrades to `false`.
+// NOTE: distinct from xi_script_set_use_pack_callback (the use().process(pack)
+// door thunk below) — the two P2 surfaces landed in parallel and each keeps its
+// own optional symbol so either can be absent independently.
+XI_SCRIPT_EXPORT void xi_script_set_use_push_pack_callback(void* push_fn) {
+    g_use_push_pack_fn_ = push_fn;
 }
 
-// Watchdog cooperative-cancel arm/clear — host calls this when an inspect
-// overruns its deadline (set != 0) and again to clear (set == 0). The cancel is
-// EPOCH-SCOPED: arming targets only the inspects already in flight (those whose
-// start-ticket, drawn in xi_script_inspect_begin below, is below the counter's
-// high-water at this call). A fresh inspect dispatched DURING the grace draws a
-// higher ticket and does NOT observe this trip — so one slow frame no longer
-// poisons the second of unrelated frames that follow it. Long-running ops poll
-// `xi::cancellation_requested()` and exit early when their inspect is targeted.
-XI_SCRIPT_EXPORT void xi_script_set_global_cancel(int set) {
-    if (set) xi::arm_cancel();
-    else     xi::clear_cancel();
-}
+// [A4] xi_script_set_run_context / xi_script_set_run_id — RETIRED. Per-run
+// run_id + frame_path no longer ride an ambient thread_local the host pushed into
+// the script per inspect (and never propagated into workers — the spawn gap). They
+// now ride ONE host-side RunContext installed on the dispatch thread and
+// propagated by value onto xi::async / xi::parallel_for / xi::spawn_worker workers;
+// xi::run_id() / xi::current_frame_path() READ it via the run_ctx read thunks
+// (xi_script_set_run_ctx_callbacks above), correct on any thread and fail-loud off
+// a run.
 
-// Inspect-start hook — host calls this on the dispatch thread immediately
-// before invoking xi_inspect_entry, so the inspect (and any xi::async sub-task
-// it spawns) draws a fresh cancel ticket. Without it (older host that never
-// calls this) the ticket stays 0 and cancellation_requested() falls back to the
-// legacy "cancel reaches everything while armed" behaviour. Optional symbol:
-// hosts GetProcAddress it and null-check (see xi_script_loader.hpp).
-XI_SCRIPT_EXPORT void xi_script_inspect_begin(void) {
-    xi::begin_inspect();
-}
+// [retired] xi_script_set_global_cancel / xi_script_inspect_begin — the
+// watchdog's cooperative EPOCH-cancel thunks were removed with the whole
+// soft-cancel layer. A wedged inspect is now handled by the watchdog's HARD
+// trip (_Exit + FE respawn, see service_main.cpp), not a soft cancel the script
+// polls. cancellation_requested() now reads only the per-task xi::async token.
 
-// --- Persistent state thunks ---
-
-XI_SCRIPT_EXPORT int xi_script_get_state(char* buf, int buflen) {
-    std::string json = xi::state().data_json();
-    int needed = (int)json.size();
-    if (buflen < needed + 1) return -needed;
-    std::memcpy(buf, json.data(), json.size());
-    buf[json.size()] = 0;
-    return needed;
-}
-
-XI_SCRIPT_EXPORT int xi_script_set_state(const char* json) {
-    if (!json) return -1;
-    // Replace the state Record by parsing the JSON (yyjson via from_json_bytes).
-    xi::state() = xi::Record::from_json_bytes((const uint8_t*)json, std::strlen(json));
-    return 0;
-}
-
-// State schema version — bump when the shape of xi::state() changes
-// in a way the previous DLL's persisted JSON would default-fill
-// incorrectly. Backend records the version alongside saved state and
-// drops the state on mismatch instead of silently restoring garbage.
+// --- U2 (docs/new_gen/16): xi::kv() persistent-state thunks -----------------
 //
-// Default 0 means "unversioned" — backend skips the migration check
-// and restores blindly (legacy back-compat). Register from user code:
-//
-//   XI_STATE_SCHEMA(2);   // file-scope macro
-//
-// or manually:
-//
-//   static int _sv = (xi::set_state_schema_version(2), 0);
-//
-// The export below reads the runtime atomic, so the user's static
-// initialiser (which runs at DLL load, BEFORE the host's first
-// xi_script_set_state) wins.
-XI_SCRIPT_EXPORT int xi_script_state_schema_version(void) {
-    return xi::state_schema_version();
+// The kv channel is the post-Record shape of cross-frame state: canonical
+// max-width msgpack bytes with EXPLICIT LENGTHS (msgpack contains NULs, so the
+// Record channel's NUL-terminated char* convention cannot carry it). The
+// bodies live in xi_kv.hpp (xi::detail::kv_*_thunk) so the loader-level test
+// fixture exports the exact same logic. Bilingual window: these ride BESIDE
+// the Record thunks above; THE CUT deletes the Record set and keeps these.
+
+XI_SCRIPT_EXPORT int xi_script_kv_get(uint8_t* buf, int buflen) {
+    return xi::detail::kv_get_thunk(buf, buflen);
 }
 
-// G4 / OQ-5 — code_change-style state-migration hook. Called by the host on a
-// schema-version mismatch (see xi_script_loader.hpp::migrate_state) BEFORE it
-// would otherwise drop the prior state. `old_json`/`old_schema` are the retiring
-// DLL's persisted state; on success writes the migrated (new-shape) JSON into
-// `buf` and returns its length (get_state's buffer convention: a negative return
-// -N means "buffer too small, need N"). Returns 0 — "decline, drop as usual" —
-// when no migrator was registered via xi::set_state_migrate OR the migrator
-// returned "". This export is always present in a recompiled script; a script
-// with no migrator is indistinguishable (return 0) from one lacking the symbol,
-// so the host's fallback-to-drop path is identical either way.
-XI_SCRIPT_EXPORT int xi_script_code_change(const char* old_json, int old_schema,
-                                           int new_schema, char* buf, int buflen) {
-    auto& fn = xi::state_migrate_fn();
-    if (!fn) return 0;                              // no migrator -> host drops
-    std::string out = fn(old_json ? old_json : "{}", old_schema, new_schema);
-    if (out.empty()) return 0;                      // declined -> host drops
-    int needed = (int)out.size();
-    if (buflen < needed + 1) return -needed;        // grow-and-retry (like get_state)
-    std::memcpy(buf, out.data(), out.size());
-    buf[out.size()] = 0;
-    return needed;
+XI_SCRIPT_EXPORT int xi_script_kv_set(const uint8_t* bytes, int len) {
+    return xi::detail::kv_set_thunk(bytes, len);
+}
+
+XI_SCRIPT_EXPORT int xi_script_kv_schema_version(void) {
+    return xi::kv_schema_version();
+}
+
+// Typed code_change for the kv channel (see xi_kv.hpp set_kv_migrate). Always
+// present in a recompiled script; "no migrator registered" returns 0, which is
+// indistinguishable from a missing symbol — the host's drop fallback is
+// identical either way.
+XI_SCRIPT_EXPORT int xi_script_kv_change(const uint8_t* old_bytes, int old_len,
+                                         int old_schema, int new_schema,
+                                         uint8_t* buf, int buflen) {
+    return xi::detail::kv_change_thunk(old_bytes, old_len, old_schema,
+                                       new_schema, buf, buflen);
+}
+
+// --- polaris2 Gate P2: xi::use() pack-door callback (docs/new_gen/10) ---
+//
+// Storage for the pack-door process callback xi_use.hpp declares extern (same
+// lifetime invariant as the g_use_* globals above: lives in the script DLL,
+// written by the host once per load, never retained past FreeLibrary).
+// Signature (cast in xi_use.hpp, xi::UsePackProcessFn):
+//   int(const char* name, xi_pack_handle in, xi_pack_handle* out)
+static void* g_use_pack_process_fn_ = nullptr;
+
+// Separate optional symbol (same back-compat reasoning as the leader/meta
+// callbacks): an older host never looks it up and leaves the pointer null, in
+// which case xi::use(...).process(ScriptPack) returns an empty pack.
+XI_SCRIPT_EXPORT void xi_script_set_use_pack_callback(void* fn) {
+    g_use_pack_process_fn_ = fn;
 }
 
 #endif // XI_SCRIPT_NO_DEFAULT_THUNKS

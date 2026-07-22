@@ -1,1 +1,0 @@
-{ "plugin": "count_sink", "isolation": "in_process", "config": {} }

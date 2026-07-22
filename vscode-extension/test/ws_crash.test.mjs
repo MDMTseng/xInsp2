@@ -11,7 +11,7 @@ import WebSocket from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const backendExe = resolve(__dirname, '../../backend/build/Release/xinsp-backend.exe');
-const crashDir = resolve(__dirname, '../../examples/crash_tests');
+const crashDir = resolve(__dirname, '../../qa/crash_tests');
 const goodScript = resolve(__dirname, '../../examples/user_script_example.cpp');
 
 function randomPort() { return 30000 + Math.floor(Math.random() * 20000); }

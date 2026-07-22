@@ -9,20 +9,24 @@
 //
 //     "sink": true
 //
-// For such a target, a script's
+// The sink FEED is a script's
 //
-//     xi::use("comm0").process(rec)
+//     xi::use("comm0").push(pack)
 //
-// is NOT run inline during the inspect. The host STAGES it and flushes it AFTER the
-// inspect, inside the ordered-emit gate — so deliveries to this plugin are serialized
-// in frame (arrival) order, with no new script verb and no new ABI. A frame that is
-// dropped (queue overflow) simply never arrives here — no head-of-line gap to wait on.
+// It is NOT run inline during the inspect. The host STAGES the sealed pack and
+// flushes it AFTER the inspect, inside the ordered-emit gate — so deliveries to
+// this plugin's xi.pack@1 door are serialized in frame (arrival) order, with no
+// new script verb and no new ABI. (Request-reply process(pack) on a declared sink
+// is refused at the funnel: a staged call's reply cannot exist mid-inspect — push
+// is fire-and-forget, the door's reply pack is dropped.) A frame that is dropped
+// (queue overflow) simply never arrives here — no head-of-line gap to wait on.
 //
-// Each delivered record carries the host-stamped key "$seq" — the frame's arrival id
-// (the same id on the run's wire result) — so a sink can correlate the packet to its
-// frame and notice gaps. A real comm plugin would open its socket / fieldbus and
-// forward `input["measurement"]` etc. here; this demo just records the $seq it saw,
-// in order, and exposes it via exchange("get_received") so the ordering is observable.
+// Each delivered pack carries the reserved i64 entry "$seq" — the frame's arrival
+// id (the same id on the run's wire result) — so a sink can correlate the packet
+// to its frame and notice gaps. A real comm plugin would open its socket /
+// fieldbus and forward the pack's entries here (walk them generically with
+// in.for_each, or read known keys); this demo just records the $seq it saw, in
+// order, and exposes it via exchange("get_received") so the ordering is observable.
 //
 // Build: `cmake -B build` here (see CMakeLists.txt), or copy this folder under
 // <project>/plugins/comm/ to have the backend compile it as a project source plugin.
@@ -38,26 +42,21 @@ class Comm : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    // Called by the host's staged-sink flush, in frame order. `input` is the Record
-    // the script sent, plus the host-stamped "$seq".
-    xi::Record process(const xi::Record& input) override {
-        const long long seq = input["$seq"].as_int64(-1);   // frame arrival id
+    // Called by the host's staged-sink flush, in frame order. `in` is the pack
+    // the script pushed, plus the host-stamped "$seq". The reply pack is
+    // dropped by the flush (fire-and-forget) — leave `out` untouched (an
+    // untouched PackOut seals the empty absence sentinel).
+    void process(xi::PackIn& in, xi::PackOut& /*out*/) override {
+        const long long seq = in.i64_or(xi::pack_contract::kSeq, -1);   // frame arrival id
 
         {
             std::lock_guard<std::mutex> lk(mu_);
             received_.push_back(seq);
         }
 
-        // A real comm plugin forwards to the line HERE — e.g. write `seq` + the data
-        // fields to a PLC register / socket / MES message. We just log it.
+        // A real comm plugin forwards to the line HERE — e.g. write `seq` + the
+        // pack's data entries to a PLC register / socket / MES message. We just log it.
         std::fprintf(stderr, "[comm] forward frame seq=%lld\n", seq);
-
-        // Fire-and-forget: the host drops this reply (a sink's output isn't consumed),
-        // but return a valid Record anyway.
-        xi::Record ack;
-        ack.set("sent", true);
-        ack.set("seq", (int)seq);
-        return ack;
     }
 
     // get_received -> {received:[...], count}; reset -> clears.
@@ -85,3 +84,7 @@ private:
 };
 
 XI_PLUGIN_IMPL(Comm)
+// Publish the xi.pack@1 door — the staged flush delivers each pushed pack
+// through it. A sink still needs the door; only the FEED differs (push, not
+// process). Always after XI_PLUGIN_IMPL.
+XI_PLUGIN_PACK_DOOR(Comm)

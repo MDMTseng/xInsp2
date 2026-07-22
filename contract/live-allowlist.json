@@ -1,0 +1,20 @@
+{
+  "$comment": "THE RATCHET (contract/live_conformance.py, the third contract leg). Every LIVE wire message the harness captures is classified to a key: an event is `event:<name>`, an rsp is `rsp:<originating-command>`, and a non-envelope frame is its bare `type` (`log`, `instances`, `binary`). A key that a schema describes (events with type/name consts, or an rsp command in live-wire-map.json) is VALIDATED. A key that no schema describes is checked HERE: on the list -> counted and reported as a known-undescribed message; NOT on the list -> the test FAILS ('a new unschema'd wire message shipped — add a schema, or add it here with a reason'). That is the ratchet: a new message type can never reach the wire silently undescribed. Entries were SEEDED from the messages a representative live session actually produced (see the harness docstring); each carries why it has no per-message schema yet. NOTE: every rsp is additionally validated against the generic rsp.schema.json envelope, so an allowlisted rsp is still envelope-checked — the allowlist only means its per-COMMAND data shape is not yet modelled.",
+  "allow": {
+    "rsp:ping":                { "reason": "liveness probe; data is {pong:true}. Trivial, envelope-checked against rsp.schema.json." },
+    "rsp:version":             { "reason": "build/version banner; free-form data. Envelope-checked." },
+    "rsp:open_project":        { "reason": "project open reply (plugin+instance lists). Large, plugin-shaped data; not yet modelled." },
+    "rsp:compile_and_load":    { "reason": "script compile reply {dll,diagnostics,...}. Not yet modelled." },
+    "rsp:set_instance_def":    { "reason": "def-set ack; echoes nothing structured. Envelope-checked." },
+    "rsp:list_instances":      { "reason": "cmd ack; the real payload arrives on the separate `instances` message channel." },
+    "rsp:run":                 { "reason": "cmd:run reply {run_id,ms,verdict?}. Run identity/verdict; the run OUTCOME is modelled by the run_result event, not this ack." },
+    "rsp:start":               { "reason": "continuous-mode start ack. Envelope-checked." },
+    "rsp:stop":                { "reason": "continuous-mode stop ack. Envelope-checked." },
+    "log":                     { "reason": "human-readable log line (compile output, diagnostics). Free-text channel, not a structured contract." },
+    "instances":               { "reason": "instances snapshot pushed on its own top-level type in response to list_instances. Recipe-shaped; not yet modelled." },
+    "event:status":            { "reason": "best-effort sticky-status accelerator (source -> text). The authoritative snapshot is the `status` cmd rsp; the event is a live hint." },
+    "event:compile_started":   { "reason": "progress notification fired when a script/plugin compile begins ({path}). A UI spinner cue, not a structured result; the outcome is compile_finished + the compile_and_load rsp." },
+    "event:compile_finished":  { "reason": "progress notification fired when a compile ends ({path, ok}). The authoritative compile result (dll, diagnostics) is the compile_and_load rsp." },
+    "event:run_started":       { "reason": "progress notification fired when an inspect run begins ({run_id}). The run OUTCOME/timing are the run_result + run_finished events (both schema'd)." }
+  }
+}

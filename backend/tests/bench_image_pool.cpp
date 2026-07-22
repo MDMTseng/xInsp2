@@ -20,6 +20,12 @@
 //   invisible at our scale — not worth the risk of reworking a lock-free structure.
 //   Re-run this if a future workload pushes >100K images/s.
 //
+// SUPERSEDED (2026-07, perf/imagepool-sizeclass): the hotpath-perf scan (C-1)
+// flagged MB-scale per-frame frames as normal, and the design-C prototype
+// proved a size-class magazine removes the alloc+zero-fill+fault cost. The
+// pool now recycles pixel buffers (see pixpool in xi_image_pool.hpp); the
+// 1920x1200 sections below measure the recycle path directly.
+//
 #include <xi/xi_image_pool.hpp>
 
 #include "perf_fingerprint.hpp"
@@ -34,7 +40,8 @@
 
 using clk = std::chrono::steady_clock;
 
-static double run(int W, int H, int C, int threads, long iters_per_thread) {
+static double run(int W, int H, int C, int threads, long iters_per_thread,
+                  bool touch = true) {
     auto& pool = xi::ImagePool::instance();
     std::atomic<bool> go{false};
     std::vector<std::thread> ts;
@@ -46,8 +53,10 @@ static double run(int W, int H, int C, int threads, long iters_per_thread) {
             for (long i = 0; i < iters_per_thread; ++i) {
                 xi_image_handle h = pool.create(W, H, C);
                 if (h) {
-                    uint8_t* p = pool.data(h);
-                    if (p) std::memset(p, (int)(i & 0xff), (size_t)W * H * C);  // touch the buffer
+                    if (touch) {
+                        uint8_t* p = pool.data(h);
+                        if (p) std::memset(p, (int)(i & 0xff), (size_t)W * H * C);  // touch the buffer
+                    }
                     pool.release(h);
                 }
             }
@@ -116,6 +125,10 @@ int main(int argc, char** argv) {
     for (int t : {1, 2, 4, 8, 16}) run(320, 240, 3, t, 20000);
     std::printf("--- 1280x1024x1 (~1.3 MB) ---\n");
     for (int t : {1, 4, 8}) run(1280, 1024, 1, t, 5000);
+    std::printf("--- 1920x1200x1 (~2.3 MB, the size-class recycle target) ---\n");
+    for (int t : {1, 4}) run(1920, 1200, 1, t, 2000);
+    std::printf("--- 1920x1200x1 create/release only (no caller memset — pure alloc path) ---\n");
+    for (int t : {1, 4}) run(1920, 1200, 1, t, 2000, /*touch=*/false);
     std::printf("--- 16x16x1 (tiny — isolates pool/slot+alloc overhead from buffer size) ---\n");
     for (int t : {1, 8, 16}) run(16, 16, 1, t, 300000);
     return 0;

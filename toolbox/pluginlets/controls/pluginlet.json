@@ -1,0 +1,34 @@
+{
+  "name": "controls",
+  "version": "0.1.0",
+  "doc": "docs/new_gen/37-pluginlet-model.md",
+  "summary": "The DEFAULT plugin UI (doc 37 tier-1): declare params once as a UI tree (tabs/sections of sliders/numpads/toggles/dropdowns/buttons/readouts) and get get_def/set_def/$schema/thread-safe access. Parasitic — a plain host member, no owner identity, no ABI surface.",
+  "halves": {
+    "native": {
+      "entry": "controls.hpp",
+      "symbol": "xi::pluginlet::Controls",
+      "include": "<controls/controls.hpp>",
+      "delivery": "header — a host member; host delegates get_def/set_def to it",
+      "status": "IMPLEMENTED — test_controls (14 tests): schema tree emit, layout (tabs/grid/section/span/rows/caption), widgets (slider/numpad/stepper/range/toggle/dropdown/radio/text/file/color/button/readout/view/title/label/divider), semantic types, set_def clamp/enum-reject/absent-tolerant, snapshot typing + concurrency"
+    },
+    "ui": {
+      "entry": "mountSchema",
+      "symbol": "mountSchema (ui-components/src/auto-panel.mjs)",
+      "delivery": "vanilla ES module in @xinsp2/components; renders the $schema with the built xi-* custom elements, wired to set_instance_def",
+      "status": "IMPLEMENTED (renderer logic) — schema-panel.node.mjs (5 tests). Dedicated xi-stepper/xi-range/xi-color/xi-file Svelte widgets + touch numpad + live-view mount into the view slot remain (frontend build world)."
+    }
+  },
+  "contract": "contract.ts",
+  "build": {
+    "native": { "headerOnly": true, "links": ["yyjson_plugin"] }
+  },
+  "requires": {
+    "hostMethods": ["get_def", "set_def", "exchange"],
+    "planes": []
+  },
+  "notes": {
+    "zeroCore": "Rides get_def/set_def/exchange only — no new transport, no cap, no ABI change (doc 37 additive invariant).",
+    "schemaSource": "Static plugin.json OR native get_def emit; both produce the same $schema tree. This helper is the native-emit path.",
+    "state": "values→def (persisted); structure→$schema (declaration, $rev-versioned); view state (open tab / collapse / scroll)→browser-local, NOT in def."
+  }
+}

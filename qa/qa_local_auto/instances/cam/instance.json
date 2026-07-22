@@ -1,0 +1,7 @@
+{
+  "plugin": "local_image_source",
+  "config": {
+    "dir": "qa/qa_local_auto/frames",
+    "auto_ms": 300
+  }
+}

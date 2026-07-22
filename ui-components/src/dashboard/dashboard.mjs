@@ -12,7 +12,7 @@ import { isLeaf, isSplit, isTabs, weightsOf } from "./layout.mjs";
 export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
   const doc = host.ownerDocument || globalThis.document;
   const raf = globalThis.requestAnimationFrame || ((cb) => setTimeout(cb, 16));
-  const state = { run_id: -1, run_ms: null, status: null, result: null, groups: [] };
+  const state = { run_id: -1, compute_ms: null, status: null, result: null, groups: [] };
   let cards = [], rafId = 0;
 
   function scheduleRender() {
@@ -87,11 +87,14 @@ export function mountDashboard(host, { client, dashboard, pollStatsMs = 200 }) {
     client.onEvent((m) => {
       if (m.name === "run_finished" && m.data) {
         if (typeof m.data.run_id === "number") state.run_id = m.data.run_id;
-        if (typeof m.data.ms === "number") state.run_ms = m.data.ms;
+        // INSPECT COMPUTE time only (not cycle latency). Prefer the explicitly
+        // named `inspect_compute_us` (µs); fall back to the legacy integer `ms`.
+        if (typeof m.data.inspect_compute_us === "number") state.compute_ms = m.data.inspect_compute_us / 1000;
+        else if (typeof m.data.ms === "number") state.compute_ms = m.data.ms;
         scheduleRender();
       }
       else if (m.name === "run_result" && m.data) { state.result = m.data; scheduleRender(); }
-      else if (m.name === "safe_state" || m.name === "status") { state.status = m.data; scheduleRender(); }
+      else if (m.name === "status") { state.status = m.data; scheduleRender(); }
     }),
   ];
   // Poll dispatch_stats for the groups card (cheap; ignored if no such card).

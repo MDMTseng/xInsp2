@@ -1,0 +1,8 @@
+{
+  "name": "qa_pack_stream",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam", "plugin": "mock_camera" },
+    { "name": "expose", "plugin": "expose" }
+  ]
+}

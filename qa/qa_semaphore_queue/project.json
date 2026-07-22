@@ -1,0 +1,19 @@
+{
+  "name": "qa_semaphore_queue",
+  "script": "inspect.cpp",
+  "trigger_policy": { "policy": "any", "window_ms": 1000, "required": [], "leader": "" },
+  "parallelism": {
+    "default_group": "q",
+    "groups": [
+      { "name": "q", "max_parallel": 4, "queue_depth": 4, "overflow": "block", "result_order": "arrival" }
+    ]
+  },
+  "instances": [
+    { "name": "sem_src", "plugin": "sem_queue" },
+    { "name": "sem_ack", "plugin": "sem_queue" },
+    { "name": "expose",  "plugin": "expose" }
+  ],
+  "plugins": {
+    "sem_queue": { "path": "sem_queue", "compile": true }
+  }
+}

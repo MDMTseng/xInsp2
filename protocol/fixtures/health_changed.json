@@ -1,0 +1,11 @@
+{
+  "type": "event",
+  "name": "health_changed",
+  "data": {
+    "schema": "xi.health/1",
+    "state": "degraded",
+    "since_ms": 1751430000123,
+    "component": { "kind": "instance", "name": "cam0", "health": "degraded", "reason_code": "plugin_fault" },
+    "ts_ms": 1751430000123
+  }
+}

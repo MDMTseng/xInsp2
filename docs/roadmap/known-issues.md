@@ -4,6 +4,30 @@
 > **Last verified against:** 2026-06 hardening campaign (fixed items merged in
 > `17384e4`). Items below are what's **still open**; re-verify before relying on any.
 
+> **[2026-07-11] Core-simplification retirements.** Three structural changes
+> closed several red-team finding *families* wholesale (the detailed analyses
+> live in `docs/new_gen/25-redteam-dataflow-round2.md` /
+> `docs/roadmap/core-bug-hunt-2026-06.md` and stay as history):
+> - **RETIRED by `a293cfe` (finish A4 — explicit `RunContext`):** the red-team
+>   **F4** relational marker (`g_trigger_ctx_`/`TriggerCtxScope`), the
+>   **silent-result** guard (a worker verdict now reaches the run), **U3**'s
+>   `g_run_id_` TLS + `xi_script_set_run_id` thunk, and the `spawn_worker`
+>   propagation gap. **J4**'s `-6` push rejection is preserved, re-expressed
+>   structurally (`result_slot == nullptr` / `owner_tid`).
+> - **RETIRED by `93de38b` (cooperative-cancel layer removed):** the ticket-epoch
+>   soft cancel incl. the **G3** TicketScope finding, the ticket-0 landmine, and
+>   the **C1** verdict-safety machinery (the targeted wrong-PASS class vanishes —
+>   a frame either completes as a normal verdict or the process hard-exits).
+> - **RETIRED by `cba51fe` (TypedPack deleted):** every TypedPack-only finding
+>   /perf item (one in-process container remains: `Pack`/`PackBuilder`).
+>
+> **Still open after the sweep** (surfaced by the QuiesceToken conversion,
+> `1b88412`): (a) **create_project quiesce gap** — `cmd_create_project_` →
+> `PluginManager::create_project` clears `project_.instances` (destroys live
+> adapters) with no quiesce guard; (b) **open_project third evict site** — the
+> `unload_live_module_()` consolidation / bare-`FreeLibrary` ban is deferred,
+> leaving one more evict-before-unload site to converge in `open_project`.
+
 Snapshot after the 2026-06 hardening campaign (two structural-review passes; the
 fixed items merged to master in `17384e4`). This lists what's **still open**, ranked
 within each group. Each is tagged with the design theme it belongs to:
@@ -93,6 +117,23 @@ load-bearing contract that lives only in a comment/convention.
   a new producer that forgets the sentinel emits a bare `NaN` token and the whole
   frame is dropped. Cheap guard: a debug-build assert in the yyjson write path that
   fires on a bare `NaN`/`Inf` token; longer-term a single shared helper.
+- **GraphCapture recorder orphaned at THE CUT (v12) — `graph_snapshot` always
+  empty** (theme D). The `graph_capture`/`graph_snapshot` command surface, the
+  `xi::GraphCapture` singleton, and its edge-reconstruction algorithm
+  (`xi_graph_capture.hpp`) are all intact and wired to the dispatch table, but
+  `GraphCapture::record()` has **no call site**: it used to be invoked on the
+  Record `use()->process()` path, which was deleted at v12 (pack-door only). The
+  funnel is now `use_pack_process_cb` (`service_sinks.cpp`). Re-wiring is NOT a
+  simple call-site add — edge reconstruction keys on **image-handle identity**
+  (A's output handle later reused as B's input → A→B), but `ScriptPackBuilder::add_image`
+  is copy-only (no zero-copy pool-handle adoption), so a script-side re-add mints a
+  fresh handle and the lineage is lost. So even a wired recorder would populate
+  `ran` but produce **zero edges** for any script-chained pipeline. Making it real
+  needs zero-copy pack-handle adoption — a data-plane feature, deliberately not
+  built here. Kept (not removed) because the surface + algorithm are the intended
+  re-enable point once pack adoption lands. Test `ws_graph_capture.test.mjs` is
+  cleanly `skip`ped with this reason. **DECISION FLAGGED for coordinator:** re-hook
+  the recorder + add zero-copy pack adoption, or formally retire graph-capture.
 
 ## Minor / residual
 

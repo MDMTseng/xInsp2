@@ -26,6 +26,8 @@
 #include <thread>
 #include <utility>
 
+#include "xi_clock.hpp"   // xi::mono_ms (monotonic deadline for drain())
+
 namespace xi {
 
 class InflightRuns {
@@ -99,10 +101,15 @@ public:
     // Number of detached runs that have been launched but not yet finished.
     int  inflight() const { return count_.load(); }
 
-    // Wait out the in-flight runs, capped (default ~50 s) so a wedged inspect can't
-    // hang process exit. Returns true if it drained to zero, false if it hit the cap.
+    // Wait out the in-flight runs, capped (default ~50 s of WALL time) so a wedged
+    // inspect can't hang process exit. Returns true if it drained to zero, false if
+    // it hit the cap. The bound is measured against a monotonic deadline, NOT a count
+    // of sleep iterations: each 1ms sleep can cost a full scheduler quantum (~15.6ms
+    // on default-timer-resolution Windows), so counting iterations would blow the
+    // documented ~50 s bound out to ~13 min and make teardown hang ~10x too long.
     bool drain(int cap_ms = 50000) {
-        for (int i = 0; count_.load() != 0 && i < cap_ms; ++i)
+        const int64_t deadline = xi::mono_ms() + cap_ms;
+        while (count_.load() != 0 && xi::mono_ms() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return count_.load() == 0;
     }

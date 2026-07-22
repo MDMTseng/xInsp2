@@ -1,0 +1,7 @@
+{
+  "name": "config_swap_probe",
+  "description": "Reference plugin for the orchestrator config-swap design — double-slot prepare/commit via exchange",
+  "dll": "xi-config_swap_probe.dll",
+  "factory": "xi_plugin_create",
+  "optional": [ { "iface": "xi.pack", "min": 1 } ]
+}

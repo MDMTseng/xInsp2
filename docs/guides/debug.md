@@ -91,9 +91,10 @@ message naming the offending DLL.
 After a backend crash + auto-respawn:
 - The extension calls `cmd:open_project` with `lastProjectFolder` to
   reload your project.
-- `xi::state()` JSON is persisted before crash if the script exited
-  cleanly; **not** if the crash was during inspect. To make a script
-  crash-resilient, write to `xi::state()` between safe checkpoints.
+- `xi::kv()` state is **in-memory only** (by design — doc 16): the host
+  carries it across hot reloads, but a backend crash + respawn starts it
+  empty. A script that needs crash-durable values must persist them
+  itself (e.g. a file under its project folder) at safe checkpoints.
 
 ---
 
@@ -102,17 +103,20 @@ After a backend crash + auto-respawn:
 ### Symptom: `use_process('det0') crashed: 0xC0000005`
 
 - Open the plugin's source. Check the bounds on inputs you read from
-  `xi::Record` (often a missing image or wrong dimensions).
+  the pack door's `xi::PackIn` (often a missing image entry or wrong
+  dimensions — prefer the optional-returning reads and `fault()` over
+  assuming a key is present).
 - The host doesn't unload the plugin on crash — you can keep retrying
   after a fix and `cmd:rescan_plugins` reloads it.
 
 ### Symptom: plugin's `process()` runs forever (UI freezes)
 
 The host's **watchdog** is **off by default** (`watchdog_ms` = 0). Enable it with
-`--watchdog=MS`, `cmd:set_watchdog_ms`, or per-project. On breach it first asks the
-script to cancel cooperatively (1 s grace); if the inspect ignores that, the backend
-**exits** (`_Exit`) for the FE supervisor to respawn — it does not kill the worker
-thread.
+`--watchdog=MS`, `cmd:set_watchdog_ms`, or per-project. It has one phase:
+overrun → 1 s grace → hard exit. A frame that returns during the grace yields a
+normal verdict; if the inspect is still wedged after the grace, the backend
+**exits** (`_Exit`) for the FE supervisor to respawn — it does not kill the
+worker thread, and there is no cooperative soft-cancel phase.
 
 Fix by:
 - Adding loop bounds in your plugin / op.
@@ -160,8 +164,7 @@ Useful patterns when a test is unhappy:
 |---|---|
 | `cmd:crash_reports` | List recent crash reports as JSON |
 | `cmd:clear_crash_reports` | Wipe the crash report directory |
-| `cmd:watchdog_status` | Get current watchdog timeout |
-| `cmd:set_watchdog_ms` | Change watchdog timeout at runtime |
+| `cmd:set_watchdog_ms` | Change watchdog timeout at runtime — the reply echoes the `{ms, trips}` snapshot |
 | Status bar at bottom-left | Backend connection state + WORK indicator |
 
 In the extension's command palette:

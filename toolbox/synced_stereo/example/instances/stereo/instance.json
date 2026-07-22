@@ -1,0 +1,6 @@
+{
+  "plugin": "synced_stereo",
+  "config": {
+    "fps": 10
+  }
+}

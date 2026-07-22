@@ -1,6 +1,6 @@
 {
   "name": "trigger_source",
-  "description": "Minimal image source using emit_record — pushes one frame per tick into the pipeline",
+  "description": "Minimal image source using the blessed emit() path — pushes one sealed xi.pack@1 pack per tick into the pipeline",
   "dll": "trigger_source.dll",
   "factory": "xi_plugin_create",
   "has_ui": false

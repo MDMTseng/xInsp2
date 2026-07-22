@@ -16,11 +16,12 @@ not the HMI's. No build step — plain ES modules. Design:
 ## Try it (live demo)
 
 ```sh
-python hmi/serve.py
+node hmi/serve.mjs
 ```
 
 This spawns the backend headless on `hmi/demo/` (continuous via `--autostart-fps`),
-serves this folder over HTTP, and opens the URL. You should see the demo
+serves this folder over HTTP with a same-origin `/ws` proxy, and prints the URL to
+open (`http://127.0.0.1:8770/`). You should see the demo
 `dashboard.json` cards updating live: an OK/NG **verdict**, a **yield** %, a
 completed-parts **throughput** rate, and (on the Groups tab) live **dispatch
 groups** — all fed from the backend event stream. (Windows; backend must be built.
@@ -37,7 +38,7 @@ index.html?ws=ws://<host>:<port>/&dashboard=./dashboard.json
 
 | File | Role |
 |---|---|
-| `index.html` | shell: top bar + connection badge + grid container |
+| `index.html` | shell: top bar + connection badge (+ a live health pill next to it) + grid container |
 | `app.mjs` | WS host — connect, consume the generic event stream, lay out the grid, `feed()` cards |
 | `lib/xi-components.esm.js` | vendored ui-components bundle: the `xi-*` elements, cards, and layout engine |
 | `dashboard.json` | the layout: a **split-pane tree** of `{dir:"row"\|"col",weights,children}` nodes with `{card:{type,bind,config}}` leaves |
@@ -55,6 +56,19 @@ subscribe-gated **XEX1** binary transport (a consumer subscribes by *channel*; t
 plugin JPEG-encodes + pushes only subscribed channels), decoded and rendered by
 **that plugin's own webUI**, not here. See
 [`../docs/roadmap/expose-plugin-and-output-transport.md`](../docs/roadmap/expose-plugin-and-output-transport.md).
+
+**Health/state:** on connect the HMI also pulls the canonical health/state
+contract (`cmd:get_health`, schema `xi.health/1`) once and subscribes the
+`health_changed` event — the ONE authoritative read of the backend's state
+machine (`boot`/`project_loaded`/`running`/`degraded`/`draining`/`fault`) and
+which component (if any) is unhealthy, instead of inferring liveness from the
+event stream. It surfaces as a small text **health pill** beside the connection
+badge (`● health: <state>`, colour per state; on `degraded`/`fault` it appends
+the failing component(s) + reason code). The connection badge is unchanged — it
+still means *transport up/down*; the pill is the backend's own report. Degrades
+gracefully on an older backend without `get_health` (feature-detected via the
+*"unknown command"* rsp — no version-sniffing): the pill stays hidden and the HMI
+behaves exactly as before.
 
 **Dashboard source:** on connect the HMI asks the backend for the *project's*
 dashboard (`cmd:get_dashboard` → `<project>/dashboard.json`, or
@@ -101,9 +115,15 @@ cd ../WebTunnelHub
 
 - **Single-client backend.** The backend WS accepts **one** client. `serve.mjs`
   opens one backend connection **per browser**, so a second tab / a stale tab
-  contends for the slot. For multi-viewer (operator wall + an office screen),
-  v1.1 should make the proxy hold **one** upstream and **fan-out/broadcast** to N
-  browsers. (Until then: one viewer; on a stuck `connecting`, close other tabs.)
+  contends for the slot. When it loses the race the backend replies `503
+  single-client-busy`; `serve.mjs` relays that to the page as a distinct WS close
+  code and the badge shows **"another client is connected"** (not a generic
+  "disconnected") while it keeps retrying — so the operator knows to close the
+  other tab, not to go restart a backend that is running fine (review 10 #6). (A
+  browser connecting **directly** — `?ws=…`, no proxy — can't read the 503 HTTP
+  status, a platform limit, so that path still shows a generic retry.) For
+  multi-viewer (operator wall + an office screen), v1.1 should make the proxy hold
+  **one** upstream and **fan-out/broadcast** to N browsers.
 - **Browser ESM runtime errors are invisible to `node --check`.** A stale
   call-site after a rename (`buildGrid()` → `buildLayout()`) threw a *ReferenceError*
   at module load, so `connect()` never ran and the badge sat on its default
@@ -118,7 +138,7 @@ cd ../WebTunnelHub
 - **One same-origin `/ws` proxy beats two tunnels.** Tunnelling page + WS as two
   apps means cross-origin `ws=` juggling; proxying `/ws` on the page's own origin
   is one tunnel, no `?ws=` needed. `app.mjs` defaults to `wss://<host>/ws` and only
-  needs `?ws=` for a direct/local backend (e.g. `serve.py`).
+  needs `?ws=` for a direct/local backend (one you started separately).
 - **`ws` (npm) is borrowed from `vscode-extension/node_modules`** via `createRequire`
   (ESM bare-imports ignore `NODE_PATH`); `hmi/` has no `node_modules`.
 - **Caddy on :1080 serves HTTP/1.1**, so browser WS upgrades work like the CLI's.

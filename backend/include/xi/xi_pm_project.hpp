@@ -13,6 +13,7 @@
 // to the former in-class definitions.
 //
 #include "xi_pm_manager_core.hpp"
+#include "xi_project.hpp"     // kProjectSchema* + parse_project_schema (loader gate)
 
 #include <algorithm>          // std::min/std::max (group clamps)
 #include <cstdio>
@@ -24,7 +25,8 @@
 
 namespace xi {
 
-inline bool PluginManager::create_project(const std::string& folder, const std::string& name) {
+inline bool PluginManager::create_project(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                          const std::string& folder, const std::string& name) {
     std::lock_guard<std::mutex> lk(mu_);
     std::filesystem::create_directories(folder);
     std::filesystem::create_directories(std::filesystem::path(folder) / "instances");
@@ -62,7 +64,7 @@ inline bool PluginManager::create_project(const std::string& folder, const std::
     return true;
 }
 
-inline void PluginManager::close_project() {
+inline void PluginManager::close_project(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/) {
     std::lock_guard<std::mutex> lk(mu_);
     for (auto& [k, v] : project_.instances) {
         InstanceRegistry::instance().remove(k);
@@ -91,13 +93,38 @@ inline void PluginManager::close_project() {
     for (auto& key : project_loaded_plugins_) {
         auto it = plugins_.find(key);
         if (it != plugins_.end()) {
-            if (it->second.handle) FreeLibrary(it->second.handle);   // TODO(linux): dlclose
+            // RT5/N1/J2/J3/L1/O2 family — DLL teardown without machine-provider
+            // reconciliation. A machine autoload provider can be backed by a
+            // module this loop is about to FreeLibrary (an autoload-eligible
+            // PROJECT plugin, or a global lib plugin this project's same-named
+            // plugin shadowed in plugins_). The autoload reconciler at the end
+            // of close_project only ADDS providers — it never removes a stale
+            // machine_instances_ entry, and for a plugin erased from plugins_
+            // below it can't recreate one either — so pre-fix the provider's
+            // InstanceRegistry entry + CapRegistry registrations stayed ACTIVE
+            // with handlers pointing into the UNMAPPED module (forever, for an
+            // erased plugin; and even transiently a plugin-owned thread is
+            // outside close_project's host-dispatch drain and can call into
+            // freed code). Evict BEFORE FreeLibrary — evict_machine_provider_
+            // locked_ sweeps this owner's cap names synchronously, so no
+            // handler outlives the module. close_project is full teardown, so
+            // unload with NO reinstate is correct here; the reconciler below
+            // reinstates any provider whose global DLL is still mapped,
+            // exactly as before.
+            unload_module_locked_(key);
             plugins_.erase(it);
         }
     }
     project_loaded_plugins_.clear();
     project_plugin_origin_.clear();
     project_ = ProjectInfo{};
+    // V3: machine-autoloaded lib providers are machine-scoped — they survive the
+    // project teardown above (never in project_.instances / project_loaded_
+    // plugins_). Reinstate any that THIS project had displaced with its own
+    // instance (their global DLL is still mapped in plugins_), so a capability
+    // that was project-provided stays available after close. No-op at boot / when
+    // nothing was displaced.
+    autoload_machine_providers_locked_();
 }
 
 // ---- working copy (transactional edits at <project>/.xinsp_work) --------
@@ -108,7 +135,7 @@ inline void PluginManager::close_project() {
 // Commit: mirror the working copy back onto the canonical project (adds +
 // overwrites + deletes removed files), so the on-disk project reflects every
 // edit made this session. No-op error if no working copy is active.
-inline bool PluginManager::commit_working_copy() {
+inline bool PluginManager::commit_working_copy(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/) {
     std::lock_guard<std::mutex> lk(mu_);
     if (canonical_path_.empty()) return false;
     // Journal the commit so an interruption (crash/power loss mid-mirror) is
@@ -143,7 +170,7 @@ inline bool PluginManager::commit_working_copy() {
 
 // Discard: blow away the working copy and re-seed it from the canonical
 // project, then reopen. Returns false if no working copy is active.
-inline bool PluginManager::reopen_fresh_working_copy() {
+inline bool PluginManager::reopen_fresh_working_copy(const QuiesceToken& quiesced /*proof the caller has quiesced dispatch*/) {
     std::string canon;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -151,7 +178,8 @@ inline bool PluginManager::reopen_fresh_working_copy() {
         canon = canonical_path_;
     }
     // close_project()/open_project() each take mu_ — don't hold it here.
-    close_project();
+    // (Both are destructive; the caller's quiesce proof threads through.)
+    close_project(quiesced);
     std::error_code ec;
     // CRASH-RECOVERY GUARD (bug #14). Discard's contract is "throw away my
     // UNCOMMITTED working-copy edits". A *pending commit* (kCommitMarker
@@ -176,10 +204,11 @@ inline bool PluginManager::reopen_fresh_working_copy() {
         std::fprintf(stderr, "[xinsp2] working copy: discard KEPT scratch — pending "
                      "commit heal failed; reopen will retry roll-forward\n");
     }
-    return open_project(canon, /*working_copy=*/true);   // re-seeds from canonical
+    return open_project(quiesced, canon, /*working_copy=*/true);   // re-seeds from canonical
 }
 
-inline bool PluginManager::open_project(const std::string& folder_arg, bool working_copy) {
+inline bool PluginManager::open_project(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                        const std::string& folder_arg, bool working_copy) {
     std::lock_guard<std::mutex> lk(mu_);
 
     // Roll forward an interrupted working-copy commit before touching
@@ -256,7 +285,15 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     for (auto& key : project_loaded_plugins_) {
         auto it = plugins_.find(key);
         if (it != plugins_.end()) {
-            if (it->second.handle) FreeLibrary(it->second.handle);   // TODO(linux): dlclose
+            // RT5/N1 family, third evict site (project-over-project reopen):
+            // this loop used to FreeLibrary with NO machine-provider evict, so
+            // a live "@auto:" adapter backed by the previous project's module
+            // kept ACTIVE CapRegistry handlers pointing into the unmapped DLL
+            // — the first capability call after the reopen crashed. Unload
+            // through the one primitive (evict-then-free, synchronous cap
+            // sweep); the autoload reconcile after this open reinstates any
+            // provider whose global DLL is still mapped.
+            unload_module_locked_(key);
             plugins_.erase(it);
         }
     }
@@ -274,6 +311,26 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     auto name_opt = extract_string(content, "name");
     if (name_opt) project_.name = *name_opt;
     auto script_opt = extract_string(content, "script");
+    // SECURITY (P1): `script` is VERBATIM from project.json and becomes the
+    // cl.exe SOURCE for the project compile — joined with operator/, an
+    // absolute value discards the project folder and a "../" chain climbs out
+    // of it, so a semi-trusted project could compile+run an out-of-tree,
+    // pre-planted source file. Refuse the open loudly (same fail-loud shape
+    // as the schema gate below: last_open_error_ + stderr + return false)
+    // rather than degrade — a project whose script points outside its own
+    // tree is hostile or broken either way. See path_is_contained
+    // (xi_pm_parse.hpp) for the guard + threat model.
+    if (script_opt &&
+        !path_is_contained(std::filesystem::path(folder), *script_opt)) {
+        last_open_error_ =
+            "project.json 'script' (\"" + *script_opt + "\") is absolute or "
+            "escapes the project folder ('..') — refusing to open: the "
+            "inspection script must live inside the project tree "
+            "(path-containment guard; an out-of-tree script would be compiled "
+            "and executed from an arbitrary machine path).";
+        std::fprintf(stderr, "[xinsp2] %s\n", last_open_error_.c_str());
+        return false;
+    }
     if (script_opt) project_.script_path = (std::filesystem::path(folder) / *script_opt).string();
     else            project_.script_path = (std::filesystem::path(folder) / "inspect.cpp").string();
 
@@ -295,6 +352,9 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     // Reset surfaced warnings here (before the project.json parse) so group
     // parse warnings, compile failures, and bad instances all accumulate.
     last_open_warnings_.clear();
+    // Reset any prior hard-refusal reason (unrecognized schema) so it never
+    // leaks into this open's result.
+    last_open_error_.clear();
     // Was the top-level project.json itself well-formed? A malformed file
     // (truncated / garbage) used to load "successfully" with all defaults and
     // no signal to the user — surface it as an open warning below.
@@ -303,12 +363,48 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
     // plugin_dirs = ordered search roots; plugins = { label: { path } } refs.
     std::vector<std::string> proj_plugin_dirs;
     std::vector<ProjectInfo::PluginRef> proj_plugin_refs;
+    // H2: {name, plugin} entries declared in project.json's top-level `instances`
+    // array. Instances only materialize from instances/<name>/instance.json
+    // (scanned below); a project.json-only entry is inert. Collected here so the
+    // post-scan cross-check can warn loudly about any phantom (no backing dir).
+    std::vector<std::pair<std::string, std::string>> proj_declared_instances;
     // Project-level DEFAULT for a `plugins` entry that omits its own `compile`
     // flag; per-entry `compile` (parsed below) overrides it. Default off.
     bool proj_plugin_dirs_compile = json_flag_true(content, "plugin_dirs_compile");
     yyjson_doc* doc = yyjson_read(content.c_str(), content.size(), 0);
     yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
     if (root) {
+        // Schema-identity gate (Finding 2 / adoption item 12) — same discipline
+        // as the plugin ABI load gate: a MISSING schema is accepted as a legacy
+        // (pre-schema) file and logged once; a RECOGNIZED family whose major is
+        // this backend's (or older) loads normally; an unrecognized family or a
+        // FUTURE major is REFUSED with both versions named, rather than silently
+        // mis-read. A save later stamps the current schema onto a legacy file.
+        if (yyjson_val* sv = yyjson_obj_get(root, "schema");
+            sv && yyjson_is_str(sv) && yyjson_get_str(sv)) {
+            std::string sch = yyjson_get_str(sv);
+            int major = 0;
+            bool recognized = xi::project::parse_project_schema(sch, major);
+            if (!recognized || major > xi::project::kProjectSchemaMajor) {
+                last_open_error_ =
+                    "project.json declares schema \"" + sch + "\" but this backend "
+                    "understands \"" + std::string(xi::project::kProjectSchema) +
+                    "\" (family " + std::string(xi::project::kProjectSchemaFamily) +
+                    ", major " + std::to_string(xi::project::kProjectSchemaMajor) +
+                    ") — refusing to open a project file from a newer/unknown format "
+                    "rather than silently mis-read it. Open it with a matching backend "
+                    "version.";
+                std::fprintf(stderr, "[xinsp2] %s\n", last_open_error_.c_str());
+                yyjson_doc_free(doc);
+                return false;
+            }
+            // recognized current-or-older major → load normally (no log).
+        } else {
+            std::fprintf(stderr,
+                "[xinsp2] project.json has no \"schema\" field — treating as a "
+                "legacy (pre-schema) project; the next save will stamp \"%s\".\n",
+                xi::project::kProjectSchema);
+        }
         if (yyjson_val* pd = yyjson_obj_get(root, "plugin_dirs"); pd && yyjson_is_arr(pd)) {
             size_t _pi, _pn; yyjson_val* it;
             yyjson_arr_foreach(pd, _pi, _pn, it)
@@ -326,6 +422,21 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         compile = yyjson_get_bool(cv);          // per-plugin override
                     proj_plugin_refs.push_back({label, yyjson_get_str(pathv), compile});
                 }
+            }
+        }
+        // H2: collect the top-level `instances` array (shape: [{name, plugin}]).
+        // We DON'T materialize from it — that stays the instances/<name>/
+        // instance.json job below — but we remember the declared names so a
+        // phantom entry (declared here, no backing dir) gets a loud warning
+        // instead of silently doing nothing (found by qa_multi_graph).
+        if (yyjson_val* insts = yyjson_obj_get(root, "instances"); insts && yyjson_is_arr(insts)) {
+            size_t _ii, _in; yyjson_val* it;
+            yyjson_arr_foreach(insts, _ii, _in, it) {
+                if (!yyjson_is_obj(it)) continue;
+                const char* nm = nullptr; const char* pl = nullptr;
+                if (yyjson_val* nv = yyjson_obj_get(it, "name");   nv && yyjson_is_str(nv)) nm = yyjson_get_str(nv);
+                if (yyjson_val* pv = yyjson_obj_get(it, "plugin"); pv && yyjson_is_str(pv)) pl = yyjson_get_str(pv);
+                if (nm && *nm) proj_declared_instances.emplace_back(nm, pl ? pl : "");
             }
         }
         // (trigger_policy removed in the ABI-v6 dispatch cleanup — multi-cam
@@ -352,7 +463,9 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
             if (yyjson_val* k = yyjson_obj_get(par, "queue_depth");
                 k && yyjson_is_num(k)) {
                 int n = (int)yyjson_get_num(k);
-                if (n < 1)     n = 1;
+                // 0 is now valid — the RENDEZVOUS (synchronous-handoff) rung (only
+                // with overflow:block; validated below once overflow is also known).
+                if (n < 0)     n = 0;
                 if (n > 10000) n = 10000;
                 project_.queue_depth = n;
             }
@@ -368,10 +481,15 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
             if (yyjson_val* k = yyjson_obj_get(par, "overflow");
                 k && yyjson_is_str(k) && yyjson_get_str(k)) {
                 std::string s = yyjson_get_str(k);
-                // "block" was removed (back-pressuring the source could deadlock a
-                // producer and isn't a sane factory behaviour — the line wants the
-                // freshest frame, i.e. drop_oldest).
-                if (s == "drop_oldest" || s == "drop_newest") {
+                // "block" is supported again (safe interruptible back-pressure form:
+                // the producer parks on a slot and a stop/teardown wakes it to DROP,
+                // so it can't hang teardown). OPT-IN only, and ONLY for a back-
+                // pressure-TOLERANT source (dedicated timer/emit or file/disk batch
+                // thread). Do NOT point block at a self-feeding worker lane (parked
+                // worker can't drain its own lane → deadlock until stop) or a real-
+                // time camera-callback thread (stalls acquisition). Default stays
+                // drop_oldest (the line wants the freshest frame).
+                if (s == "drop_oldest" || s == "drop_newest" || s == "block") {
                     project_.overflow = s;
                 } else {
                     std::fprintf(stderr,
@@ -391,6 +509,30 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         "unknown value '%s' — using completion\n",
                         s.c_str());
                 }
+            }
+            // depth=0 (rendezvous) is ONLY valid with overflow:block. With a drop
+            // policy it has no slot to hold the event and no rendezvous wait, so it
+            // would degenerate to "drop unless a worker is idle this instant" AND
+            // could hit front() on an empty queue. Validate now that BOTH fields are
+            // known (either may have parsed first): clamp back to 1 + warn loudly.
+            if (project_.queue_depth == 0 && project_.overflow != "block") {
+                std::fprintf(stderr,
+                    "[xinsp2] project.json parallelism.queue_depth:0 (rendezvous) "
+                    "requires overflow:block — clamping depth to 1\n");
+                project_.queue_depth = 1;
+            }
+            // Advisory: depth-0 (rendezvous) is strict serial by definition, so the
+            // dispatch pool CLAMPS it to a single worker at spawn (RB2, doc 25) — with
+            // >1 the release-on-take path would otherwise run inspections concurrently
+            // and break the 1-in-flight guarantee. The config value is left as-set; the
+            // runtime just honours the rendezvous semantics. For multi-threaded
+            // admission use the plugin-semaphore path over a NORMAL lane (doc 24 §4).
+            if (project_.queue_depth == 0 && project_.dispatch_threads > 1) {
+                std::fprintf(stderr,
+                    "[xinsp2] project.json parallelism.queue_depth:0 (rendezvous) runs a "
+                    "SINGLE worker — dispatch_threads=%d is clamped to 1 at spawn "
+                    "(rendezvous is strict serial; use the plugin-semaphore path for "
+                    "multi-threaded admission)\n", project_.dispatch_threads);
             }
             // parallelism.groups + default_group (optional; empty = legacy pool)
             if (yyjson_val* arr = yyjson_obj_get(par, "groups"); arr && yyjson_is_arr(arr)) {
@@ -415,10 +557,14 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         }
                     }
                     if (yyjson_val* k = yyjson_obj_get(g, "queue_depth"); k && yyjson_is_num(k))
-                        grp.queue_depth = std::min(10000, std::max(1, (int)yyjson_get_num(k)));
+                        grp.queue_depth = std::min(10000, std::max(0, (int)yyjson_get_num(k)));  // 0 = rendezvous (block only)
                     if (yyjson_val* k = yyjson_obj_get(g, "overflow"); k && yyjson_is_str(k) && yyjson_get_str(k)) {
                         grp.overflow = yyjson_get_str(k);
-                        if (grp.overflow != "drop_oldest" && grp.overflow != "drop_newest") {
+                        // "block" supported again (interruptible back-pressure; opt-in;
+                        // back-pressure-tolerant sources ONLY — deadlock risk on a self-
+                        // feeding worker lane or a camera-callback thread; see project-
+                        // level note above).
+                        if (grp.overflow != "drop_oldest" && grp.overflow != "drop_newest" && grp.overflow != "block") {
                             warn(grp.name, "unknown overflow '" + grp.overflow + "' — using drop_oldest");
                             grp.overflow = "drop_oldest";
                         }
@@ -456,6 +602,18 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                             if (!s.empty()) grp.cpu_affinity.push_back(std::move(s));
                         }
                     }
+                    // depth=0 (rendezvous) requires overflow:block (both fields now
+                    // parsed for this group, in either order) — else clamp to 1 + warn.
+                    // Keeps the depth==0 dispatch branch's "never front()-on-empty"
+                    // invariant true by construction (see enqueue_to_lane_).
+                    if (grp.queue_depth == 0 && grp.overflow != "block") {
+                        warn(grp.name, "queue_depth:0 (rendezvous) requires overflow:block — clamping depth to 1");
+                        grp.queue_depth = 1;
+                    }
+                    // Advisory (honoured, not clamped): rendezvous is strict 1-in-flight,
+                    // so the pool clamps it to a single worker at spawn (RB2, doc 25).
+                    if (grp.queue_depth == 0 && grp.max_parallel > 1)
+                        warn(grp.name, "queue_depth:0 (rendezvous) runs a SINGLE worker — max_parallel is clamped to 1 at spawn (strict serial; use the plugin-semaphore path for multi-threaded admission)");
                     project_.groups.push_back(std::move(grp));
                 }
                 if (yyjson_val* k = yyjson_obj_get(par, "default_group"); k && yyjson_is_str(k) && yyjson_get_str(k))
@@ -586,7 +744,7 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         // path's check.
                         std::string err;
                         if (!plugin_abi_compatible(pi2.handle, *plugin, pi2.json_fallback, &err)) {
-                            FreeLibrary(pi2.handle);
+                            FreeLibrary(pi2.handle);   // raw is fine: just-loaded module failed its load gate — no provider registered against it
                             pi2.handle = nullptr;
                             last_open_warnings_.push_back(
                                 {inst_name, *plugin, "plugin ABI mismatch: " + err});
@@ -599,7 +757,7 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         // surfacing as the ABI gate just above (skip the instance,
                         // record the reason in last_open_warnings_).
                         if (!plugin_caps_compatible(pi2, &default_host_api(), *plugin, &err)) {
-                            FreeLibrary(pi2.handle);
+                            FreeLibrary(pi2.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
                             pi2.handle = nullptr;
                             last_open_warnings_.push_back(
                                 {inst_name, *plugin, "plugin capability gate: " + err});
@@ -618,7 +776,7 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         // and clear handle so the entry stays in a
                         // clean "not loaded" state.
                         if (!pi2.c_factory) {
-                            FreeLibrary(pi2.handle);
+                            FreeLibrary(pi2.handle);   // raw is fine: failed-load-gate arm, nothing registered against this module
                             pi2.handle = nullptr;
                             last_open_warnings_.push_back(
                                 {inst_name, *plugin,
@@ -639,6 +797,11 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                 bool created = false;
                 // Same registration as create_instance — needed for project-load too.
                 InstanceFolderRegistry::instance().set(ii.name, ii.folder_path);
+                // V3 precedence: an explicit project instance of an autoload lib
+                // plugin displaces the boot machine provider so this instance
+                // registers its capabilities cleanly (no ETAKEN). Reinstated on
+                // close_project. (No-op unless *plugin is machine-provided.)
+                evict_machine_provider_locked_(*plugin);
 
                 // Every instance runs in-process: plugins are loaded
                 // into the backend and called directly (zero-copy via
@@ -661,6 +824,10 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                     warned_iso_deprecated_ = true;
                 }
 
+                // item 14: resolve the effective post-fault policy — instance.json
+                // "on_fault" override if present, else the plugin default.
+                ii.on_fault = parse_on_fault(extract_string(ic, "on_fault").value_or(""),
+                                             pi.default_on_fault);
                 if (!created && pi.c_factory) {
                     xi_host_api& host = default_host_api();
                     // ImagePoolOwnerScope tags the ctor's images and sweeps them
@@ -676,6 +843,8 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                         // Hand the owner id to the adapter so subsequent process /
                         // exchange calls keep tagging into the same bucket.
                         adapter->adopt_owner_id(owner.release());
+                        adapter->set_on_fault(ii.on_fault);             // item 14
+                        adapter->arm_reinit(pi.c_factory, &host);        // enable in-place reinit
                         ii.instance = std::move(adapter);
                         created = true;
                     }
@@ -749,6 +918,31 @@ inline bool PluginManager::open_project(const std::string& folder_arg, bool work
                     inst_name.c_str());
             }
         }
+    }
+
+    // H2: cross-check the project.json `instances` array against what actually
+    // materialized on disk. An instance ONLY exists via instances/<name>/
+    // instance.json (scanned above); a project.json entry with no backing dir
+    // is inert and used to vanish with NO signal — a project.json-only source
+    // (e.g. an `expose` sink) that silently didn't exist (qa_multi_graph). Warn
+    // loudly, naming each phantom, so the misconfig surfaces via
+    // cmd:open_project_warnings instead of manifesting as a mystery-missing
+    // instance far downstream. (A declared entry WHOSE dir exists but failed to
+    // load was already warned by the scan loop; we key off the missing backing
+    // file so we don't double-report it.)
+    for (auto& [nm, pl] : proj_declared_instances) {
+        auto backing = std::filesystem::path(folder) / "instances" / nm / "instance.json";
+        if (std::filesystem::exists(backing)) continue;          // real dir handled above
+        std::string msg =
+            "declared in project.json 'instances' but has no instances/" + nm +
+            "/instance.json — this entry is INERT (instances materialize only "
+            "from their instance.json). Create the folder or remove the "
+            "project.json entry.";
+        last_open_warnings_.push_back({nm, pl, msg});
+        std::fprintf(stderr,
+            "[xinsp2] project.json declares instance '%s' (plugin '%s') with no "
+            "backing instances/%s/instance.json — INERT, not created.\n",
+            nm.c_str(), pl.c_str(), nm.c_str());
     }
     return true;
 }

@@ -16,6 +16,12 @@
 #include <atomic>
 #include <cstdlib>
 
+#if defined(_WIN32)
+#  define XI_EXPORT __declspec(dllexport)
+#else
+#  define XI_EXPORT __attribute__((visibility("default")))
+#endif
+
 // Module-static, initialized when THIS image is mapped. Distinct per loaded copy.
 static volatile unsigned g_magic = 0xABCDABCDu;
 static std::atomic<long long>* g_sink = nullptr;   // process-global counter (bound by the test)
@@ -23,7 +29,7 @@ static std::atomic<long long>* g_sink = nullptr;   // process-global counter (bo
 extern "C" {
 
 // The one mandatory export (load_script fails without it).
-__declspec(dllexport) void xi_inspect_entry(int frame) {
+XI_EXPORT void xi_inspect_entry(int frame) {
     // Touch the module's own code+data. A call into a freed image faults here;
     // a reused page yields a wrong magic → abort. Either is a caught race.
     if (g_magic != 0xABCDABCDu) std::abort();
@@ -36,10 +42,10 @@ __declspec(dllexport) void xi_inspect_entry(int frame) {
 
 // Test hook: bind the shared success counter into THIS module. Called right after
 // each load so the freshly-mapped image writes to the same process-global counter.
-__declspec(dllexport) void reload_probe_bind(void* sink) {
+XI_EXPORT void reload_probe_bind(void* sink) {
     g_sink = static_cast<std::atomic<long long>*>(sink);
 }
 
-__declspec(dllexport) unsigned reload_probe_magic() { return g_magic; }
+XI_EXPORT unsigned reload_probe_magic() { return g_magic; }
 
 } // extern "C"

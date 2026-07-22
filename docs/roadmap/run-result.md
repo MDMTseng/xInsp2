@@ -3,7 +3,7 @@
 > **Status: Phase 1 + Phase 2 shipped.** 2026-06-05.
 > Phase 1 (`RESULT` API + `run_result` event + `XI_SYS_DROPPED` at the drop site)
 > and Phase 2 (per-group `result_order` via a per-lane `EmitGate`) are both built +
-> regression-tested (`examples/qa_run_result/` + `qa_dispatch_groups` Test E).
+> regression-tested (`qa/qa_run_result/` + `qa_dispatch_groups` Test E).
 
 ## Goal
 
@@ -38,10 +38,20 @@ enum XiSysResult {            // framework-only; never emitted by user code
     XI_SYS_DROPPED    = -999001,   // overflow: queue full, event dropped before inspect
     XI_SYS_NO_TRIGGER = -999002,   // synthetic tick with nothing to inspect
     XI_SYS_CRASHED    = -999003,   // inspect threw / SEH-translated fault
-    XI_SYS_TIMEOUT    = -999004,   // watchdog killed the inspect
+    XI_SYS_TIMEOUT    = -999004,   // (design sketch; never implemented — see note below)
     XI_SYS_NO_VERDICT = -999005,   // ran to completion but script set no RESULT
 };
 ```
+
+> **[2026-07-11] Watchdog wire delta (commit `93de38b`):** there is **no
+> watchdog-produced result** on the wire. The cooperative soft-cancel layer was
+> retired, so a frame that exceeds its budget but returns during the grace
+> window emits a **normal trusted verdict**, and a genuinely wedged frame
+> hard-exits the backend (`_Exit`) for the supervisor to respawn — it never
+> emits a `no_verdict`/`watchdog_cancelled` (or `XI_SYS_TIMEOUT`) result.
+> Also (commit `a293cfe`): a verdict set from an `xi::async` /
+> `xi::parallel_for` worker now **reaches the run** instead of being silently
+> dropped (which used to surface as a spurious `no_verdict`).
 
 Consumer rule: `code <= -990000` → **system fail** (infrastructure, not a real
 reject); `-990000 < code < 0` → **user NG**; `> 0` → **OK**; `0` → **NA**. So the
@@ -53,8 +63,10 @@ HMI can show a process reject (ng) differently from "the line dropped a frame"
 A **dropped** event never runs the script, so the script *cannot* emit its result —
 **the dispatcher emits it** at the drop site (e.g. `enqueue_to_lane_` /
 `enqueue_event_` overflow → `RESULT = XI_SYS_DROPPED`). Likewise the run loop
-synthesizes `XI_SYS_CRASHED` (inspect threw), `XI_SYS_TIMEOUT` (watchdog), and
-`XI_SYS_NO_VERDICT` (script ran but called no `RESULT`). This is what guarantees
+synthesizes `XI_SYS_CRASHED` (inspect threw) and
+`XI_SYS_NO_VERDICT` (script ran but called no `RESULT`); there is no watchdog
+case — a wedged frame ends in `_Exit`+respawn, never a result (see the
+2026-07-11 note above). This is what guarantees
 *one result per trigger* and lets the HMI/MES compute true NA / drop rates instead
 of seeing silence.
 
@@ -156,7 +168,7 @@ reject user use of the `≤ -990000` band, and synthesize the system codes itsel
    `bind:{result:true}` (or no `var`); the demo dashboard + `hmi/demo` use it.
 6. **PLC / MES integration** — deferred; a plugin handles forwarding the result to
    external systems. Direct gateway consumption of `run_result` is v1.1.
-7. **Test + docs** — `examples/qa_run_result/` (ok/ng/unset → assert
+7. **Test + docs** — `qa/qa_run_result/` (ok/ng/unset → assert
    `run_result.code`; a `queue_depth:1` flooded project → assert `XI_SYS_DROPPED`);
    update `write-a-script.md` (`VAR` vs `RESULT`).
 

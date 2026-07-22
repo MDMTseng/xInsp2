@@ -49,14 +49,22 @@
     #define WIN32_LEAN_AND_MEAN
   #endif
   #include <windows.h>
+#else
+  #include <unistd.h>       // fork, execl, _exit
+  #include <sys/wait.h>     // waitpid, WIFSIGNALED, WEXITSTATUS
+  #include <csignal>        // kill, SIGKILL
+  #include <cerrno>         // errno
+  #include <cstring>        // strerror
+  #include <ctime>          // nanosleep, timespec
 #endif
 
 #include "xi_abi.h"
-#include "xi_cabi_adapter.hpp"   // PluginInfo, plugin_abi_compatible
+#include "xi_cabi_adapter.hpp"   // PluginInfo, plugin_abi_compatible (via xi_dynlib shim)
 #include "xi_image_pool.hpp"     // ImagePool::make_host_api
 #include "xi_pm_parse.hpp"       // parse_manifest, extract_string
 #include "xi_sha256.hpp"         // sha256_file (content-hash cache key)
-#include "xi_trigger_bus.hpp"    // install_trigger_hook
+#include "xi_pack_abi.hpp"      // polaris2 wave-2: install_pack_abi (xi.pack@1 door)
+#include "xi_cap_abi.hpp"       // capability plane pilot (doc 14): install_cap_plane
 
 #include <cstdio>
 #include <filesystem>
@@ -110,14 +118,19 @@ inline int certify_in_process(const std::string& plugin_dir) {
     if (!fs::exists(manifest)) return kExitAbiMismatch;
     auto info = parse_manifest(manifest.string(), plugin_dir);
     if (info.name.empty()) return kExitAbiMismatch;
+    // info.dll_name is already the platform module file (parse_manifest maps the
+    // manifest's xi-<name>.dll to xi-<name>.so/.dylib on POSIX).
     auto dll_path = (fs::path(plugin_dir) / info.dll_name).string();
     if (!fs::exists(dll_path)) return kExitAbiMismatch;
 
-#ifdef _WIN32
     // Same load primitive the real loader uses (deps resolve from the plugin's
-    // own folder). A DllMain that returns FALSE -> nullptr here (clean load
-    // failure = abi_mismatch); a DllMain that FAULTS already terminated us
-    // (-> crashed) before we get a handle back.
+    // own folder), via the cross-platform loader shim (xi_dynlib.hpp):
+    // LoadLibraryExA→dlopen, GetProcAddress→dlsym, FreeLibrary→dlclose. A clean
+    // load failure -> nullptr here (= abi_mismatch); a fault during load/factory
+    // already terminated this child (-> crashed) before we return a verdict.
+    // POSIX has no SEH translator installed here (by design), so a hardware fault
+    // is a real SIGSEGV that crashes the child — exactly the signal the parent
+    // maps to Verdict::crashed.
     HMODULE h = LoadLibraryExA(dll_path.c_str(), nullptr,
                                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
@@ -143,11 +156,14 @@ inline int certify_in_process(const std::string& plugin_dir) {
         return kExitAbiMismatch;
     }
 
-    // A real host_api backed by the live ImagePool + trigger hook — exactly what
-    // the backend hands a plugin at create(). The riskiest single moment: a
-    // fault inside factory() terminates this child (-> minidump -> crashed).
+    // A real host_api backed by the live ImagePool — exactly what the backend
+    // hands a plugin at create(). The riskiest single moment: a fault inside
+    // factory() terminates this child (-> minidump -> crashed). THE CUT: the
+    // Record emit hook (install_trigger_hook) is gone — sources emit packs.
     xi_host_api host = ImagePool::make_host_api();
-    install_trigger_hook(host);
+    install_pack_abi();   // polaris2 wave-2: certify a pack-capable plugin against a live xi.pack@1 door
+    install_cap_plane();  // doc 14 pilot: certify a lib plugin against a live registration door
+                          // (this child process is throwaway — registrations die with it)
 
     void* inst = nullptr;
     // Catch ONLY genuine C++ exceptions (a clean refuse — the real factory sites
@@ -177,10 +193,6 @@ inline int certify_in_process(const std::string& plugin_dir) {
     FreeLibrary(h);
     std::fprintf(stderr, "[certify] '%s' OK\n", info.name.c_str());
     return kExitOk;
-#else
-    // TODO(linux): dlopen + factory in a fork()'d child.
-    return kExitOk;
-#endif
 }
 
 #ifdef _WIN32
@@ -226,6 +238,58 @@ inline Verdict run_certify_subprocess(const std::string& certify_exe,
     if (code == (DWORD)kExitOk)          return Verdict::ok;
     if (code == (DWORD)kExitAbiMismatch) return Verdict::abi_mismatch;
     return Verdict::crashed;   // any other / abnormal exit code = a hard fault
+}
+#else // ---- POSIX ------------------------------------------------------------
+// Parent side (fork + execl + waitpid): spawn `certify_exe --certify-plugin
+// <plugin_dir>`, wait with a timeout, map the child's exit status to a verdict.
+// A child that dies on a signal (SIGSEGV/SIGABRT from a faulting factory) or
+// times out is `crashed` — the same discovery-safety contract as the Win32 path.
+inline Verdict run_certify_subprocess(const std::string& certify_exe,
+                                      const std::string& plugin_dir,
+                                      uint32_t timeout_ms = 30000) {
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        std::fprintf(stderr, "[certify] fork failed for %s (%s)\n",
+                     certify_exe.c_str(), std::strerror(errno));
+        return Verdict::unknown;   // could not certify — do NOT gate on this
+    }
+    if (pid == 0) {
+        // Child: exec the certify binary. execl only returns on failure.
+        ::execl(certify_exe.c_str(), certify_exe.c_str(),
+                "--certify-plugin", plugin_dir.c_str(), (char*)nullptr);
+        _exit(127);   // exec failed
+    }
+
+    // Parent: poll waitpid up to the timeout, then hard-kill a hung child.
+    int status = 0;
+    const uint32_t step_ms = 10;
+    uint32_t waited = 0;
+    for (;;) {
+        pid_t r = ::waitpid(pid, &status, WNOHANG);
+        if (r == pid) break;
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return Verdict::unknown;
+        }
+        if (waited >= timeout_ms) {
+            // A factory that hangs is as dangerous to discovery as one that crashes.
+            ::kill(pid, SIGKILL);
+            ::waitpid(pid, &status, 0);
+            std::fprintf(stderr, "[certify] '%s' timed out after %ums -> crashed\n",
+                         plugin_dir.c_str(), timeout_ms);
+            return Verdict::crashed;
+        }
+        struct timespec ts { 0, (long)step_ms * 1000000L };
+        ::nanosleep(&ts, nullptr);
+        waited += step_ms;
+    }
+
+    if (WIFSIGNALED(status)) return Verdict::crashed;   // faulted (SIGSEGV/SIGABRT/…)
+    if (!WIFEXITED(status))  return Verdict::crashed;    // abnormal
+    int code = WEXITSTATUS(status);
+    if (code == kExitOk)          return Verdict::ok;
+    if (code == kExitAbiMismatch) return Verdict::abi_mismatch;
+    return Verdict::crashed;   // any other exit code = a hard fault
 }
 #endif // _WIN32
 

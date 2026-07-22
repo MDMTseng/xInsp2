@@ -16,7 +16,8 @@
 # Metrics are emitted by the bench as integer-valued lines:
 #   GATE <metric_name> <integer>
 # so the comparison uses pure integer CMake math (no float arithmetic):
-#   regression  <=>  measured > baseline * (100 + THRESHOLD_PCT) / 100
+#   regression  <=>  measured > max(baseline * (100 + THRESHOLD_PCT) / 100,
+#                                    baseline + 1)   <- one-quantum noise floor
 #
 # ENVIRONMENT FINGERPRINT (schema xi.perf-baseline/1)
 # ---------------------------------------------------
@@ -178,35 +179,72 @@ if(NOT _mismatch STREQUAL "")
     return()
 endif()
 
-set(_regressions "")
-set(_report "")
-foreach(_m IN LISTS _measured)
-    string(REGEX MATCH "GATE[ \t]+([A-Za-z0-9_]+)[ \t]+([0-9]+)" _ "${_m}")
-    set(_name "${CMAKE_MATCH_1}")
-    set(_val  "${CMAKE_MATCH_2}")
-    if(NOT DEFINED BASE_${_name})
-        set(_report "${_report}  ${_name}: measured=${_val}  (no baseline — skipped)\n")
-        continue()
-    endif()
-    set(_base "${BASE_${_name}}")
-    math(EXPR _limit "${_base} * (100 + ${THRESHOLD_PCT}) / 100")
-    # pct delta vs baseline, integer, for the report line (signed)
-    if(_base GREATER 0)
-        math(EXPR _delta "(${_val} - ${_base}) * 100 / ${_base}")
-    else()
-        set(_delta "?")
-    endif()
-    if(_val GREATER _limit)
-        set(_report "${_report}  ${_name}: measured=${_val}  baseline=${_base}  (+${_delta}%)  > limit ${_limit}  REGRESSION\n")
-        list(APPEND _regressions "${_name}")
-    else()
-        set(_report "${_report}  ${_name}: measured=${_val}  baseline=${_base}  (${_delta}%)  ok (limit ${_limit})\n")
-    endif()
-endforeach()
+# --- compare, with ONE retry on regression ---------------------------------
+# A live desktop can hand a single bench run a bad draw (scheduler burst, ccache
+# flush) that clears the +25% limit on a small-quantum metric without any code
+# change. So a first-run regression triggers ONE re-measure: transient noise
+# passes the second run; a REAL regression fails both and still fails the gate.
+set(_attempt 1)
+while(TRUE)
+    set(_regressions "")
+    set(_report "")
+    foreach(_m IN LISTS _measured)
+        string(REGEX MATCH "GATE[ \t]+([A-Za-z0-9_]+)[ \t]+([0-9]+)" _ "${_m}")
+        set(_name "${CMAKE_MATCH_1}")
+        set(_val  "${CMAKE_MATCH_2}")
+        if(NOT DEFINED BASE_${_name})
+            set(_report "${_report}  ${_name}: measured=${_val}  (no baseline — skipped)\n")
+            continue()
+        endif()
+        set(_base "${BASE_${_name}}")
+        math(EXPR _limit "${_base} * (100 + ${THRESHOLD_PCT}) / 100")
+        # Integer-quantization floor: a SMALL baseline (e.g. a 2us p50) truncates
+        # to limit == baseline, leaving ZERO headroom — a single +-1-quantum
+        # jitter would then be a false REGRESSION. One measurement quantum is the
+        # honest noise floor of integer metrics: the limit is always >= base + 1.
+        if(_limit EQUAL _base)
+            math(EXPR _limit "${_base} + 1")
+        endif()
+        # pct delta vs baseline, integer, for the report line (signed)
+        if(_base GREATER 0)
+            math(EXPR _delta "(${_val} - ${_base}) * 100 / ${_base}")
+        else()
+            set(_delta "?")
+        endif()
+        if(_val GREATER _limit)
+            set(_report "${_report}  ${_name}: measured=${_val}  baseline=${_base}  (+${_delta}%)  > limit ${_limit}  REGRESSION\n")
+            list(APPEND _regressions "${_name}")
+        else()
+            set(_report "${_report}  ${_name}: measured=${_val}  baseline=${_base}  (${_delta}%)  ok (limit ${_limit})\n")
+        endif()
+    endforeach()
 
-message(STATUS "perf_gate ${BENCH_EXE} (threshold +${THRESHOLD_PCT}%, backend=${_run_fp_jpeg_backend}):\n${_report}")
+    message(STATUS "perf_gate ${BENCH_EXE} (threshold +${THRESHOLD_PCT}%, backend=${_run_fp_jpeg_backend}, run ${_attempt}):\n${_report}")
 
-if(NOT _regressions STREQUAL "")
+    if(_regressions STREQUAL "")
+        break()
+    endif()
     list(JOIN _regressions ", " _rj)
-    message(FATAL_ERROR "perf_gate: PERFORMANCE REGRESSION in: ${_rj} (see report above)")
-endif()
+    if(_attempt GREATER_EQUAL 2)
+        message(FATAL_ERROR "perf_gate: PERFORMANCE REGRESSION (persisted across a re-run) in: ${_rj} (see report above)")
+    endif()
+    message(STATUS "perf_gate: regression on run 1 (${_rj}) — re-measuring once to reject transient machine noise")
+    # Let the burst DECAY before re-measuring: an immediate retry samples the
+    # same noise window (observed: a suite-teardown burst held a 2us p50 at 7us
+    # across both back-to-back runs, while a solo run seconds later read 2us).
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 3)
+    math(EXPR _attempt "${_attempt} + 1")
+    execute_process(
+        COMMAND "${BENCH_EXE}" --gate
+        OUTPUT_VARIABLE _out
+        ERROR_VARIABLE  _err
+        RESULT_VARIABLE _rc
+        TIMEOUT 300)
+    if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR "perf_gate: '${BENCH_EXE} --gate' exited ${_rc} on the retry\n${_out}\n${_err}")
+    endif()
+    string(REGEX MATCHALL "GATE[ \t]+[A-Za-z0-9_]+[ \t]+[0-9]+" _measured "${_out}")
+    if(_measured STREQUAL "")
+        message(FATAL_ERROR "perf_gate: no GATE metrics in retry bench output:\n${_out}")
+    endif()
+endwhile()

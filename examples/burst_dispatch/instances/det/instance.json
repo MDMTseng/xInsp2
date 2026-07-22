@@ -1,5 +1,0 @@
-{
-  "plugin": "slow_detector",
-  "isolation": "in_process",
-  "config": {}
-}

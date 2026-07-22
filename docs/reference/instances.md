@@ -52,7 +52,7 @@ it survives a hot-reload or close-project mid-call.
 ```cpp
 class InstanceBase {
     virtual const std::string& name() const = 0;
-    virtual std::string        plugin_name() const = 0;
+    virtual const std::string& plugin_name() const = 0;
     virtual std::string        get_def() const;
     virtual bool               set_def(const std::string&);
     virtual std::string        exchange(const std::string& cmd);
@@ -88,12 +88,13 @@ keys default in `set_def`). Four kinds + details in
 
 ## Triggers
 
-A source instance is an ordinary plugin that calls `host->emit_record(emitter,
-id, rec, ts)` from a worker thread; each record dispatches one inspection, which
-the script reads via `xi::current_trigger()`. There is no bus correlation —
-multi-camera capture is a "gathering" plugin that emits one record carrying N
-named images. Full mechanics in
-[`../internals/dispatch.md`](../internals/dispatch.md).
+A source instance is an ordinary plugin that seals a pack and emits it
+(`xi::PackOut f = new_pack(); … emit(std::move(f));` — the
+`xi_pack_v1::emit_pack` door) from a worker thread; each emitted pack
+dispatches one inspection, which the script reads from the trigger view
+(`t.pack()`). There is no bus correlation — multi-camera capture is a
+"gathering" plugin that emits one pack carrying N named image entries. Full
+mechanics in [`../internals/dispatch.md`](../internals/dispatch.md).
 
 ## See also
 

@@ -1,0 +1,11 @@
+{
+  "name": "lut_user",
+  "description": "QA consumer for the resource-handle convention (doc 14 appendix): its xi.pack@1 door builds a demo.lut via the demo.lut.build capability (host-forwarded, provided by the lut_owner TYPE-OWNER lib instance), forwards the handle entry {type,id,gen,$v} VERBATIM in its output pack (how a handle rides packs across a door hop), queries via demo.lut.query with either a just-built or a script-forwarded handle, and materializes via demo.lut.dump — surfacing funnel rcs and $fault codes to the script.",
+  "dll": "lut_user.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "requires": [
+    { "iface": "xi.pack", "min": 1 },
+    { "iface": "xi.cap", "min": 1 }
+  ]
+}

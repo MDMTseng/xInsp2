@@ -25,9 +25,9 @@ void cmd_list_params_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pars
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             if (g_eng.script.ok() && g_eng.script.list_params) {
                 std::vector<char> buf(64 * 1024);
-                int n = g_eng.script.list_params(buf.data(), (int)buf.size());
-                if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024);  // widen: -INT_MIN is UB
-                             n = g_eng.script.list_params(buf.data(), (int)buf.size()); }
+                // list_params has no -1 error return — every negative is -needed.
+                int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
+                    [&](char* b, int len) { return g_eng.script.list_params(b, len); });
                 if (n > 0) params_json.assign(buf.data(), (size_t)n);
             }
         }
@@ -54,10 +54,9 @@ void cmd_set_param_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed
         // / "quoted string"), exact and un-reformatted; the param's set_from_json
         // validates it (rc -2 if it rejects). A missing value isn't a missing param.
         std::string val;
-        const char* after = nullptr;
         if (!xp::detail::find_key(parsed->args_json.data(),
                                   parsed->args_json.data() + parsed->args_json.size(),
-                                  "value", val, after)) {
+                                  "value", val)) {
             send_rsp_err(srv, id, "set_param: missing 'value' for '" + *pname + "'");
             return;
         }
@@ -86,14 +85,16 @@ void cmd_list_instances_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             if (g_eng.script.ok()) {
                 std::vector<char> buf(64 * 1024);
+                // list_instances / list_params have no -1 error return — every
+                // negative is -needed (grow + retry).
                 if (g_eng.script.list_instances) {
-                    int n = g_eng.script.list_instances(buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_eng.script.list_instances(buf.data(), (int)buf.size()); }
+                    int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
+                        [&](char* b, int len) { return g_eng.script.list_instances(b, len); });
                     if (n > 0) inst_json.assign(buf.data(), (size_t)n);
                 }
                 if (g_eng.script.list_params) {
-                    int n = g_eng.script.list_params(buf.data(), (int)buf.size());
-                    if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1024); n = g_eng.script.list_params(buf.data(), (int)buf.size()); }
+                    int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
+                        [&](char* b, int len) { return g_eng.script.list_params(b, len); });
                     if (n > 0) params_json.assign(buf.data(), (size_t)n);
                 }
             }
@@ -131,12 +132,18 @@ void cmd_list_instances_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
 void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
+        // G2: a SCRIPT xi::Instance<T> has NO adapter/CallScope (unlike a backend
+        // instance, whose set_def serializes under one), yet the inspect worker
+        // reads its fields outside script_mu. A live operator re-tuning a heavy-state
+        // instance (cv::Mat / vector / shared_ptr) mid-stream would reassign a member
+        // while a worker reads it → UAF. Quiesce dispatch for the def swap so no
+        // worker is mid-deref, matching the other lifecycle ops (create/remove/...).
+        auto _def_guard = quiesce_dispatch_for_lifecycle_op_("set_instance_def", &srv);
         // Extract the def object as a raw JSON substring
         std::string def_str;
-        const char* after;
         if (xp::detail::find_key(parsed->args_json.data(),
                                   parsed->args_json.data() + parsed->args_json.size(),
-                                  "def", def_str, after)) {
+                                  "def", def_str)) {
             // def_str is the raw JSON value
         } else {
             def_str = "{}";
@@ -144,26 +151,47 @@ void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         // Try backend's InstanceRegistry first (plugin-manager instances)
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
-            // set_def enters plugin code (C-ABI) — guard like exchange_instance so a
-            // throwing/faulting plugin returns a clean error instead of terminating.
-            try {
-                if (inst->set_def(def_str)) {
+            // set_def enters plugin code (C-ABI) — Wave-2 #1: it had the SEH
+            // catch + stack recovery but no quarantine gate / crash bookkeeping;
+            // guarded_plugin_call adds note_instance_crash_ + the on-fault
+            // policy so a set_def-only crash-loop trips health/reinit/refuse.
+            // NOT quarantine-gated: set_def's success path runs
+            // set_inst_state(Active), the DOCUMENTED operator re-enable for an
+            // on_fault=refuse quarantine (the quarantine error message names
+            // set_instance_def) — gating it would make quarantine
+            // unrecoverable via its own remedy.
+            auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+            bool ok = false;
+            auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
+                                         "set_def()", /*gate_quarantined=*/false, [&] {
+                ok = inst->set_def(def_str);
+            });
+            switch (r.kind) {
+            case PluginCallResult::Kind::Ok:
+                if (ok) {
                     set_inst_state(*iname, InstState::Active);
                     send_rsp_ok(srv, id);
                 } else {
                     set_inst_state(*iname, InstState::Faulted, "set_def returned false");
                     send_rsp_err(srv, id, "set_def returned false");
                 }
-            } catch (const seh_exception& e) {
+                break;
+            case PluginCallResult::Kind::Quarantined:   // unreachable (ungated)
+                break;
+            case PluginCallResult::Kind::Crashed: {
                 char msg[256];
                 std::snprintf(msg, sizeof(msg), "set_def '%s' crashed: 0x%08X (%s)",
-                             iname->c_str(), e.code, e.what());
+                             iname->c_str(), r.seh_code, r.what.c_str());
                 set_inst_state(*iname, InstState::Faulted, msg);
                 send_rsp_err(srv, id, msg);
-            } catch (const std::exception& e) {
-                std::string em = std::string("set_def error: ") + e.what();
+                break;
+            }
+            case PluginCallResult::Kind::Threw: {
+                std::string em = "set_def error: " + r.what;
                 set_inst_state(*iname, InstState::Faulted, em);
                 send_rsp_err(srv, id, em);
+                break;
+            }
             }
         } else {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
@@ -182,6 +210,7 @@ void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                                  iname->c_str(), e.code, e.what());
                     set_inst_state(*iname, InstState::Faulted, msg);
                     send_rsp_err(srv, id, msg);
+                    xi::recover_seh_stack_or_die(e.code, "cmd script set_instance_def");
                 } catch (const std::exception& e) {
                     std::string em = std::string("script set_instance_def error: ") + e.what();
                     set_inst_state(*iname, InstState::Faulted, em);
@@ -204,28 +233,44 @@ void cmd_get_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         // Backend's InstanceRegistry first (plugin-manager instances).
         auto inst = xi::InstanceRegistry::instance().find(*iname);
         if (inst) {
-            // get_def enters plugin code (C-ABI) — guard like exchange_instance.
-            try {
-                std::string def = inst->get_def();
+            // get_def enters plugin code (C-ABI) — Wave-2 #1: gains the crash
+            // bookkeeping + on-fault policy it lacked. NOT quarantine-gated:
+            // reading the faulted config is how an operator inspects and
+            // repairs a quarantined instance (the re-enable flow's read half).
+            auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
+            std::string def;
+            auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
+                                         "get_def()", /*gate_quarantined=*/false, [&] {
+                def = inst->get_def();
+            });
+            switch (r.kind) {
+            case PluginCallResult::Kind::Ok:
                 send_rsp_ok(srv, id, def.empty() ? "{}" : def);
-            } catch (const seh_exception& e) {
+                break;
+            case PluginCallResult::Kind::Quarantined:   // unreachable (ungated)
+                break;
+            case PluginCallResult::Kind::Crashed: {
                 char msg[256];
                 std::snprintf(msg, sizeof(msg), "get_def '%s' crashed: 0x%08X (%s)",
-                             iname->c_str(), e.code, e.what());
+                             iname->c_str(), r.seh_code, r.what.c_str());
                 send_rsp_err(srv, id, msg);
-            } catch (const std::exception& e) {
-                send_rsp_err(srv, id, std::string("get_def error: ") + e.what());
+                break;
+            }
+            case PluginCallResult::Kind::Threw:
+                send_rsp_err(srv, id, "get_def error: " + r.what);
+                break;
             }
         } else {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
             if (g_eng.script.ok() && g_eng.script.get_instance_def) {
                 try {
                     std::vector<char> buf(256 * 1024);
-                    int n = g_eng.script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
-                    if (n < 0 && n != -1) {   // -needed → grow + retry (-1 = not found)
-                        buf.resize((size_t)(-(int64_t)n) + 1024);
-                        n = g_eng.script.get_instance_def(iname->c_str(), buf.data(), (int)buf.size());
-                    }
+                    // -1 = instance not found (terminal); other negatives = -needed
+                    // (this site always had the correct fork — now the helper's).
+                    int n = script_grow_retry(buf, /*minus_one_is_terminal=*/true,
+                        [&](char* b, int len) {
+                            return g_eng.script.get_instance_def(iname->c_str(), b, len);
+                        });
                     if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "instance not found: " + *iname);
                 } catch (const seh_exception& e) {
@@ -233,6 +278,7 @@ void cmd_get_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                     std::snprintf(msg, sizeof(msg), "script get_instance_def '%s' crashed: 0x%08X (%s)",
                                  iname->c_str(), e.code, e.what());
                     send_rsp_err(srv, id, msg);
+                    xi::recover_seh_stack_or_die(e.code, "cmd script get_instance_def");
                 } catch (const std::exception& e) {
                     send_rsp_err(srv, id, std::string("script get_instance_def error: ") + e.what());
                 }
@@ -253,11 +299,19 @@ void cmd_create_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
             send_rsp_err(srv, id, load_err.empty() ? "failed to load plugin" : load_err);
             return;
         }
+        // RT5/J3: create_instance can EVICT a live machine-autoload provider of the
+        // same plugin (evict_machine_provider_locked_ → ~CAbiInstanceAdapter →
+        // destroy_fn_ + cap/ref/pack owner sweeps) — the identical un-quiesced
+        // DLL-teardown that remove_instance guards. Quiesce dispatch across the
+        // create so the owner-sweep can't race a worker releasing an owner-tagged
+        // ref (the phantom-bucket window). Held after load succeeds so a load
+        // failure returns without paying the quiesce.
+        auto _create_guard = quiesce_dispatch_for_lifecycle_op_("create_instance", &srv);
         // G2.1 — create() runs the plugin's factory (untrusted native code); stamp
         // the culprit so a factory fault is attributed to this plugin.
         stamp_culprit_(iname->c_str(), *plugin);
         std::string create_err;
-        auto* ii = g_eng.plugin_mgr.create_instance(*iname, *plugin, &create_err);
+        auto* ii = g_eng.plugin_mgr.create_instance(_create_guard.token(), *iname, *plugin, &create_err);
         if (ii) {
             // create_instance records the Created state internally (atomic with the
             // instance add) — no separate set_inst_state needed.
@@ -272,9 +326,23 @@ void cmd_remove_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         bool delete_folder =
             parsed->args_json.find("\"delete_folder\":true") != std::string::npos;
-        if (g_eng.plugin_mgr.remove_instance(*iname, delete_folder)) {
+        // Finding 5 (red-team): remove_instance DESTROYS a DLL-backed runtime
+        // object (adapter dtor → xi_plugin_destroy + pack/cap owner sweeps) while
+        // dispatch workers and backpressured in-flight events may still hold
+        // owner-tagged refs to that instance. This was the ONLY DLL-affecting
+        // lifecycle op with no quiesce guard; every sibling (recompile/rebuild/
+        // commit/close/open/rename-via-reload) quiesces first. Pause detached
+        // launches, drop the bus sink, stop + drain the dispatch pool BEFORE the
+        // destroy, then resume (default) so continuous streaming for the
+        // remaining instances comes back on scope exit. Closes the ledger
+        // mis-attribution UAF window and narrows the cap-plane transient.
+        auto _rm_guard = quiesce_dispatch_for_lifecycle_op_("remove_instance", &srv);
+        if (g_eng.plugin_mgr.remove_instance(_rm_guard.token(), *iname, delete_folder)) {
             // remove_instance drops the lifecycle state internally (atomic with the
-            // unregister) — no separate drop_inst_state needed.
+            // unregister) — no separate drop_inst_state needed. Health contract:
+            // drop any runtime-fault overlay for the removed instance so it no
+            // longer holds the top-level state `degraded`.
+            xi::health().clear_instance_degraded(*iname);
             send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
         } else {
             send_rsp_err(srv, id, "instance not found: " + *iname);
@@ -285,14 +353,26 @@ void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         auto old_name = xp::get_string_field(parsed->args_json, "name");
         auto new_name = xp::get_string_field(parsed->args_json, "new_name");
         if (!old_name || !new_name) { send_rsp_err(srv, id, "missing name or new_name"); return; }
+        // L1 (RT5/J2/J3 family — the last un-quiesced live-adapter teardown): the
+        // in-place rename destroys the OLD CAbiInstanceAdapter (InstanceRegistry::remove
+        // + instances.erase → ~adapter → sweep_packs_for(owner)) to rebuild it under the
+        // new name. A door-output pack is charged to the PRODUCER owner and transferred
+        // single-owner to the script's `r`, so the co-owner fail-safe can't spare it —
+        // sweep_packs_for frees a pack a lane worker still holds mid-inspect → UAF.
+        // Quiesce dispatch first, exactly like every sibling lifecycle op.
+        auto _rn_guard = quiesce_dispatch_for_lifecycle_op_("rename_instance", &srv);
         using RR = xi::PluginManager::RenameResult;
-        RR rr = g_eng.plugin_mgr.rename_instance(*old_name, *new_name);
+        RR rr = g_eng.plugin_mgr.rename_instance(_rn_guard.token(), *old_name, *new_name);
         if (rr == RR::Rejected) {
             send_rsp_err(srv, id, "rename failed — name in use or instance missing");
         } else {
             // Ok OR NotPersisted: the runtime + folder were renamed. rename_instance
             // already migrated the host-tracked state inside the same locked op, so
             // there's nothing to sync here — only the disk-save status differs.
+            // Health contract: the runtime-fault overlay is keyed by name; clear the
+            // old key (a renamed crash-quarantined instance recovers — operator
+            // re-runs; the overlay repopulates under the new name on the next fault).
+            xi::health().clear_instance_degraded(*old_name);
             if (rr == RR::NotPersisted)
                 send_rsp_err(srv, id, "renamed in memory but could not persist to disk "
                                       "(disk full / read-only?) — may revert on restart");
@@ -301,9 +381,8 @@ void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         }
 }
 
-void cmd_get_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
-}
+/* [cmd_get_project_ RETIRED at THE CUT (v12) — app-team confirmed, doc 11.
+ * Zero in-tree callers; list_plugins / list_instances cover the surface.] */
 
 void cmd_save_instance_config_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
@@ -326,13 +405,19 @@ void cmd_get_dashboard_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
                 || fname.find('\\') != std::string::npos;
         std::string content;
         bool found = false;
+        bool truncated = false;
         if (!bad && !g_eng.project_folder.empty()) {
-            std::ifstream f(std::filesystem::path(g_eng.project_folder) / fname, std::ios::binary);
-            if (f) { std::ostringstream ss; ss << f.rdbuf(); content = ss.str(); found = !content.empty(); }
+            // Capped read (review 09 finding 4): a pathological/corrupt dashboard
+            // file must not slurp unbounded into memory (bad_alloc → backend death
+            // past the dispatch shell) nor be embedded verbatim once truncated.
+            std::filesystem::path fp = std::filesystem::path(g_eng.project_folder) / fname;
+            if (read_file_capped(fp, kMaxInlineFileBytes, content, truncated) && !truncated)
+                found = !content.empty();
         }
         std::string out = "{\"found\":" + std::string(found ? "true" : "false") + ",\"name\":";
         xp::json_escape_into(out, (nm && !nm->empty()) ? *nm : "");
         if (found) out += ",\"dashboard\":" + content;   // verbatim file (already JSON)
+        if (truncated) out += ",\"truncated\":true";     // over-cap: body omitted (would be invalid JSON)
         out += "}";
         send_rsp_ok(srv, id, out);
 }

@@ -15,32 +15,69 @@ const assert = require('assert');
 
 const { sleep, makeShooter, clearOldShots } = require('./journey_helpers.cjs');
 
+// NOTE (v12 / THE CUT): the GraphCapture RECORDER is currently unwired — it
+// recorded on the deleted Record use()->process path and has no call site in
+// the pack funnel yet, so captureGraphEdges() returns empty and this journey's
+// edge assertions FAIL until the recorder is re-hooked on the pack path. The
+// fixture below is pack-native (embedded pack-door plugin + ScriptPackBuilder
+// script) so it no longer teaches xi::Record / xi::imread.
+
 const slash   = (s) => s.split('\\').join('/');
 const REPO    = path.resolve(__dirname, '..', '..', '..');
-const BLOB    = path.join(REPO, 'examples', 'blob_tracker');
-const FRAME   = slash(path.join(BLOB, 'frames', 'frame_00.png'));
+const FRAME   = '';   // no decode dependency — the script builds its frame in memory
 
 const screenshotDir = path.join(REPO, 'screenshot');
 const shot = makeShooter(screenshotDir, 'graph_capture');
 
-const INST = JSON.stringify({ plugin: 'blob_centroid_detector', config: { blur_radius: 2 } });
+const PLUGIN_JSON = JSON.stringify({
+    name: 'img_clean', description: 'image pass-through (graph capture fixture)',
+    dll: 'img_clean.dll', factory: 'xi_plugin_create', has_ui: false,
+}, null, 2);
+const PLUGIN_CPP = `#include <cstring>
+class ImgClean : public xi::Plugin {
+public:
+    using xi::Plugin::Plugin;
+    void process(xi::PackIn& in, xi::PackOut& out) override {
+        auto src = in.image("src");
+        if (!src) { out.fault("missing_input", "src"); return; }
+        xi::Image dst = pool_image(src->width, src->height, src->channels);
+        std::memcpy(dst.write(), src->pixels,
+                    (size_t)src->width * src->height * src->channels);
+        out.adopt_image("cleaned", dst.width, dst.height, dst.channels, dst.pool_handle());
+        out.i64("count", 1);
+    }
+};
+XI_PLUGIN_IMPL(ImgClean)
+XI_PLUGIN_PACK_DOOR(ImgClean)
+`;
+
+const INST = JSON.stringify({ plugin: 'img_clean', config: {} });
 const SCRIPT = `#include <xi/xi.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>
+#include <vector>
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int){
-  xi::Image frame = xi::imread(xi::current_frame_path());
-  if (frame.empty()) return;
-  auto a = xi::use("a"); auto b = xi::use("b");
-  auto a_out = a.process(xi::Record().image("src", frame));
-  auto b_out = b.process(xi::Record().image("src", a_out.get_image("cleaned")));
+  std::vector<uint8_t> px((size_t)64 * 64, 128);
+  xi::ScriptPackBuilder b1;
+  b1.add_image("src", 64, 64, 1, px.data());
+  auto a_out = xi::use("a").process(b1.seal());
+  auto cleaned = a_out.get_image("cleaned");
+  if (!cleaned) return;
+  xi::ScriptPackBuilder b2;
+  b2.add_image("src", cleaned->width, cleaned->height, cleaned->channels,
+               cleaned->pixels.data());
+  xi::use("b").process(b2.seal());
 }`;
 
 function makeProject() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xi_egraph_'));
-    fs.cpSync(path.join(BLOB, 'plugins', 'blob_centroid_detector'),
-              path.join(dir, 'plugins', 'blob_centroid_detector'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'plugins', 'img_clean', 'src'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'plugins', 'img_clean', 'plugin.json'), PLUGIN_JSON);
+    fs.writeFileSync(path.join(dir, 'plugins', 'img_clean', 'src', 'plugin.cpp'), PLUGIN_CPP);
     fs.writeFileSync(path.join(dir, 'project.json'),
-        JSON.stringify({ name: 'egraph', script: 'inspect.cpp', params: [], instances: [] }));
+        JSON.stringify({ name: 'egraph', script: 'inspect.cpp', params: [], instances: [],
+            plugins: { img_clean: { path: 'img_clean', compile: true } } }));
     fs.writeFileSync(path.join(dir, 'inspect.cpp'), SCRIPT);
     for (const n of ['a', 'b']) {
         fs.mkdirSync(path.join(dir, 'instances', n), { recursive: true });

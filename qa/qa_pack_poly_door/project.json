@@ -1,0 +1,13 @@
+{
+  "name": "qa_pack_poly_door",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "door", "plugin": "poly_door" }
+  ],
+  "plugins": {
+    "poly_door": {
+      "path": "poly_door",
+      "compile": true
+    }
+  }
+}

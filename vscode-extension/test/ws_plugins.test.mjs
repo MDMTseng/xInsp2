@@ -81,10 +81,7 @@ test('create_project + create_instance + exchange + save', async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello
 
-        // Load the mock_camera plugin
-        c.send({ type: 'cmd', id: 1, name: 'load_plugin', args: { name: 'mock_camera' } });
-        const lr = await c.nextNonLog();
-        assert.equal(lr.ok, true, 'load_plugin ok');
+        // v12: `load_plugin` retired — create_instance loads the plugin itself.
 
         // Create a project
         c.send({ type: 'cmd', id: 2, name: 'create_project', args: { folder: projDir, name: 'test_project' } });

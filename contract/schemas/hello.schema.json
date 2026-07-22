@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/hello.schema.json",
+  "title": "hello event",
+  "description": "The welcome event sent on connect. `abi` is the WS-protocol version (distinct from the C plugin-ABI struct version). No fixture existed in protocol/fixtures/; contract/examples/hello.json exercises this schema so the representative set has coverage without mutating the existing fixture set.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "name", "data"],
+  "properties": {
+    "type": { "type": "string", "const": "event" },
+    "name": { "type": "string", "const": "hello" },
+    "data": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["version", "abi"],
+      "properties": {
+        "version": { "type": "string" },
+        "commit": { "type": "string" },
+        "abi": { "type": "integer", "minimum": 1, "description": "WS-protocol version. The one field a client should gate on at a breaking bump (today no client enforces it)." }
+      }
+    }
+  }
+}

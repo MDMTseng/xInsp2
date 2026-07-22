@@ -1,0 +1,1 @@
+{ "plugin": "sem_queue", "isolation": "in_process", "config": { "role": "ack", "permits": 4 } }

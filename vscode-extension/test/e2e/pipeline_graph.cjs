@@ -18,7 +18,7 @@ const assert = require('assert');
 const { sleep, makeShooter, clearOldShots } = require('./journey_helpers.cjs');
 
 const REPO    = path.resolve(__dirname, '..', '..', '..');
-const PROJECT = path.join(REPO, 'examples', 'blob_tracker');
+const PROJECT = path.join(REPO, 'qa', 'blob_tracker');
 const SCRIPT_PATH = path.join(PROJECT, 'inspect.cpp').split('\\').join('/');
 
 const screenshotDir = path.join(REPO, 'screenshot');

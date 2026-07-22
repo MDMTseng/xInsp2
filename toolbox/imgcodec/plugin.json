@@ -1,0 +1,44 @@
+{
+  "name": "imgcodec",
+  "description": "xi.imgcodec — the first official LIB plugin (capability plane, docs/new_gen/14). NO data plane: it never emits and nothing routes to it; on create it registers the capabilities xi.jpeg.encode (image + quality -> JPEG bytes, content-keyed dedup memo cache: one encode serves every consumer) and xi.image.decode (bytes -> image; stb_image format set — host_api->read_image_file's designated v12 eviction target). Consumers resolve get_interface(\"xi.cap\", 1) and call by name; versioning rides in the request pack ($v, $probe).",
+  "dll": "xi-imgcodec.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "lib": true,
+  "_lib_doc": "lib plugin marker (informational, doc 14 pilot): a capability provider, not a pipeline stage — do not wire it as an input/output of anything; create one instance and let consumers reach it by capability name through the host funnel.",
+  "autoload": true,
+  "_autoload_doc": "V3 machine-level autoload ELIGIBILITY (doc 14 / doc 19 V3): marks this lib provider as safe to instantiate once at service boot under a machine owner, so xi.image.decode / xi.jpeg.encode are available WITHOUT any project declaring a per-instance (clears E1's second cause, doc 06 §6). ELIGIBILITY ONLY — the host autoloads eligible providers only when the DEPLOYMENT opts in (backend flag `--autoload-lib` / env XINSP2_AUTOLOAD_LIB), so the default (unset) deployment is byte-unchanged and this never silently alters the WS wire (e.g. expose's E2 preview, which keys off xi.jpeg.encode availability). A project that DOES declare an imgcodec instance takes precedence: it displaces the machine provider for the life of that project (no double-registration), reinstated on project close.",
+  "reentrant": true,
+  "_reentrant_doc": "capability handlers are invoked by the host funnel WITHOUT per-instance serialization (the provider thread-safety contract); the control surface (exchange/set_def) may also run concurrently — everything inside is mutex/atomic-guarded.",
+  "on_fault": "refuse",
+  "_on_fault_doc": "a codec whose handler faulted should stop serving (quarantine) rather than keep answering from possibly-corrupt state; consumers see the established -3 and the operator re-enables by re-committing config.",
+  "requires": [
+    { "iface": "xi.pack", "min": 1 },
+    { "iface": "xi.cap.provider", "min": 1 }
+  ],
+  "manifest": {
+    "params": [
+      { "name": "quality",   "type": "int", "default": 85, "doc": "JPEG quality 1..100 used when a request carries no 'quality' entry" },
+      { "name": "cache_max", "type": "int", "default": 32, "doc": "dedup memo cache capacity (entries, FIFO rotation)" },
+      { "name": "encode_max_concurrent", "type": "int", "default": 0, "doc": "cap on simultaneous JPEG encodes (0 = unlimited). Bounds CPU so encoding can't starve inspection; gates only real encodes, never a dedup cache hit. A single encode is single-threaded (libjpeg-turbo) — this limits parallelism across concurrent requests, it does not thread one image." }
+    ],
+    "inputs": [],
+    "outputs": [],
+    "capabilities": [
+      {
+        "name": "xi.jpeg.encode",
+        "versions": "1",
+        "doc": "Pack in: image 'image' (1/3/4ch 8-bit), i64 'quality' (opt), i64 '$v' (opt, default 1) | bool '$probe'. Pack out: bin 'jpeg', i64 'cache_hit', i64 'encodes', i64 'hits'. Contract failure -> $fault pack."
+      },
+      {
+        "name": "xi.image.decode",
+        "versions": "1",
+        "doc": "Pack in: bin 'data' (PNG/JPEG/BMP/TGA/GIF/PSD/HDR/PIC), '$v'/'$probe' as above. Pack out: image 'image', i64 w/h/c. Contract failure -> $fault pack."
+      }
+    ],
+    "exchange": [
+      { "command": "stats",       "doc": "-> {encodes, hits, decodes, cache_entries, registered} — encodes vs hits is the dedup proof counter" },
+      { "command": "clear_cache", "doc": "drop the dedup memo cache -> {ok:true}" }
+    ]
+  }
+}

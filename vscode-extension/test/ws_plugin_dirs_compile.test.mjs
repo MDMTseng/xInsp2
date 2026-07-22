@@ -22,15 +22,18 @@ import { withBackend } from './helpers/client.mjs';
 const slash = (s) => s.split('\\').join('/');
 const rsp = async (c, id) => { for (;;) { const m = await c.nextText(180000); if (m.type === 'rsp' && m.id === id) return m; } };
 
+// v12: the data plane is the xi.pack@1 pack door (process(PackIn&, PackOut&)
+// + XI_PLUGIN_PACK_DOOR) — the Record process() overload was deleted.
 const PLUGIN_CPP = `#include <xi/xi_abi.hpp>
 class Dbl : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
-    xi::Record process(const xi::Record& in) override {
-        return xi::Record().set("result", in["value"].as_double(0.0) * 2.0);
+    void process(xi::PackIn& in, xi::PackOut& out) override {
+        out.f64("result", in.f64("value").value_or(0.0) * 2.0);
     }
 };
 XI_PLUGIN_IMPL(Dbl)
+XI_PLUGIN_PACK_DOOR(Dbl)
 `;
 
 test('plugin_dirs_compile cl.exe-compiles an external source plugin', async () => {

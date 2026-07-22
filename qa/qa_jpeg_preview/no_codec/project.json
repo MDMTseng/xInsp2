@@ -1,0 +1,7 @@
+{
+  "name": "qa_jpeg_preview_no_codec",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "expose", "plugin": "expose" }
+  ]
+}

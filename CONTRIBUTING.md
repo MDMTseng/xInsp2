@@ -49,13 +49,55 @@ code --extensionDevelopmentPath=<repo>\vscode-extension <repo>\examples
 
 ## Running tests
 
-Full sweep:
+### The gate (run this before you merge)
+
+There is **one authoritative command** that runs the enforced surface, in
+order, and fails loudly on the first failure:
+
+```bat
+python tools/gate.py
+```
+
+It runs, in order: the derive-from-source **doc** guards → **build**
+(backend Release + shipped plugins) → the full **ctest** suite → the
+protocol **fixture** round-trip (`pytest`) → the `qa/qa_*` **regression
+sweep** → the black-box **fuzz smoke**. This is exactly what CI runs on
+`windows-latest` (`.github/workflows/ci.yml` just provisions the toolchain and
+calls this script), so a local green and a CI green mean the same thing.
+
+```bat
+python tools/gate.py --list             :: show the stages
+python tools/gate.py --skip fuzz        :: skip the ~45s fuzz smoke
+python tools/gate.py --skip build       :: reuse an existing backend\build
+python tools/gate.py --only ctest       :: one stage
+```
+
+On a dev box with VS Code open, the extension owns the WS slot on port 7823;
+the fuzz stage defaults to 7824 so it doesn't 503. Pass `--port <n>` to change
+it.
+
+**Do not merge on a red gate.** The `master` branch policy below assumes it is
+green.
+
+The **qa** stage honors a quarantine of pre-existing broken examples
+(`qa/qa_known_failing.txt`): those run but fail non-fatally as a loud
+`KNOWN-FAIL`, so the gate still catches *new* breakage. If you fix a quarantined
+example, delete its line — a quarantined test that starts passing fails the gate
+on purpose. See [`docs/ci-gate-known-failures.md`](docs/ci-gate-known-failures.md).
+
+### Running a subset by hand
+
+The gate is a thin wrapper over the same tools you can run directly:
 
 ```bat
 cd backend\build && ctest -C Release --output-on-failure
 cd ..\..\vscode-extension && node --test test\*.test.mjs
 node test\runUserJourney.mjs
 ```
+
+The Node integration suites (`vscode-extension/test/*.test.mjs`) are **not**
+part of `gate.py` — they need `npm install` and a heavier toolchain, so run
+them separately as above.
 
 See [`docs/testing.md`](docs/testing.md) for the full test surface and
 how to add new tests.

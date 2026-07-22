@@ -1,0 +1,1 @@
+{ "plugin": "imgcodec", "config": { "quality": 85, "cache_max": 64 } }

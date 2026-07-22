@@ -1,0 +1,15 @@
+{
+  "name": "blob_analysis_example",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "instances": [
+    { "name": "det", "plugin": "blob_analysis" },
+    { "name": "expose", "plugin": "expose" }
+  ],
+  "plugins": {}
+}

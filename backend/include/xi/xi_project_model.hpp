@@ -10,6 +10,7 @@
 // read/write helpers in namespace xi::project — not the model.)
 //
 #include "xi_instance.hpp"      // InstanceBase (held by InstanceInfo)
+#include "xi_fault_policy.hpp"  // OnFault (per-instance post-fault policy, item 14)
 
 #include <memory>
 #include <string>
@@ -42,6 +43,10 @@ struct InstanceInfo {
     int                  max_concurrency = 0;  // instance.json cap; 0 = unlimited (reentrant)
     std::string          folder_path;  // project/instances/<name>/
     std::string          group;        // instance.json "group" → dispatch group for this source's triggers ("" = default)
+    // Effective post-fault policy (item 14): resolved at load as the instance.json
+    // "on_fault" override if present, else the plugin.json default, else Reuse.
+    // Carried into the CAbiInstanceAdapter at (re)construction, like max_concurrency.
+    OnFault              on_fault = OnFault::Reuse;
     std::shared_ptr<InstanceBase> instance;
 };
 
@@ -64,11 +69,15 @@ struct ProjectInfo {
     // xi_inspect_entry concurrently in continuous mode. Default 1 (single
     // threaded). With no explicit `groups`, this becomes the synthesized default
     // dispatch lane's max_parallel (see spawn_group_pool_). Caveats (xi::state,
-    // plugin process() reentrance, watchdog) — see writing-a-script.md.
+    // plugin process() reentrance, watchdog) — see docs/guides/write-a-script.md.
     int           dispatch_threads = 1;
 
-    // `parallelism.queue_depth`: maximum number of trigger events (real bus emits
-    // + synthetic timer ticks) buffered while workers are busy. Default 100.
+    // `parallelism.queue_depth`: size of the core's residual buffer (real bus emits
+    // + synthetic timer ticks) while workers are busy. Default 100. The depth ladder
+    // (docs/new_gen/24): 0 = RENDEZVOUS (synchronous handoff — the producer blocks
+    // until a worker TAKES the event; zero core buffer; plugin owns 100% of the
+    // queue), 1 = 1-deep pipeline (producer may run one ahead), N = N-slot buffer.
+    // depth 0 REQUIRES overflow:block (the parser warns + clamps to 1 otherwise).
     int           queue_depth      = 100;
 
     // `parallelism.max_inflight`: ceiling on concurrent DETACHED one-shot / cmd:run
@@ -81,7 +90,12 @@ struct ProjectInfo {
 
     // `parallelism.overflow`: what to do when queue_depth is full and another
     // event arrives. "drop_oldest" (default; live prefers freshest) /
-    // "drop_newest" (keep FIFO; archival) / "block" (back-pressure the source).
+    // "drop_newest" (keep FIFO; archival) / "block" (back-pressure the source —
+    // lossless). "block" is the SAFE interruptible form (a stop/teardown wakes a
+    // parked producer to drop, never hangs), but OPT-IN and ONLY for a back-
+    // pressure-tolerant source on a dedicated emit thread (file/disk batch, a
+    // timer thread). NEVER for a self-feeding worker lane (deadlock until stop) or
+    // a real-time camera-callback thread (stalls acquisition) — a config error.
     std::string   overflow         = "drop_oldest";
 
     // `parallelism.result_order`: how per-frame output (ordered-sink flushes +
@@ -100,7 +114,7 @@ struct ProjectInfo {
         std::string name;
         int         max_parallel    = 1;          // worker threads this group owns
         std::string thread_priority = "normal";   // "high" | "normal" | "low" (OS)
-        int         queue_depth     = 100;
+        int         queue_depth     = 100;         // 0=rendezvous (block only) / 1=pipeline / N=buffer; see doc 24
         std::string overflow        = "drop_oldest";
         std::string result_order    = "completion"; // "completion" | "arrival" (per-group)
         int         min_interval_ms = 0;             // 0 = unlimited; else min spacing between dispatch starts (rate cap)

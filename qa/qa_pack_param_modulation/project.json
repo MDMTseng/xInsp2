@@ -1,0 +1,9 @@
+{
+  "name": "qa_pack_param_modulation",
+  "script": "inspect.cpp",
+  "instances": [
+    { "name": "cam", "plugin": "mock_camera" },
+    { "name": "det", "plugin": "blob_analysis" },
+    { "name": "expose", "plugin": "expose" }
+  ]
+}

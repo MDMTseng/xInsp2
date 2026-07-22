@@ -15,14 +15,17 @@ its clients (VS Code extension, browser, CLI, test harness).
   old core `subscribe`/`unsubscribe` commands): script output (scalar values +
   images) now goes through the shipped `expose` plugin, not core transport. The
   removed shapes are described below, struck through, for reference only.
-- **Versioning**: every `cmd` and `rsp` carries no explicit version — breaking
-  schema changes bump the server's `version` string (returned by `cmd: version`)
-  and the `hello` event's `abi` field. The protocol evolves **additive-only**
-  (new fields like vars' `src`/`group`, new commands), so old clients ignore
-  unknown fields and new clients tolerate missing ones; unknown commands reply
-  `ok:false`. **There is no enforced version gate today** — a client MAY compare
-  `hello.data.abi` against its expectation and refuse, but the shipped clients
-  only log it. A genuinely breaking bump would need clients to opt into the check.
+- **Versioning**: every `cmd` and `rsp` carries no explicit version. The
+  server's `version` string (returned by `cmd: version` and in the `hello`
+  event) is the intended breaking-change signal; the sibling `abi` field is a
+  hardcoded constant that is **now `2`** — bumped from `1` at **THE CUT (v12)**,
+  its first-ever bump, stamping the v11→v12 breaking API break. Before the cut the
+  protocol evolved **additive-only** (new fields, new commands), so old clients
+  ignore unknown fields and new clients tolerate missing ones; unknown commands
+  reply `ok:false`. The v12 cut is the first genuinely breaking bump: a client
+  **should read `hello.data.abi` on connect and warn loudly** when it does not
+  match the abi it was built against (`2`), because a v11 client and a v12 backend
+  no longer share a data plane.
 
 ---
 
@@ -71,12 +74,13 @@ but discouraged).
 ### ~~`vars` — backend to client~~ (REMOVED)
 
 > **REMOVED.** The backend no longer tracks
-> `VAR()` values or emits a `vars` message — `VAR()`/`EMIT()` still compile but
-> publish nothing. Everything from here to the start of `instances` is retained
+> per-run script values or emits a `vars` message — the old `VAR`/`EMIT` script
+> macros were deleted and no longer compile. Everything from here to the start of `instances` is retained
 > only to document what the message used to look like; a current client receives
 > none of it. Surfacing values/images for viewing now goes through the shipped
-> **expose** plugin — build a `xi::Record`, tag it with `"$channel"`, and call
-> `xi::use("expose").process(rec)`. See *The `expose` plugin* below.
+> **expose** plugin — build a pack with `xi::ScriptPackBuilder`, add a
+> `"$channel"` entry, and `xi::use("expose").push(pack)`. See *The `expose`
+> plugin* below.
 
 Snapshot of a `ValueStore` after one `inspect()` call.
 
@@ -113,12 +117,12 @@ Per-item fields:
   via `get_double`/`as_double` instead of silently reading as `0.0`. **Consumers
   must restore the sentinel back to a real number**: a top-level `kind: "number"`
   string value, *and* — because a `Record` can hold a non-finite field at any
-  depth — recursively inside a `kind: "record"` `data` object/array. The shipped
-  clients do this (`restoreNonFinite` / `restoreNonFiniteDeep` in
-  `ui-components/src/protocol.mjs` and `vscode-extension/src/protocol.ts`,
-  `_restore_nonfinite_deep` in `tools/xinsp2_py`); a consumer that skips it reads
-  the literal string `"NaN"`, so a threshold compare silently misfires (JS) or
-  raises `TypeError` (Python). **Ambiguity inside record `data`:** the record's
+  depth — recursively inside a `kind: "record"` `data` object/array. The
+  reference implementation is `_restore_nonfinite` in `qa/lib/xex1.py`
+  (recursive; applied when decoding `expose` frames — see below). Any consumer
+  that reads a non-finite field must apply the same restore itself; one that
+  skips it reads the literal string `"NaN"`, so a threshold compare silently
+  misfires (JS) or raises `TypeError` (Python). **Ambiguity inside record `data`:** the record's
   JSON carries no per-field type tag, so a *genuine string field* whose value is
   exactly `"NaN"` / `"Infinity"` / `"-Infinity"` is indistinguishable from a
   non-finite double and will be restored to the number. This is an accepted
@@ -137,7 +141,7 @@ Per-item fields:
   times. For a non-duplicated image `src == gid`. (Record sub-images are not
   deduplicated and carry no `src`.)
 - `raw` (bool) — `true` if the image is transmitted uncompressed (BMP), `false` for JPEG (currently always `false` — see *Binary frame layout*)
-- For `kind: "record"` (a `xi::Record` VAR): `data` (object) holds the record's
+- For `kind: "record"` (a record-typed VAR): `data` (object) holds the record's
   scalar fields; `image_keys` (array) lists its sub-image keys; `images` (object)
   maps each sub-image key → `gid`. Sub-images are gated by the **record var's**
   name (subscribe the record name to stream them) and are **not** deduplicated,
@@ -183,9 +187,10 @@ Out-of-band notifications that don't fit the above.
 { "type": "event", "name": "run_error", "data": { "run_id": 17, "what": "..." } }
 { "type": "event", "name": "run_result", "data": { "code": -2, "msg": "edge chip", "run_id": 17, "ms": 42, "source": "cam0", "group": "high" } }
 { "type": "event", "name": "script_reloaded", "data": { "path": "..." } }
-{ "type": "event", "name": "state_dropped", "data": { "old_schema": 1, "new_schema": 2 } }
+{ "type": "event", "name": "state_dropped", "data": { "store": "kv", "old_schema": 1, "new_schema": 2 } }
 { "type": "event", "name": "compile_started", "data": { "path": "..." } }
 { "type": "event", "name": "compile_finished", "data": { "path": "...", "ok": true } }
+{ "type": "event", "name": "health_changed", "data": { "schema": "xi.health/1", "state": "degraded", "since_ms": 1751430000123, "component": { "kind": "instance", "name": "cam0", "health": "degraded", "reason_code": "plugin_fault" }, "ts_ms": 1751430000123 } }
 ```
 
 `run_started` / `run_finished` bracket every `cmd:run` and every
@@ -222,23 +227,44 @@ still tell success from failure. Cold compiles take 4+ s on this
 project and dominate the WS quiet window — without these events the
 connection looks hung.
 
-`state_dropped` fires after `cmd:compile_and_load` when the new
-script DLL declares a different `xi_script_state_schema_version()`
-than the old one (and both are non-zero). The persisted `xi::state()`
-JSON would default-fill into a different shape, so the backend drops
-it and the new script runs with empty state. Register from user
-script code:
+`health_changed` is the push half of the **health/state contract** (see
+`cmd:get_health` below). It fires on every top-level state transition and on
+every runtime component-health change (a caught plugin fault, a compile
+outcome). `data.state` is the new top-level state; `data.since_ms` is when that
+state was entered; `data.component` (present only when a component changed)
+carries `{kind, name, health, reason_code}`. It is a low-latency **accelerator** —
+`cmd:get_health` is the delivery guarantee (re-pull on connect). Additive:
+existing clients ignore the unknown event. Full model:
+[`new_gen/04-health-contract.md`](../new_gen/04-health-contract.md).
+
+`state_dropped` fires after `cmd:compile_and_load` when the new script DLL
+declares a different kv schema version (`XI_KV_SCHEMA(N)`) than the old one (and
+both are non-zero). The persisted `xi::kv()` store would default-fill into a
+different shape, so the backend drops it and the new script runs with empty
+state. Register the version from user script code:
 
 ```cpp
-XI_STATE_SCHEMA(2);    // file-scope macro at the top of inspect.cpp
+XI_KV_SCHEMA(2);    // file-scope macro at the top of inspect.cpp
 ```
 
-(Earlier docs suggested `#define XI_STATE_SCHEMA_VERSION 2` before
-including `<xi/xi.hpp>` — that didn't work because
-`xi_script_support.hpp` is force-included via `cl.exe /FI` before
-the user TU is parsed, so the user's `#define` arrived too late.
-`XI_STATE_SCHEMA(N)` declares a runtime static initialiser, which
-runs at DLL load and wins.)
+`XI_KV_SCHEMA(N)` declares a runtime static initialiser, which runs at DLL load
+(a `#define` before including `<xi/xi.hpp>` would arrive too late —
+`xi_script_support.hpp` is force-included via `cl.exe /FI` before the user TU is
+parsed).
+
+The persisted state channel is **kv-only** at THE CUT (v12): `xi::kv()` (the
+flat, typed, mp-serialized store — `docs/new_gen/16-script-state-shape.md`) is
+the single cross-frame state store, and both events **always** carry a
+`"store": "kv"` discriminator in `data` alongside `old_schema`/`new_schema`:
+
+```json
+{ "type": "event", "name": "state_dropped",  "data": { "store": "kv", "old_schema": 1, "new_schema": 2 } }
+{ "type": "event", "name": "state_migrated", "data": { "store": "kv", "old_schema": 1, "new_schema": 2 } }
+```
+
+`state_migrated` fires INSTEAD of `state_dropped` when the new DLL registered a
+migration hook (`xi::set_kv_migrate`) and it carried the prior store across the
+schema change.
 
 ---
 
@@ -287,12 +313,13 @@ metadata in-band; for JPEG we want it out-of-band for speed.
 
 `expose` is the shipped replacement for the removed `vars` message + core image
 preview — the official surface for getting arbitrary script values + images out
-for a UI or external program. A script builds a plain `xi::Record`, tags it with a
-string **channel id** under the reserved key `"$channel"`, and calls
-`xi::use("expose").process(rec)`. Output is organised by channel (created
-implicitly on first send); a channel is the unit of subscription and of the UI
-tab. The host also stamps `"$seq"` (= the run id) for ordering; the plugin strips
-both reserved keys from the published payload. See
+for a UI or external program. A script builds a pack with `xi::ScriptPackBuilder`,
+adds a string **channel id** under the reserved key `"$channel"`, and calls
+`xi::use("expose").push(pack)` (a fire-and-forget push to the sink). Output is
+organised by channel (created implicitly on first send); a channel is the unit of
+subscription and of the UI tab. The **producer** stamps `"$seq"` (= the run id)
+for ordering before it seals the pack — the host does not stamp it on push; the
+plugin strips both reserved keys from the published payload. See
 [`../guides/write-a-script.md`](../guides/write-a-script.md) for the script side.
 
 The transport has two halves: **subscription** rides the plugin's `exchange`
@@ -333,6 +360,26 @@ Per run, for **each subscribed channel**, the plugin pushes one self-contained
 binary frame via `emit_binary` (broadcast, ordered by `$seq`). No cross-message
 reassembly — a consumer always receives a whole record atomically.
 
+> **Preview wire at THE CUT (v12): `XEX1-v3` is the default.** The default frame
+> body is now version **3** — plain tagged msgpack that mirrors the pack itself:
+>
+> ```
+> [ magic "XEX1" ][ msgpack body ]
+> body = { v: 3, channel: "lane", seq: <run_id>,
+>          frame: { <key>: [ <tag>, <value> ], ... } }
+> ```
+>
+> Each `frame` entry is a `[tag, value]` pair (the pack's typed key slots).
+> On the WS-send path an `xi/image` blob entry may carry a nested-mp `preview`
+> map `{ w, h, c, enc: "jpeg", q, data: <bin> }` under the BLOB tag when the
+> `xi.jpeg.encode` capability is live (it fails **open** to the raw verbatim
+> blob when no encoder is present). (The pre-blob image tag is retired — an
+> image on the wire IS a blob entry; see docs/new_gen/30.) The legacy `v: 1` body documented below stays selectable
+> for **one release** via the `expose` def knob `"frame_wire_v3": false`, then is
+> deleted; a decoder should gate on `v` and handle both until then.
+
+The legacy `v: 1` body (selectable via `frame_wire_v3: false`):
+
 ```
 [ magic "XEX1" ][ msgpack body ]
 
@@ -353,26 +400,71 @@ body = {
   non-8-bit / lossless image transport is out of scope (use a purpose-built
   plugin). Image keys in the record correspond to entries in `images[]`.
 - **version gate:** a decoder checks the `XEX1` magic + `v` and rejects anything
-  else (closes the old XPV1-vs-header decoder drift). Stock decoders live in
-  `ui-components/src/protocol.mjs` (`decodeExposeFrame`) and
-  `tools/xinsp2_py/xinsp2/client.py`.
+  else (closes the old XPV1-vs-header decoder drift).
+
+#### msgpack widths the frame uses
+
+The body is hand-rolled msgpack (fixed shape, no library). Multi-byte integers
+are **big-endian**. The encoder (`toolbox/expose/src/xex1_encode.hpp`) can emit,
+and every decoder must handle, exactly this subset:
+
+| Type | Opcodes | Reached by |
+|---|---|---|
+| uint | fixint, `0xCC` u8, `0xCD` u16, `0xCE` u32, `0xCF` u64 | `v`, `seq` |
+| str  | fixstr, `0xD9` str8, `0xDA` str16, `0xDB` str32 | `channel`, `json`, image `key` |
+| bin  | `0xC4` bin8, `0xC5` bin16, `0xC6` bin32 | image `jpeg` |
+| array | fixarray, `0xDC` array16, `0xDD` array32 | `images[]` (array16 once >15 images) |
+| map  | fixmap, `0xDE` map16, `0xDF` map32 | the top-level frame map (map16 once >15 keys) |
+
+The map widths matter: a decoder that handled only `fixmap` corrupted/rejected any
+frame whose top-level map grew past 15 keys. Decoders now widen consistently with
+the encoder. Unknown top-level keys are ignored, so the frame is forward-compatible.
+
+#### Decoders and golden fixtures
+
+The shipped SDK (`tools/xinsp2_py/xinsp2/client.py`) and the browser shim
+(`ui-components/src/ws-client.mjs`) are transport-generic and do **not** decode
+XEX1. The reference decoders are the `expose` plugin's own webUI
+(`toolbox/expose/ui/index.html`, `decodeXEX1` + `restoreNonFinite`) and
+`qa/lib/xex1.py` (`decode_xex1` + `_restore_nonfinite`); a consumer that
+decodes expose frames itself owns the non-finite restore.
+
+The C++ encoder and both decoders are pinned against committed golden frames under
+`protocol/fixtures/binary/` (one `.bin` per width boundary + a `manifest.json` of
+their decoded content). The C++ ctest byte-compares the encoder's output against
+the goldens; the JS (`ui-components/test/xex1-golden.mjs`) and Python
+(`tools/xinsp2_py/tests/test_xex1_frames.py`) tests decode the same goldens and
+assert the manifest. Regenerate after an intentional frame change:
+
+```
+cmake --build toolbox/build --config Release --target xex1_fixtures_test
+XINSP2_FIXTURES=protocol/fixtures ./plugins/build/Release/xex1_fixtures_test --regen
+```
 
 ---
 
 ## Commands
 
-The backend implements ~60 commands. The core commands are documented in detail
-below; additional commands are listed at the end of this section. Arguments are
-listed under each entry.
+The backend implements 50 commands (the `doc_coverage` gate extracts the exact
+set from the `g_cmd_table` dispatch table in `service_main.cpp` and fails if any
+is undocumented — see `docs/testing.md`). The core commands are documented in
+detail below; additional commands are listed at the end of this section.
+Arguments are listed under each entry.
 
 ### `ping`
 `args: {}` → `data: { "pong": true, "ts": <unix_seconds> }`
 
 ### `version`
-`args: {}` → `data: { "version": "0.1.0", "abi": 1, "commit": "abc123" }`
+`args: {}` → `data: { "version": "0.1.0", "abi": 2, "commit": "abc123" }`
 
-`abi` here is the **WS protocol** version (currently 1) — distinct from the C
-plugin-ABI struct version `XI_ABI_VERSION` (9, see `reference/c-abi.md`).
+`abi` here is the **WS protocol** version — distinct from the C plugin-ABI struct
+version `XI_ABI_VERSION` (**12**, see `reference/c-abi.md`). It is a hardcoded
+constant, emitted verbatim by the backend in `service_main.cpp` /
+`service_cmd_lifecycle.cpp`, and is **now `2`** — bumped from `1` at **THE CUT
+(v12)** to stamp the v11→v12 breaking break (the same value the `hello` event
+carries). A client built against v12 should compare it (and `hello.data.abi`) and
+warn on mismatch, since a v11 client and a v12 backend no longer share a data
+plane.
 
 ### `shutdown`
 `args: {}` → `ok: true` then the backend closes the socket and exits.
@@ -400,9 +492,10 @@ init code in-process), and every path / link-lib / toolchain string sourced from
 `project.json` that reaches the cl.exe command line is rejected if it contains
 shell metacharacters or a double-quote (command-injection guard).
 
-Hot-reload semantics: across the call, the backend (a) saves and restores
-`xi::state()` JSON (drops it on schema mismatch via `state_dropped`
-event), (b) replays every `cmd:set_param` value the user pushed into
+Hot-reload semantics: across the call, the backend (a) saves and restores the
+`xi::kv()` canonical-mp store — the sole persisted state channel at v12 — dropping
+it on schema mismatch via a `state_dropped` event (or carrying it across via
+`state_migrated`); both events carry `"store":"kv"`, (b) replays every `cmd:set_param` value the user pushed into
 the previous DLL into the new one, (c) if `cmd:start` was active,
 captures the fps + auto-resumes a fresh worker after the new DLL is
 ready (rsp gets `"resumed_continuous": true`). The cl.exe rebuild gap
@@ -410,9 +503,6 @@ is unavoidable (~3-5 s cold) but the run continues afterwards. A reload that
 lands while an inspect is still in flight (e.g. a detached `cmd:run`) is safe:
 the old script DLL stays mapped (refcounted) until that inspect returns, so it
 never executes from an unloaded module.
-
-### `unload_script`
-`args: {}` → `ok: true`. Also clears the param replay cache.
 
 ### `run`
 `args: { "frame_path": "..." (optional), "meta": { ... } (optional) }`
@@ -425,12 +515,14 @@ followed by a `run_result` event (and the `run_started`/`run_finished` brackets)
 > image surfacing is handled by the shipped `expose` plugin (one atomic `XEX1`
 > frame per subscribed channel — see *The `expose` plugin* below).
 
-When `frame_path` and/or `meta` are given, `cmd:run` builds a one-shot **record**
-host-side (`frame_path` → an image under the key `"frame"`; `meta` → the metadata
-doc) and exposes it as this run's `xi::current_trigger()` — the script reads it
-via `current_trigger().image("frame")` / `.meta()`, exactly as if a source had
-`emit_record`'d it, but with no source plugin and no continuous mode (headless
-single-shot). A plain `cmd:run` (neither arg) leaves `current_trigger()` inactive.
+When `frame_path` and/or `meta` are given, `cmd:run` builds a one-shot **sealed
+pack** host-side (`frame_path` → an image under the key `"frame"`; `meta`'s
+top-level scalars → flat pack entries — `str`/`i64`/`f64`/`bool`; nested objects
+are not converted) and exposes it as this run's `xi::current_trigger()` — the
+script reads it via `t.pack()` (`f.get_image("frame")`, `f.get_i64(...)`, …),
+exactly as if a source had emitted it as a pack, but with no source plugin and no
+continuous mode (headless single-shot). A plain `cmd:run` (neither arg) leaves
+`current_trigger()` inactive.
 
 `cmd:run` is the **deterministic single-shot** path (UI "Run", step-through). It
 is rejected while continuous mode is active (`"cannot run while continuous mode
@@ -441,8 +533,12 @@ does not fan out.
 
 `frame_path` is plumbed to the script as `xi::current_frame_path()`
 (see `docs/guides/write-a-script.md`). Empty / missing means the
-script gets an empty string. Combine with `xi::imread()` to load a
-file frame on demand without a custom source plugin.
+script gets an empty string. When set, the host decodes the file itself and
+injects the image into the run's pack under `"frame"` — decode goes through the
+`xi.image.decode` capability, so this requires an `xi.image.decode` provider (an
+`imgcodec` instance in the project, or a machine-wide autoload lib); with no
+provider the frame is simply not injected. This loads a file frame on demand
+without a custom source plugin.
 
 ### `start` / `stop`
 `start args: { "fps": int (default 10) }` → `data: { "started": true,
@@ -451,8 +547,9 @@ file frame on demand without a custom source plugin.
 verify the pool size that just came up).
 On already-running: `data: { "already": true }`.
 **Continuous mode has two drivers — don't conflate them.** The real driver is
-**triggers**: image sources call `emit_record()` and the lanes run `inspect()` per
-record (a run with no source/trigger is meaningless). `fps > 0` additionally runs a
+**triggers**: image sources emit sealed packs (a source's `emit_pack`) and the
+lanes run `inspect()` per pack (a run with no source/trigger is meaningless).
+`fps > 0` additionally runs a
 **synthetic timer tick** — an *empty* trigger every `1000/fps` ms — purely so a
 **source-less** script still ticks (dev edit→run loop, the no-camera HMI demo);
 `xi::current_trigger()` is inactive for those ticks. **`fps <= 0` = trigger-only**:
@@ -475,18 +572,21 @@ Serves the project's HMI dashboard: `<project>/dashboard.json` (or
 `dashboard.<name>.json` when `name` is given), embedded verbatim. So the HMI only
 ever needs the BE's WS URL — it asks the BE for its dashboard + all data, with no
 filesystem coupling. `name` is token-guarded (no path traversal); a missing file →
-`found:false` (the HMI then keeps its static fallback).
+`found:false` (the HMI then keeps its static fallback). The read is size-capped
+(8 MiB): a file over the cap replies `found:false, truncated:true` and omits the
+`dashboard` body (a partial slurp would be invalid JSON), so a pathological or
+corrupt dashboard file can never drive an unbounded allocation.
 
 Continuous mode runs `parallelism.dispatch_threads` worker threads inside
 the backend (default 1; see `docs/guides/write-a-script.md` → Parallel
 dispatch for the pool, per-instance reentrancy, watchdog, and `result_order`).
 Each tick comes from one of two sources:
 
-- Each `emit_record()` from a source dispatches one inspect call.
+- Each pack a source emits (its `emit_pack`) dispatches one inspect call.
 - A wall-clock timer at the requested fps fires a fallback dispatch
-  even when no record is queued. Scripts that read trigger images
+  even when no pack is queued. Scripts that read trigger images
   must guard `xi::current_trigger().is_active()` because timer-only
-  ticks have no record attached.
+  ticks have no pack attached.
 
 A `run_result` event is emitted on each dispatch (same as for `cmd:run`); the
 old per-dispatch `vars` message is **removed**. There is no per-frame rsp; the only ack for `start`
@@ -515,6 +615,8 @@ health since the most recent `cmd:start`:
 | `dropped` | events dropped on overflow since last `cmd:start` (aggregate across lanes) |
 | `dropped_lifetime` | events dropped over the whole **backend process uptime** — does NOT reset on `cmd:start` |
 | `queue_depth_high_watermark_lifetime` | peak single-lane queue depth over the whole **process uptime** — does NOT reset on `cmd:start` |
+| `malformed_cmd_rejected_lifetime` | malformed / unparseable command envelopes rejected by the dispatch shell over the whole **process uptime** — does NOT reset on `cmd:start` (see *Error handling*) |
+| `crash_leaked_docs_lifetime` | host-owned metadata docs deliberately leaked at a caught plugin `process()` crash (leak-over-UAF — see *Crash-leak accounting*) over the whole **process uptime** — does NOT reset on `cmd:start`. A **constant** non-zero value is a one-off crash; a value that **climbs** frame-over-frame means a plugin is crashing repeatedly on doc-carrying calls (check its `on_fault` policy / quarantine state) |
 | `last_emit_age_ms` | ms since ANY source last emitted a record (monotonic); `-1` if none yet. The "is the line still getting frames" signal — a stalled camera otherwise stops the line silently |
 | `sources` | `[{ source, last_emit_age_ms }]` — per-source emit age, to spot WHICH of N cameras stalled. Scoped to the current project: the per-source list is pruned on a project/script-reload boundary (so source names from a closed project don't linger), then repopulates as the new project's sources emit |
 
@@ -526,6 +628,22 @@ for the end-of-run total, do not subtract a pre-start snapshot. The `*_lifetime`
 fields are cumulative for the whole backend process, so an unattended monitor can
 answer "how much have we dropped total" across run/restart boundaries (a restart
 no longer reads as a clean line).
+
+#### Crash-leak accounting
+
+When a plugin's `process()` is caught crashing mid-call (an SEH fault or a throw
+across the ABI), the backend cannot know whether the crashed callee had already
+adopted the metadata doc it was handed. Releasing the host's reserved reference
+would risk a use-after-free / double-free against a torn callee; so the backend
+**deliberately leaks that one reference** (leak-over-UAF) — a bounded, intentional
+leak of one host-owned doc per caught doc-carrying crash. `crash_leaked_docs_lifetime`
+is how that accumulation becomes visible: it ticks once per such crash. The leak is
+bounded in practice by the `on_fault` quarantine (a repeatedly-faulting instance
+escalates to `refuse` and stops being entered), and the design is documented in
+`docs/internals/data-layer.md`. The class is dissolved entirely by the v3 all-msgpack
+pack plane (`docs/new_gen/07`), which removes the shared-doc handshake this leak
+protects. Until then, the counter is the operator's signal to distinguish "one crash
+ever" from "leaking every N frames".
 
 ### `metrics`
 `args: {}` → `data: { ... }`. Minimal observability snapshot: monotonic
@@ -542,13 +660,20 @@ itself (same contract as the `dispatch_stats` `*_lifetime` fields).
 > queue wait, emit-gate wait, staged sink flush, JPEG encode and WS send, so it is
 > NOT cycle/decision latency (external review 05 #7). The numeric values, bucket
 > edges and shape are unchanged; only the key name changed.
+>
+> **BREAKING (staged, not on master).** Each histogram bucket's key was `le` (the
+> Prometheus name for a **cumulative** `≤ edge` count) but the counts are
+> **non-cumulative** per-bucket occupancy, so a standard Prometheus consumer
+> misread every quantile. The key is renamed `le` → `bucket_ms` (the bucket's
+> upper bound); the bucket math is unchanged. A consumer bound to `le` was already
+> receiving wrong (non-cumulative) data.
 
 ```json
 { "frames_total": 1024, "frames_ok": 1020, "frames_error": 4,
   "inspect_compute_ms": {
     "count": 1024, "sum_ms": 8123.500, "mean_ms": 7.933,
-    "buckets": [ {"le": 0.5, "count": 12}, {"le": 1.0, "count": 40},
-                 "...", {"le": 5000.0, "count": 3}, {"le": "inf", "count": 1} ]
+    "buckets": [ {"bucket_ms": 0.5, "count": 12}, {"bucket_ms": 1.0, "count": 40},
+                 "...", {"bucket_ms": 5000.0, "count": 3}, {"bucket_ms": "inf", "count": 1} ]
   } }
 ```
 
@@ -559,7 +684,58 @@ itself (same contract as the `dispatch_stats` `*_lifetime` fields).
 | `inspect_compute_ms.count` | frames in the histogram (equals `frames_total`) |
 | `inspect_compute_ms.sum_ms` | Σ per-frame inspect **compute** time, ms (kept in integer µs internally; here in ms) |
 | `inspect_compute_ms.mean_ms` | `sum_ms / count`, or `0` when `count == 0` |
-| `inspect_compute_ms.buckets` | non-cumulative counts; each entry counts frames with `compute ≤ le`, partitioned by the 13 ms edges (`0.5 … 5000`). The final `{"le":"inf"}` is the overflow bucket. All bucket counts sum to `frames_total`. |
+| `inspect_compute_ms.buckets` | NON-cumulative counts; each entry counts frames in `[prev_edge, bucket_ms)` (NOT `≤ bucket_ms`), partitioned by the 13 ms edges (`0.5 … 5000`). `bucket_ms` is the bucket's upper bound (renamed from the Prometheus `le`, which implies a cumulative `≤`; these counts are per-bucket occupancy). The final `{"bucket_ms":"inf"}` is the overflow bucket. All bucket counts sum to `frames_total`. |
+
+### `get_health`
+`args: {}` → `data: { ... }`. The **one canonical health read** — the
+core-owned health/state contract (schema `xi.health/1`). It subsumes the ad-hoc
+liveness side channels (`get_state`, the `status` map, `dispatch_stats`'
+`last_emit_age_ms`) under one point-query snapshot, same role
+as `dispatch_stats` / `image_pool_stats` / `metrics`. Clients re-pull it on every
+(re)connect — that is the delivery guarantee; the `health_changed` event (above)
+is the low-latency accelerator between pulls. Full model + rationale:
+[`new_gen/04-health-contract.md`](../new_gen/04-health-contract.md).
+
+```json
+{ "schema": "xi.health/1", "state": "degraded", "since_ms": 1751430000123,
+  "boot_id": "9f3c…", "station_id": "line3-cell2",
+  "components": [
+    { "kind": "script",   "name": "inspect.cpp", "health": "ok",       "reason_code": "",             "since_ms": 1751429990000 },
+    { "kind": "instance", "name": "cam0",        "health": "degraded", "reason_code": "plugin_fault", "since_ms": 1751430000123, "crash_count": 3 },
+    { "kind": "group",    "name": "default",     "health": "ok",       "reason_code": "",             "since_ms": 0, "queue_now": 0, "running": 1, "dropped": 0 },
+    { "kind": "source",   "name": "cam0",        "health": "ok",       "reason_code": "",             "since_ms": 0, "last_emit_age_ms": 41 }
+  ] }
+```
+
+| Field | Meaning |
+|---|---|
+| `state` | top-level machine: `boot` → `project_loaded` → `running` ⇄ `degraded` / `draining` / `fault`. `degraded` = running but a runtime fault is live |
+| `since_ms` | wall-clock ms when the current `state` was entered (age = `now − since_ms`) |
+| `boot_id` / `station_id` | the run-outcome identity slice (same values stamped on every `run_result`) |
+| `components[].kind` | `script` \| `instance` \| `group` \| `source` |
+| `components[].health` | `ok` \| `degraded` (ran then faulted, still in service — the quarantine seed) \| `failed` (could not be brought into service, or `on_fault=refuse` pulled it out) |
+| `components[].reason_code` | `plugin_fault` (caught crash, kept in service) \| `quarantined` (`on_fault=refuse` pulled it out) \| `prepare_failed` \| `compile_error` \| `""` when `ok` |
+| `components[].since_ms` | when this component health was entered (`0` = not tracked / born state) |
+| instance extras | `crash_count` — process()-crash count (also on `get_state`) |
+| group extras | `queue_now` / `running` / `dropped` — as on `dispatch_stats` |
+| source extras | `last_emit_age_ms` — the existing emit-age signal; sources are always `ok` (core does **not** invent a staleness threshold — alerting is the consumer's call, same as `dispatch_stats`) |
+
+Instance base health is derived from the `get_state` machine at query time (so it
+cannot drift); the caught-crash `degraded` / `quarantined` overlay is core-owned.
+See `get_state` for the single-instance point query.
+
+**Post-fault policy (`on_fault`, item 14).** What happens to an instance whose
+`process()`/`exchange()` faults and is caught is governed by a per-instance
+`on_fault` policy — `reuse` (default; logged + `degraded`, stays in service),
+`reinit` (rebuilt from its last committed config before next use, dropping
+in-flight state; escalates to `refuse` after 3 consecutive rebuild failures), or
+`refuse` (pulled from service → `failed`/`quarantined`; subsequent `process()`
+calls fail fast). It is declared per-plugin in `plugin.json` (`"on_fault"`) with a
+per-instance `instance.json` override, and defaults to `reuse` (nothing changes
+unless declared). A quarantined instance is re-enabled through the existing
+config-commit surface — `set_instance_def` / `commit_group`. See the plugin
+authoring guide (`docs/guides/write-a-plugin.md`) and
+`docs/new_gen/04-health-contract.md`.
 
 ### `list_instances`
 `args: {}` → triggers an `instances` message.
@@ -725,7 +901,7 @@ ledger missed (rare, indicates a logic gap).
 
 Backend automatically `release_all_for(owner)` sweeps:
 - on `CAbiInstanceAdapter` destruction (instance destroyed)
-- on `unload_script` (compile_and_load reload)
+- on script reload (a `compile_and_load` that swaps the script DLL)
 
 All instances and scripts run in-process, so every handle is counted
 here — there is a single host ImagePool.
@@ -811,10 +987,45 @@ then swaps them in across the group. The expensive load happens off the barrier,
 so the barrier is one in-flight run (~ms), not a stall. See
 [`roadmap/config-bundles-and-orchestration.md`](../roadmap/config-bundles-and-orchestration.md)
 for the full model, [`c-abi.md`](./c-abi.md) §1 for the ABI, and
-`plugins/config_swap_probe/` for the reference plugin.
+`toolbox/config_swap_probe/` for the reference plugin.
 
 ### `save_project` / `load_project` / `open_project`
 `args: { "path": "project.json" }` → `ok: true`
+
+**Project-file schema + full-document save.** `project.json` carries a top-level
+`"schema"` identity — currently `"xi.project/1"` (same family/naming as the
+run-outcome `"xi.run-outcome/1"`) — written on every save. It is a
+`<family>/<major>` string; the major is bumped only on a breaking format change,
+and within a major readers stay forgiving (unknown keys tolerated, missing keys
+defaulted).
+
+`save_project` (and every instance-CRUD save) is a **read–modify–write over the
+whole document**: it loads the existing `project.json`, overwrites ONLY the keys
+the saver owns, and **preserves every other top-level key verbatim** — the
+backend-owned blocks it doesn't itself emit (`runtime`, `parallelism`, `groups`,
+`plugin_dirs`, `plugins`, `toolchain`, `include_dirs`, `link_libs`) AND keys a
+*different* writer owns (the VS Code extension's `params`, `auto_respawn`,
+`watchdog_ms`, and any future key). There is deliberately no code path that
+reconstructs `project.json` from partial knowledge; a prior `save_project` rebuilt
+the file from just `params`+`instances` and silently dropped the rest — data loss
+on a normal save, and the exact failure a cross-version or cross-writer round-trip
+provokes. The write is atomic (temp + rename). Preservation is at **top-level key**
+granularity for keys the saver doesn't own; keys it *does* own (`params`,
+`instances`, and — for the instance-CRUD path — `name`/`script`/`parallelism`/
+`runtime`/`plugin_dirs`/`plugins`) are rewritten wholesale from live state.
+
+**Schema gate on open.** `open_project` reads `schema` with the same discipline as
+the plugin-ABI load gate: a **missing** field is accepted as a legacy (pre-schema)
+file and logged once (the next save stamps the current schema); a **recognized**
+family at this backend's major (or older) loads normally; an **unrecognized family
+or a future major** is **refused** — `open_project` replies `ok:false` with a
+message naming both the file's schema and the backend's (e.g. *"project.json
+declares schema "xi.project/2" but this backend understands "xi.project/1" … Open
+it with a matching backend version."*) — rather than silently mis-reading a newer
+format. (`instance.json` is unaffected: its writer fully round-trips the plugin's
+own `config` subtree via `get_def`/`set_def` and has no second writer of top-level
+keys, so it does not carry the same rebuild-from-partial-knowledge defect and is
+not schema-stamped.)
 
 `load_project` / `open_project` reattach instances and restore Param
 values, but **do NOT recompile the inspection script** — call
@@ -871,7 +1082,7 @@ are blocked …"`. Two guarantees protect the on-disk bytes:
   with it) — the corruption is contained, never propagated as data loss.
 
   To recover: fix (or restore from `project.json.corrupt-<ts>`) the JSON on disk
-  and `open_project` again. See [`examples/qa_corrupt_project_json`](../../examples/qa_corrupt_project_json).
+  and `open_project` again. See [`qa/qa_corrupt_project_json`](../../qa/qa_corrupt_project_json).
 
 **IntelliSense config.** The `.vscode/c_cpp_properties.json` that lets the
 Microsoft C/C++ extension resolve `<xi/...>` and OpenCV is written by the **VS
@@ -881,7 +1092,7 @@ C++ standard, and force-included support header into the *canonical* project
 folder, plus a `.vscode/extensions.json` recommending `ms-vscode.cpptools`. The
 generated file is stamped `"_generated_by": "xinsp2"` and only files carrying that
 stamp are overwritten (delete the stamp to take manual ownership). Both files
-embed machine-specific absolute paths and are git-ignored under `examples/`.
+embed machine-specific absolute paths and are git-ignored under `qa/`.
 
 **External script dependencies.** `project.json` may carry two optional arrays
 that feed the script compile: `"include_dirs"` (extra `cl /I` paths) and
@@ -1003,10 +1214,22 @@ are also emitted on the `log` channel as `level: warn` during
 
 ## Error handling
 
-- Malformed JSON: backend sends `{ "type": "log", "level": "error", "msg": "..." }` and keeps the connection open.
+- Malformed / unparseable envelope: if a numeric `id` is still recoverable from
+  the payload (e.g. a valid client that sent one bad field, or the wrong `type`),
+  the backend replies `rsp` with `ok: false, error: "malformed command"` carrying
+  that `id`, so the client is not left blocking to its request timeout. When no
+  `id` can be recovered (none present, or one that overflows int64) there is
+  nothing to correlate to, so the backend falls back to a `{ "type": "log",
+  "level": "error", "msg": "malformed cmd: ..." }` line. Either way the connection
+  stays open and a process-uptime reject counter
+  (`dispatch_stats.malformed_cmd_rejected_lifetime`) is incremented.
 - Unknown command name: `rsp` with `ok: false, error: "unknown command: xyz"`.
 - Exception inside a command handler: `rsp` with `ok: false, error: <what()>`.
-- Script runtime exception: emitted as an `event` with `name: "run_error"` and `data: { "what": "..." }`. The `rsp` for the `run` command still returns `ok: true` if the run started — failure is reported via the event channel so partial vars can still be delivered.
+  A single top-level guard around command dispatch converts **any** exception
+  escaping a handler (including `std::bad_alloc`) into this structured reply
+  correlated to the command `id`, rather than letting it unwind out of the serve
+  loop and terminate the backend.
+- Script runtime exception: emitted as an `event` with `name: "run_error"` and `data: { "what": "..." }`. The `rsp` for the `run` command still returns `ok: true` if the run started — failure is reported asynchronously via the event channel (the `rsp` is sent before the detached inspect runs).
 
 ---
 
@@ -1045,7 +1268,7 @@ appears as `last_status` in the crash report if the backend dies.
 ## Connection lifecycle
 
 1. Client connects to `ws://host:PORT/`.
-2. Backend sends a welcome `event` with `name: "hello"` and `data: { "version": "...", "commit": "<git-sha>", "abi": 1 }`.
+2. Backend sends a welcome `event` with `name: "hello"` and `data: { "version": "...", "commit": "<git-sha>", "abi": 2 }`. `hello.data.abi` is the v12 stamp (bumped `1`→`2` at THE CUT); a v12 client should read it on connect and **warn loudly on mismatch** — a v11 client and a v12 backend no longer share a data plane.
 3. Client sends `cmd: version` to double-check, then `cmd: load_project` if it has one.
 4. Client drives `compile_and_load` → `run` cycles.
 5. Either side closes the socket to end the session; backend on `cmd: shutdown` also exits its process.
@@ -1078,15 +1301,14 @@ in full detail above. One-line purpose per entry; args follow the same
 
 | Command | Purpose |
 |---|---|
-| `crash_reports` | Return the JSON crash reports written by previous fatal crashes (from `%TEMP%/xinsp2/crashdumps/*.json`), newest-first. |
+| `crash_reports` | Return the JSON crash reports written by previous fatal crashes (from `%TEMP%/xinsp2/crashdumps/*.json`), newest-first. Each report body is read with an 8 MiB size cap; a file over the cap is listed as `{ "file", "truncated": true }` with no `report` body instead of being slurped unbounded. |
 | `clear_crash_reports` | Delete all crash JSON files from the dump directory. Reply: `{ "removed": N }`. |
 
 #### Watchdog
 
 | Command | Purpose |
 |---|---|
-| `set_watchdog_ms` `args: { "ms": N }` | Set the per-inspect wall-clock budget in ms (0 = disabled). Reply: `{ "ms": N, "trips": N }`. |
-| `watchdog_status` | Current watchdog config and trip count. Reply: `{ "ms": N, "trips": N, "armed": bool }`. |
+| `set_watchdog_ms` `args: { "ms": N }` | Set the per-inspect wall-clock budget in ms (0 = disabled). Reply: `{ "ms": N, "trips": N }` — the same snapshot the retired status query used to return. |
 
 #### Runtime tuning (live, mirrors `project.json` `runtime.*`)
 
@@ -1113,10 +1335,8 @@ in full detail above. One-line purpose per entry; args follow the same
 | Command | Purpose |
 |---|---|
 | `rescan_plugins` | Rescan the global plugins directories and refresh manifests. Does not reload already-loaded plugin DLLs. |
-| `load_plugin` `args: { "name": "...", "folder"?: "..." }` | Force-load (or reload) a specific plugin by name. Typically used after `rescan_plugins` found a new plugin. |
 | `rebuild_plugins` `args: { "cmake"?: "...", "config"?: "Release", "plugins"?: ["a","b"] }` | For every `build: cmake` plugin whose source changed (or just the named `plugins`): unload it, run its own CMake build, then reload the DLL and restore instances. Runs in three phases — unload all changed, **build them in parallel**, reload each — so a multi-plugin round is fast and each is unloaded only briefly. Reply `data: { "plugins": [{ "plugin", "status": "rebuilt"\|"unchanged"\|"failed", "detail" }] }`. Unchanged plugins (sources older than their built DLL) are skipped. The unload→build→load order is required on Windows (a loaded DLL can't be overwritten; CMake emits a fixed-name DLL) — which is why CMake runs host-side. A plugin that didn't truly unload (lingering worker thread / GPU context) is reported `failed` rather than silently left on stale code. |
 | `export_project_plugin` `args: { "name": "..." }` | Package a compiled project-local plugin (DLL + manifest) for distribution; stamps `abi_version` in the exported `plugin.json`. |
-| `unquarantine_plugin` `args: { "name": "..." }` or `{ "dir": "..." }` | Operator un-quarantine (Part III G2.3). Clears the certify verdict (crashed/quarantined) in a plugin's `.xi_certify.json` so the next scan re-certifies it from scratch, then re-scans so a now-clean plugin is re-armed without a restart. Resolve by plugin `name` (via the last scan) or explicit folder `dir`. |
 
 #### Project and instance CRUD
 
@@ -1128,7 +1348,6 @@ in full detail above. One-line purpose per entry; args follow the same
 | `remove_instance` `args: { "name": "det0", "delete_folder"?: bool }` | Remove an instance from the registry and call `xi_plugin_destroy`. `"delete_folder": true` deletes the on-disk folder. Default (`false`) keeps the folder but moves its `instance.json` aside to `instance.json.removed` — open_project discovers instances by folder scan, so the removal still has to persist or the instance would resurrect on reopen; the tombstone keeps the config/assets recoverable. |
 | `rename_instance` `args: { "name": "det0", "new_name": "detector" }` | Rename an instance (moves its folder, updates the registry). On a disk-save failure the runtime is still renamed; the reply is an error noting it may revert on restart (not "rename failed"). |
 | `save_instance_config` `args: { "name": "det0" }` | Write the current `get_def()` output for one instance to `instance.json` without a full `save_project`. |
-| `get_project` | Return the open project's `project.json` content and resolved metadata. |
 | `get_plugin_ui` `args: { "name": "blob_analysis" }` | Return the plugin's `ui/index.html` content (for plugins with `has_ui: true`). Used by the VS Code extension to open the plugin webview. |
 
 #### Dispatch stats
@@ -1149,7 +1368,7 @@ extension, or `xinsp-fe.exe` on a line — see
 | `--host=ADDR` | 127.0.0.1 | bind address (`0.0.0.0` for remote; pair with `--auth`) |
 | `--auth=SECRET` | — | require `Bearer SECRET` in the WS handshake |
 | `--plugins-dir=DIR` | — | extra plugin folder (repeatable) |
-| `--watchdog=MS` | 0 (off) | terminate an inspect that exceeds MS ms |
+| `--watchdog=MS` | 0 (off) | per-inspect wall-clock budget: an inspect still wedged after MS ms + the grace window hard-exits the backend (`_Exit`) for the supervisor to respawn; a frame that returns late is a normal verdict |
 | `--project=DIR` | — | **headless autostart**: `open_project` this folder at boot |
 | `--script=PATH` | project.json's `script` | script to `compile_and_load` for `--project` |
 | `--autostart-fps=N` | 0 (off) | with `--project`, `start` continuous mode at N fps; **N<0 = trigger-only** (start, no timer) |
@@ -1170,6 +1389,15 @@ WS port binds. No client need ever connect (reply frames are no-ops with no
 client), and the port stays open so an operator HMI / the extension can attach
 live. This lets `xinsp-fe.exe` run a line at the process level without a C++ WS
 client.
+
+On Windows the listen socket binds **exclusively** (`SO_EXCLUSIVEADDRUSE`): while
+the backend is up, no other local process can bind its `host:port` — so a rival
+listener can never siphon off inbound connections. (Windows `SO_REUSEADDR`, which
+the socket used previously, permits a full duplicate bind and lets the kernel
+split connects between the two listeners; that was never legitimate behaviour.)
+This does not affect the FE's rapid backend respawn: closing the old listener
+frees the port immediately, so the new backend rebinds the same fixed port
+without delay.
 
 ## Remote mode & auth
 

@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const extensionDir = resolve(__dirname, '..');
 const testRunner   = resolve(__dirname, 'e2e', 'full_pipeline.cjs');
-const workspace    = resolve(__dirname, '..', '..', 'examples');
+const workspace    = resolve(__dirname, '..', '..', 'qa');
 
 const localVSCode = 'C:\\Users\\TRS001\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe';
 const vscodeExecutablePath = existsSync(localVSCode) ? localVSCode : undefined;

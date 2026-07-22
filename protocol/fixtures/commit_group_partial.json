@@ -1,1 +1,1 @@
-{"type":"rsp","id":9,"ok":true,"data":{"status":"partial","committed":false,"canonical":{"group":"main"},"warnings":["exposure: value rejected"]}}
+{"type":"rsp","id":9,"ok":false,"error":"one or more commits failed — partial commit, dispatch stopped (config fault latched)","data":{"status":"partial","results":[{"name":"binarize_main","ok":true,"result":{"threshold":128}},{"name":"measure_edge","ok":false,"result":{"error":"exposure: value rejected"}}]}}

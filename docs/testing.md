@@ -9,11 +9,63 @@ This is the live picture of test surface, organisation, and how to run.
 > `subscribe`/`unsubscribe` commands have been removed from the backend. Script
 > data-out now goes through the shipped `expose` plugin (per-channel subscription
 > over `exchange` + one atomic `XEX1` frame per record). Suites that
-> exercised the old core paths (e.g. `ws_run_vars`, `ws_preview`, `runSubscribe`, the
+> exercised the old core paths (e.g. `ws_run_vars`, `ws_preview`, the
 > JPEG-preview assertions in `ws_comprehensive`, the preview-header rows in
 > `test_protocol`, the *JPEG encode* note below) cover **removed** behavior and
 > are legacy — to be retired or rewritten. They are listed below
 > as they stand today; treat the old preview/vars/subscribe coverage as legacy.
+> (`runSubscribe`, a standalone launcher that exercised ONLY the removed
+> `vars`/binary-preview/`subscribe`/`unsubscribe` core paths, has been deleted
+> at THE CUT — v12 has no such core commands; per-channel preview now lives in
+> the `expose` plugin, covered by `ws_expose_sink`.)
+
+---
+
+## Enforcement — the gate (`tools/gate.py`)
+
+Every gate below is only worth its green if something runs it. **One command
+runs the enforced surface, in order, and fails on the first failure:**
+
+```
+python tools/gate.py
+```
+
+Stages: **docs** (the derive-from-source freeze guards) → **build** (backend
+Release + shipped plugins) → **sdk** (compile `sdk/host_mock` + scaffold every
+plugin template — easy/medium/expert, incl. their UI panels — with the real
+`sdk/scaffold.mjs` and compile the result; needs a bare `node`, no npm) →
+**ctest** (the full C++ suite — unit, integration, perf gates,
+`script_selfcheck`, and the doc gates again; `contract_live` excluded, see
+**live**) → **fixtures** (the protocol golden-fixture round-trip, `pytest
+tools/xinsp2_py/tests`) → **live** (`contract/live_conformance.py`, the third
+contract leg — live WS bytes vs schemas + the `contract/live-allowlist.json`
+ratchet — run under the gate's own python with
+`XINSP2_REQUIRE_SCHEMA_GATE=1`, so a missing dep fails instead of skipping) →
+**qa** (the `qa/qa_*` sweep) → **fuzz** (the black-box fuzz smoke,
+`tests/fuzz/run_smoke.py`).
+
+This is the single source of truth for "what must pass," and CI is a thin
+wrapper over it: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+provisions the Windows toolchain (MSVC + OpenCV) and calls `python
+tools/gate.py`, so a local green and a CI green mean the same thing and cannot
+drift. `--only` / `--skip` select stages; `--list` shows them; `--port` sets the
+fuzz WS port (defaults to 7824 so it dodges the VS Code extension on a dev box).
+
+The **qa** stage honors a quarantine
+([`qa/qa_known_failing.txt`](../qa/qa_known_failing.txt)) so the gate
+is usable on a base that still has pre-existing broken examples: a quarantined
+test runs but its failure is a loud, non-fatal `KNOWN-FAIL`, while a quarantined
+test that *passes* is fatal (the list can't rot green). `run_qa.py --strict`
+ignores it. Mechanism and current contents:
+[`docs/ci-gate-known-failures.md`](ci-gate-known-failures.md).
+
+The **fuzz smoke is wired here on purpose and nowhere else.** It was built "to
+be wired into CI as a build-breaking net" (`tests/fuzz/README.md`) — this gate
+is that wiring. It is deliberately *not* a ctest: it spawns a real backend over
+WS and coordinates the single-client port by timing, so it belongs with the
+integration sweep, not the deterministic unit ctests. The Node suites
+(`vscode-extension/test/*.test.mjs`) are likewise **not** in the gate — they
+need `npm install`; run them separately (below).
 
 ---
 
@@ -54,8 +106,18 @@ All exit with `ALL TESTS PASSED`.
   source of truth and **fails** if any item is undocumented in `docs/guides` or
   `docs/reference` (internal residue + `docs/archive` deliberately don't count) and
   not listed in `docs/.doc-coverage-allow` with a reason. This is what stops a new
-  export/command/macro from shipping while the guides lag. Run standalone:
-  `python tools/check_doc_coverage.py`. Skipped only if no Python3 is found.
+  export/command/macro from shipping while the guides lag. The **WS-command** half
+  parses the exact command set from the `g_cmd_table` dispatch table in
+  `service_main.cpp` (one `{"name", handler}` entry per command) and requires each
+  to appear in `docs/reference/ws-protocol.md` (or a guide) marked as a command —
+  as a heading, a backtick token, or a `cmd:<name>` reference (a bare English word
+  in prose is not enough). The extractor **self-checks**: it aborts loudly if it
+  can't find the `g_cmd_table` block or extracts fewer than 40 commands, because it
+  previously grepped the old `if (name == "...")` god-chain that the dispatch-table
+  refactor deleted — so it silently matched **zero** commands and enforced nothing
+  until this guard was added. Run standalone: `python tools/check_doc_coverage.py`
+  (prints the extracted export/macro/command counts). Skipped only if no Python3 is
+  found.
 - `retired_terms` (`tools/check_retired_terms.py`) — the mirror of `doc_coverage`.
   Where `doc_coverage` fails if a **live** symbol is undocumented, this fails if a
   **retired** API token appears on a **blessed copy-paste surface** — the place
@@ -139,7 +201,6 @@ cd vscode-extension && node test/runUserJourney.mjs
 | Runner | What it proves |
 |---|---|
 | `runMulticam` | `synced_stereo` gathering plugin emits one record carrying left+right (same `seq`) |
-| `runSubscribe` | *(legacy — removed behavior)* preview subscription gates binary frames by name |
 | `runWatchdog` | watchdog kills runaway inspect; backend stays alive |
 | `runRemoteAuth` | `--auth` bearer gate, 401 on bad/missing, constant-time compare |
 | `runHeadlessRunner` | `xinsp-runner.exe` produces JSON report from a project |
@@ -310,7 +371,7 @@ Precise wording so the baselines aren't over-read:
   `ext_add(2,3)==5`.
 - **Phase G stress + race** (#92; see
   `docs/archive/fe-be-split-test-plan.md` "Phase G"). Beyond the `test_qa_fault` /
-  `test_qa_race` units above: `examples/qa_recover/` proves the **recover-and-clear** transition
+  `test_qa_race` units above: `qa/qa_recover/` proves the **recover-and-clear** transition
   (a backend that crashes a few times then heals → FE clears `down` back to
   `healthy`, never hits the cap — the `crash_then_heal` plugin counts crashes in a
   respawn-surviving marker). (The `qa_soak` full-stack FE+BE+gateway soak was
@@ -323,7 +384,7 @@ Precise wording so the baselines aren't over-read:
   itself). `backend/tests/test_prepare_concurrency.cpp` adds the ABI v7 staging
   contract (`prepare` ungated, `commit` gated). Guards against a regression that
   lets a `set_def` into a non-reentrant instance while `process()` is in flight.
-  `examples/qa_reentrancy/` demonstrates the same model end-to-end (`python
+  `qa/qa_reentrancy/` demonstrates the same model end-to-end (`python
   driver.py` → VERDICT: PASS) — a 4-thread pool pokes serial / parallel / capped
   probe instances and asserts max concurrency 1 / ≥2 / 1.
 - **Plugin dependency-DLL base-name clash** — `examples/dll_version_clash/`
@@ -331,14 +392,15 @@ Precise wording so the baselines aren't over-read:
   proves the Windows loader's one-module-per-base-name rule across three load
   modes (full-path → no clash, by-name same-name → clash, by-name distinct → no
   clash).
-- **Per-worker watchdog** — `examples/qa_watchdog/` proves the inspect watchdog
+- **Per-worker watchdog** — `qa/qa_watchdog/` proves the inspect watchdog
   now fires under `dispatch_threads > 1` (it tracks a deadline slot per worker,
-  not one global slot) and that a hard trip (script ignores cooperative cancel)
+  not one global slot) and that a hard trip (inspect still wedged after the
+  grace window — the cooperative soft-cancel phase is retired)
   makes the backend **exit** with `0x5744` for the FE to respawn — rather than
   `TerminateThread` a worker (which would leak the per-instance lock). The N=1
   path + WS contract is covered by `vscode-extension/test/runWatchdog.mjs`.
   Windows-only; skip on non-`nt`.
-- **Project working copy** — `examples/qa_working_copy/` proves the
+- **Project working copy** — `qa/qa_working_copy/` proves the
   transactional `<project>/.xinsp_work` scratch (`open_project working_copy:true`
   + `commit_working_copy` / `discard_working_copy`). Drives the full lifecycle on
   an on-disk `kv` instance: seed → edits isolated to the scratch (canonical
@@ -362,14 +424,14 @@ Precise wording so the baselines aren't over-read:
   group only runs on its core mask), `qa_min_interval` (rate cap 20/s→10/s),
   `qa_runtime_settings` (live `set_timer_fps`/`set_process_priority` + the
   `project.json` `runtime` block applied on open).
-- **Per-run Result** — `examples/qa_run_result/` proves the `run_result` event
+- **Per-run Result** — `qa/qa_run_result/` proves the `run_result` event
   (verdict code + message, dropped→`XI_SYS_DROPPED`, reserved-band warning).
-- **local_image_source auto mode** — `examples/qa_local_auto/` proves the reused
+- **local_image_source auto mode** — `qa/qa_local_auto/` proves the reused
   "local" source self-emitting a folder on a timer (auto-update).
-- **BE-served dashboard** — `examples/qa_get_dashboard/` proves `cmd:get_dashboard`
+- **BE-served dashboard** — `qa/qa_get_dashboard/` proves `cmd:get_dashboard`
   serves `<project>/dashboard[.<name>].json` (missing → found:false; path traversal
   blocked) so the HMI needs only the WS URL.
-- **Export bundle (AOT, no toolchain)** — `examples/qa_export_bundle/` exports a
+- **Export bundle (AOT, no toolchain)** — `qa/qa_export_bundle/` exports a
   project via `tools/export_bundle.py`, then runs the bundle backend with `--aot`
   and a **stripped PATH** (no `cl.exe`) and still inspects — proving prebuilt
   plugin/script DLLs load with no compiler on the target.
@@ -393,14 +455,16 @@ Precise wording so the baselines aren't over-read:
 
 ---
 
-## Running the `examples/qa_*` suite
+## Running the `qa/qa_*` suite
 
-`python tools/run_qa.py [filter]` runs every `examples/qa_*/driver.py`
+`python tools/run_qa.py [filter]` runs every `qa/qa_*/driver.py`
 sequentially, aggregates `VERDICT: PASS|FAIL|SKIP`, and exits non-zero on any
 failure (CI-gate usable). `python tools/run_qa.py group` runs only the
 folder-name matches; `--list` lists without running; `--timeout=N` caps each.
 Tests run one at a time (each spawns its own backend on its own port and some
-share project-plugin DLL paths). Windows-first; drivers SKIP on non-`nt`.
+share project-plugin DLL paths). Windows-first; drivers SKIP on non-`nt`. It is
+the **qa** stage of `tools/gate.py`; run it standalone when iterating on one
+example, run the gate before merging.
 
 ## How to add a new test
 

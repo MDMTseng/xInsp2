@@ -1,46 +1,58 @@
 // Reload verification — proves that after hot-reload:
 // 1. The NEW inspect function executes (not the old one)
-// 2. Auxiliary thunks (params, state, reset) come from the new DLL
+// 2. Auxiliary thunks (params, kv state) come from the new DLL
 // 3. Old DLL code is completely unreachable
+//
+// v12 (THE CUT): the vars frame + VAR are gone — each script surfaces its
+// identity through the per-run verdict (xi::result → run_result event), and
+// cross-frame state is xi::kv() (xi::state() was deleted, docs/new_gen/16).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { withBackend, compileScript, runInspection } from './helpers/client.mjs';
+import { withBackend, compileScript } from './helpers/client.mjs';
 
 const tmpDir = resolve(tmpdir(), `xi_reload_verify_${Date.now()}`);
 mkdirSync(tmpDir, { recursive: true });
 
-// Two scripts with deliberately different outputs
+// Two scripts with deliberately different verdicts
 const scriptA = resolve(tmpDir, 'version_a.cpp');
 const scriptB = resolve(tmpDir, 'version_b.cpp');
 
+// A: code = 1000 + marker (default 111 → 1111), msg "ALPHA"
 writeFileSync(scriptA, `
 #include <xi/xi.hpp>
+#include <xi/xi_result.hpp>
 xi::Param<int> marker{"version_marker", 111, {0, 999}};
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    VAR(version, std::string("ALPHA"));
-    VAR(magic, 1111);
-    VAR(marker_val, static_cast<int>(marker));
+    xi::result(1000 + (int)marker, "ALPHA");
 }
 `);
 
+// B: code = 2000 + beta_param (default 222 → 2222), msg "BRAVO"
 writeFileSync(scriptB, `
 #include <xi/xi.hpp>
+#include <xi/xi_result.hpp>
 xi::Param<int> new_param{"beta_param", 222, {0, 999}};
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    VAR(version, std::string("BRAVO"));
-    VAR(magic, 2222);
-    VAR(beta_val, static_cast<int>(new_param));
-    VAR(frame_num, frame);
+    xi::result(2000 + (int)new_param, "BRAVO");
 }
 `);
 
-test('after reload, inspect function is from the NEW DLL', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (reload still works; observed via vars)' }, async () => {
+// Run once, return the run_result event data.
+async function runResult(c, id) {
+    c.send({ type: 'cmd', id, name: 'run' });
+    for (;;) {
+        const m = await c.nextText(120000);
+        if (m.type === 'event' && m.name === 'run_result') return m.data;
+    }
+}
+
+test('after reload, inspect function is from the NEW DLL', { timeout: 120000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText(); // hello
 
@@ -48,30 +60,18 @@ test('after reload, inspect function is from the NEW DLL', { skip: 'vars/preview
         const cr1 = await compileScript(c, scriptA);
         assert.equal(cr1.ok, true, 'version A compiles');
 
-        const r1 = await runInspection(c);
-        assert.equal(r1.vars.type, 'vars');
-        const v1 = Object.fromEntries(r1.vars.items.map(v => [v.name, v]));
-
-        assert.equal(v1.version.value, 'ALPHA', 'A: version is ALPHA');
-        assert.equal(v1.magic.value, 1111, 'A: magic is 1111');
-        assert.equal(v1.marker_val.value, 111, 'A: param default is 111');
+        const r1 = await runResult(c, 10);
+        assert.equal(r1.msg, 'ALPHA', 'A: msg is ALPHA');
+        assert.equal(r1.code, 1111, 'A: code carries marker default (1000+111)');
 
         // Now compile and run version B — completely different script
         const cr2 = await compileScript(c, scriptB);
         assert.equal(cr2.ok, true, 'version B compiles');
 
-        const r2 = await runInspection(c);
-        assert.equal(r2.vars.type, 'vars');
-        const v2 = Object.fromEntries(r2.vars.items.map(v => [v.name, v]));
-
+        const r2 = await runResult(c, 11);
         // These MUST be B's values, not A's
-        assert.equal(v2.version.value, 'BRAVO', 'B: version is BRAVO (not ALPHA)');
-        assert.equal(v2.magic.value, 2222, 'B: magic is 2222 (not 1111)');
-        assert.equal(v2.beta_val.value, 222, 'B: new param default is 222');
-        assert.equal(v2.frame_num.value, 1, 'B: frame_num exists (new var)');
-
-        // A's vars should NOT appear in B's output
-        assert.equal(v2.marker_val, undefined, 'A\'s marker_val gone in B');
+        assert.equal(r2.msg, 'BRAVO', 'B: msg is BRAVO (not ALPHA)');
+        assert.equal(r2.code, 2222, 'B: code carries beta default (2000+222), not A\'s 1111');
     });
 });
 
@@ -104,7 +104,7 @@ test('after reload, param registry is from the NEW DLL', async () => {
     });
 });
 
-test('after reload, set_param targets the NEW DLL param', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
+test('after reload, set_param targets the NEW DLL param', { timeout: 120000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
@@ -118,77 +118,66 @@ test('after reload, set_param targets the NEW DLL param', { skip: 'vars/preview/
         const sr = await c.nextText(10000);
         assert.equal(sr.ok, true, 'set_param ok');
 
-        // Run — beta_val should reflect the new value
-        const r = await runInspection(c);
-        const v = Object.fromEntries(r.vars.items.map(v => [v.name, v]));
-        assert.equal(v.beta_val.value, 999, 'param update reaches NEW DLL');
+        // Run — the verdict should reflect the new value (2000+999)
+        const r = await runResult(c, 11);
+        assert.equal(r.code, 2999, 'param update reaches NEW DLL');
     });
 });
 
-test('state() persists across A→B reload with different scripts', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars)' }, async () => {
+test('xi::kv() state persists across A→B reload with different scripts', { timeout: 120000 }, async () => {
     await withBackend(async (c) => {
         await c.nextText();
 
-        // Write script C that writes to state
+        // Script C writes to kv (schema 1)
         const scriptC = resolve(tmpDir, 'state_writer.cpp');
         writeFileSync(scriptC, `
 #include <xi/xi.hpp>
+#include <xi/xi_result.hpp>
+XI_KV_SCHEMA(1);
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    int count = xi::state()["reload_count"].as_int(0);
-    xi::state().set("reload_count", count + 1);
-    xi::state().set("last_version", "C");
-    VAR(reload_count, count + 1);
-    VAR(from, std::string("script_C"));
+    long long count = xi::kv().get_i64("reload_count", 0) + 1;
+    xi::kv().set_i64("reload_count", count);
+    xi::kv().set_str("last_version", "C");
+    xi::result((int)count, "script_C");
 }
 `);
 
-        // Write script D that also reads/writes state
+        // Script D also reads/writes kv (same schema → host restores, no drop)
         const scriptD = resolve(tmpDir, 'state_reader.cpp');
         writeFileSync(scriptD, `
 #include <xi/xi.hpp>
+#include <xi/xi_result.hpp>
+XI_KV_SCHEMA(1);
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    int count = xi::state()["reload_count"].as_int(0);
-    xi::state().set("reload_count", count + 1);
-    xi::state().set("last_version", "D");
-    VAR(reload_count, count + 1);
-    VAR(from, std::string("script_D"));
-    VAR(prev_version, xi::state()["last_version"].as_string("none"));
+    std::string prev = xi::kv().get_str("last_version", "none");
+    long long count = xi::kv().get_i64("reload_count", 0) + 1;
+    xi::kv().set_i64("reload_count", count);
+    xi::kv().set_str("last_version", "D");
+    xi::result((int)count, "script_D:prev=" + prev);
 }
 `);
 
-        // Run C twice
+        // Run C three times
         assert.equal((await compileScript(c, scriptC)).ok, true);
-        await runInspection(c); // count 0→1
-        await runInspection(c); // count 1→2
+        await runResult(c, 20); // count 0→1
+        await runResult(c, 21); // count 1→2
+        const r3 = await runResult(c, 22); // count 2→3
+        assert.equal(r3.code, 3, 'C ran 3 times');
+        assert.equal(r3.msg, 'script_C');
 
-        let r = await runInspection(c); // count 2→3
-        let v = Object.fromEntries(r.vars.items.map(v => [v.name, v]));
-        assert.equal(v.reload_count.value, 3, 'C ran 3 times');
-
-        // Reload to D — state should carry over
+        // Reload to D — kv state should carry over (capture off old DLL,
+        // restore into new; same XI_KV_SCHEMA so no state_dropped)
         assert.equal((await compileScript(c, scriptD)).ok, true);
 
-        r = await runInspection(c); // count 3→4
-        v = Object.fromEntries(r.vars.items.map(v => [v.name, v]));
-        assert.equal(v.reload_count.value, 4, 'D continues from C\'s state (3→4)');
-        assert.equal(v.from.value, 'script_D', 'running D not C');
+        const r4 = await runResult(c, 23); // count 3→4
+        assert.equal(r4.code, 4, 'D continues from C\'s kv state (3→4)');
+        assert.equal(r4.msg, 'script_D:prev=C',
+            'D read C\'s last_version out of the restored kv store');
     });
 });
 
-test('reset thunk is from new DLL (ValueStore clears properly)', { skip: 'vars/preview/subscribe removed with VAR (branch refactor/remove-var-core) — pending preview plugin (observed via vars var-count)' }, async () => {
-    await withBackend(async (c) => {
-        await c.nextText();
-
-        // A produces 3 vars
-        assert.equal((await compileScript(c, scriptA)).ok, true);
-        const r1 = await runInspection(c);
-        assert.equal(r1.vars.items.length, 3, 'A has 3 vars');
-
-        // B produces 4 vars — if reset didn't work, we'd see 3+4=7
-        assert.equal((await compileScript(c, scriptB)).ok, true);
-        const r2 = await runInspection(c);
-        assert.equal(r2.vars.items.length, 4, 'B has exactly 4 vars (not 3+4=7)');
-    });
-});
+// ("reset thunk is from new DLL (ValueStore clears properly)" was removed:
+// the VAR/ValueStore surface it observed no longer exists — the per-run
+// verdict + param-registry tests above cover the new-DLL-thunks property.)

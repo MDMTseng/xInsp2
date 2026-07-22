@@ -1,4 +1,0 @@
-{
-  "plugin": "line_fit",
-  "config": { "baseline_x": 0, "baseline_y": 0, "baseline_angle": 0, "line_x1": 10, "line_y1": 0, "line_x2": 10, "line_y2": 40 }
-}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/health-changed.schema.json",
+  "title": "health_changed event (xi.health/1)",
+  "description": "Fires on a top-level state transition (no `component` field) or on a runtime component-health change (carries the one changed component; consumers fold it onto their last get_health snapshot). Exercised by protocol/fixtures/health_changed.json (component form) and protocol/fixtures/health_changed_state.json (state-transition form).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "name", "data"],
+  "properties": {
+    "type": { "type": "string", "const": "event" },
+    "name": { "type": "string", "const": "health_changed" },
+    "data": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schema", "state", "since_ms", "ts_ms"],
+      "properties": {
+        "schema": { "type": "string", "const": "xi.health/1" },
+        "state": {
+          "type": "string",
+          "description": "Open set — see health-snapshot.schema.json.",
+          "examples": ["boot", "project_loaded", "running", "degraded", "draining", "fault"]
+        },
+        "since_ms": { "type": "integer" },
+        "ts_ms": { "type": "integer" },
+        "component": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["kind", "name", "health"],
+          "properties": {
+            "kind": { "type": "string" },
+            "name": { "type": "string" },
+            "health": { "type": "string" },
+            "reason_code": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

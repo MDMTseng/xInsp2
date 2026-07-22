@@ -1,0 +1,10 @@
+{
+  "$comment": "Live-wire discriminator — the routing table for the THIRD contract leg (contract/live_conformance.py). fixtures-map.json routes a FILE to a schema; this file routes a LIVE message's (type + command) to a schema. Events are NOT listed here: the harness derives the event->schema routing automatically from each schema's own `type`/`name` consts (contract/README.md: 'A real build would generate that dispatch table from the set of message schemas'), so a new event schema is picked up with zero edits here. What the harness CANNOT derive is which schema a `rsp` satisfies, because an rsp carries no `name` on the wire (only an echoed correlation `id`) — the discriminator is the ORIGINATING COMMAND, known only to the caller. That command->schema mapping lives here. `validate` says whether the schema describes the whole rsp ENVELOPE (type/id/ok/data) or just the rsp `data` PAYLOAD (get_health's health snapshot is a bare payload). Every rsp is ALSO validated against the generic rsp.schema.json envelope regardless of this map.",
+  "rsp": {
+    "dispatch_stats": { "schema": "dispatch-stats.schema.json", "validate": "envelope" },
+    "metrics":        { "schema": "rsp-metrics.schema.json",     "validate": "envelope" },
+    "commit_group":   { "schema": "rsp-commit-group.schema.json", "validate": "envelope" },
+    "load_project":   { "schema": "rsp-load-project.schema.json", "validate": "envelope" },
+    "get_health":     { "schema": "health-snapshot.schema.json",  "validate": "data" }
+  }
+}

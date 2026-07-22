@@ -68,7 +68,14 @@ void cmd_rescan_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
         const std::string& dir = dir_opt ? *dir_opt : g_eng.plugins_dir;
         int n = 0;
         if (!dir.empty() && std::filesystem::exists(dir)) {
-            n = g_eng.plugin_mgr.scan_plugins(dir);
+            // RT5/J2: scan_plugins' "moved" branch FreeLibrary's a plugin DLL that a
+            // live CAbiInstanceAdapter may still hold (its dll_ + destroy_fn_) — the
+            // same un-quiesced DLL-teardown class as remove_instance. Quiesce dispatch
+            // for the scan so no worker is mid-call into an about-to-be-unmapped
+            // instance. (Also bounds J6: dispatch is paused, so holding mu_ across a
+            // certify subprocess can't stall the emit hot path.)
+            auto _rescan_guard = quiesce_dispatch_for_lifecycle_op_("rescan_plugins", &srv);
+            n = g_eng.plugin_mgr.scan_plugins(_rescan_guard.token(), dir);
         }
         std::string out = "{\"scanned\":";
         xp::json_escape_into(out, dir);
@@ -76,36 +83,11 @@ void cmd_rescan_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
         send_rsp_ok(srv, id, out);
 }
 
-void cmd_unquarantine_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        // Part III G2.3 — operator un-quarantine. Clears the G1 .xi_certify.json
-        // verdict (crashed/quarantined) for a plugin so the next scan re-certifies
-        // it from scratch. Accepts {"name": "<plugin>"} (resolved to its folder via
-        // the last scan) or {"dir": "<folder>"}. Re-scans the default plugins dir
-        // afterwards so a now-clean plugin is re-armed without a restart.
-        auto pname = xp::get_string_field(parsed->args_json, "name");
-        auto pdir  = xp::get_string_field(parsed->args_json, "dir");
-        std::string key = pname ? *pname : (pdir ? *pdir : std::string());
-        if (key.empty()) { send_rsp_err(srv, id, "missing name or dir"); return; }
-        bool cleared = g_eng.plugin_mgr.unquarantine_plugin(key);
-        if (!cleared) { send_rsp_err(srv, id, "no quarantine found for: " + key); return; }
-        int rearmed = 0;
-        if (!g_eng.plugins_dir.empty() && std::filesystem::exists(g_eng.plugins_dir))
-            rearmed = g_eng.plugin_mgr.scan_plugins(g_eng.plugins_dir);
-        std::string out = "{\"unquarantined\":";
-        xp::json_escape_into(out, key);
-        out += ",\"rearmed\":" + std::to_string(rearmed) + "}";
-        send_rsp_ok(srv, id, out);
-}
-
-void cmd_load_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        auto pname = xp::get_string_field(parsed->args_json, "name");
-        if (!pname) { send_rsp_err(srv, id, "missing name"); return; }
-        if (g_eng.plugin_mgr.load_plugin(*pname)) {
-            send_rsp_ok(srv, id);
-        } else {
-            send_rsp_err(srv, id, "failed to load plugin: " + *pname);
-        }
-}
+/* [cmd_unquarantine_plugin_ and cmd_load_plugin_ RETIRED at THE CUT (v12) —
+ * app-team confirmed, doc 11. Zero in-tree callers; rescan_plugins re-arms a
+ * cleaned plugin, and instances load their plugins on project open. The
+ * PluginManager::unquarantine_plugin/load_plugin methods remain for internal
+ * use; only the WS command surface is retired.] */
 
 void cmd_export_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Package a project plugin as a deployable folder. Compiles Release;
@@ -121,7 +103,7 @@ void cmd_export_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::Parse
         // export_project_plugin recompiles in Release; quiesce so no dispatcher
         // worker is mid-call into the same plugin's instances.
         auto _export_guard = quiesce_dispatch_for_lifecycle_op_("export_project_plugin", &srv);  // resumes at block end
-        auto er = g_eng.plugin_mgr.export_project_plugin(*pname, *dest);
+        auto er = g_eng.plugin_mgr.export_project_plugin(_export_guard.token(), *pname, *dest);
         std::string data = "{\"plugin\":";
         xp::json_escape_into(data, *pname);
         data += ",\"dest\":";
@@ -130,12 +112,9 @@ void cmd_export_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::Parse
         if (er.ok) {
             send_rsp_ok(srv, id, data);
         } else {
-            xp::Rsp r;
-            r.id = id;
-            r.ok = false;
-            r.error = er.error;
-            r.data_json = data;
-            srv.send_text(r.to_json());
+            // Wave-2 #2: the data-carrying send_rsp_err owns the recent-errors
+            // push this hand-rolled Rsp used to forget.
+            send_rsp_err(srv, id, er.error, data);
             if (!er.build_log.empty()) {
                 xp::LogMsg lm;
                 lm.level = "error";
@@ -162,7 +141,7 @@ void cmd_recompile_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::Pa
         // on those instances from a dispatcher worker would dereference
         // freed code. Drain first.
         auto guard = quiesce_dispatch_for_lifecycle_op_("recompile_project_plugin", &srv);
-        auto rr = g_eng.plugin_mgr.recompile_project_plugin(*pname);
+        auto rr = g_eng.plugin_mgr.recompile_project_plugin(guard.token(), *pname);
         // Build diagnostics JSON — same shape as compile_and_load.
         std::string diag_json = "[";
         for (size_t i = 0; i < rr.diagnostics.size(); ++i) {
@@ -185,16 +164,27 @@ void cmd_recompile_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::Pa
             if (i) data += ",";
             xp::json_escape_into(data, rr.reattached_instances[i]);
         }
-        data += "]}";
+        data += "]";
+        // Round-3 S2: an ok reply may carry a non-fatal warning (additive field,
+        // same convention as load_project's *_warnings arrays) — e.g. "old
+        // module still mapped" when the versioned new DLL loaded fine but a
+        // lingering worker pins the old image.
+        if (!rr.warning.empty()) {
+            data += ",\"warning\":";
+            xp::json_escape_into(data, rr.warning);
+        }
+        data += "}";
         if (rr.ok) {
             send_rsp_ok(srv, id, data);
+            if (!rr.warning.empty()) {
+                xp::LogMsg lm;
+                lm.level = "warn";
+                lm.msg = "recompile " + *pname + ": " + rr.warning;
+                srv.send_text(lm.to_json());
+            }
         } else {
-            xp::Rsp r;
-            r.id = id;
-            r.ok = false;
-            r.error = rr.error;
-            r.data_json = data;
-            srv.send_text(r.to_json());
+            // Wave-2 #2: same as export above — send_rsp_err owns the push.
+            send_rsp_err(srv, id, rr.error, data);
             if (!rr.build_log.empty()) {
                 xp::LogMsg lm;
                 lm.level = "error";
@@ -235,6 +225,7 @@ void cmd_rebuild_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         }
         auto guard = quiesce_dispatch_for_lifecycle_op_("rebuild_plugins", &srv);
         auto rep = g_eng.plugin_mgr.rebuild_cmake_plugins(
+            guard.token(),
             cmake_exe ? *cmake_exe : std::string("cmake"),
             config    ? *config    : std::string("Release"),
             only);

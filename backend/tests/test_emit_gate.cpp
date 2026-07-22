@@ -282,6 +282,59 @@ static void test_idempotency_and_completion_mode() {
     }
 }
 
+// ---------- P1: verdict + actuation are one coupled output ----------
+//
+// docs/new_gen/21-redteam-load-findings.md P1: a successful frame's staged sink
+// pushes (PLC actuation) and its run_result verdict must be delivered TOGETHER or
+// not at all — a reported verdict must never imply an actuation that didn't
+// happen. Both are gated by xi::emit_success_outputs(inspect_ok, my_turn); this
+// test pins that predicate AND proves the coupling under the real stop-wake lane
+// shape (every parked seq woken at once by a stop delivers NEITHER output).
+static void test_p1_verdict_actuation_consistency() {
+    SECTION("P1: verdict and actuation are suppressed together on a stop-wake");
+
+    // Truth table: success delivers both ONLY on its own turn; a stop-wake
+    // (my_turn=false) delivers neither; a failed inspect delivers neither via
+    // this predicate (its crash Result is emitted on a separate path).
+    CHECK(xi::emit_success_outputs(/*ok=*/true,  /*my_turn=*/true)  == true);
+    CHECK(xi::emit_success_outputs(/*ok=*/true,  /*my_turn=*/false) == false);
+    CHECK(xi::emit_success_outputs(/*ok=*/false, /*my_turn=*/true)  == false);
+    CHECK(xi::emit_success_outputs(/*ok=*/false, /*my_turn=*/false) == false);
+
+    // Lane shape: a permanent hole at seq 0 parks seqs 1..PARKED; a stop wakes
+    // them all with my_turn=false. Each computes BOTH outputs through the shared
+    // predicate; the invariant is that for every seq, verdict==actuation (both
+    // dropped) — never a verdict without its actuation.
+    const int PARKED = 48;
+    xi::EmitGate gate;
+    std::atomic<bool> keep_going{true};
+    std::atomic<int> inconsistent{0};   // seqs that delivered a verdict but not actuation (or vice-versa)
+    std::atomic<int> delivered{0};      // seqs that delivered BOTH
+
+    std::vector<std::thread> parked;
+    for (int i = 1; i <= PARKED; ++i) {
+        parked.emplace_back([&, seq = (int64_t)i] {
+            xi::EmitTurn turn(&gate, seq, &keep_going);
+            bool my_turn = turn.wait_turn();
+            // The production emit-half: staged actuation flush is gated on my_turn;
+            // the verdict is gated on the SAME predicate — so they cannot diverge.
+            bool actuation = my_turn;                                 // flush_staged_emits_ ran?
+            bool verdict   = xi::emit_success_outputs(true, my_turn); // run_result emitted?
+            if (actuation != verdict) inconsistent.fetch_add(1, std::memory_order_relaxed);
+            if (actuation && verdict) delivered.fetch_add(1, std::memory_order_relaxed);
+        });
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    keep_going.store(false);
+    { std::lock_guard<std::mutex> lk(gate.mu); }
+    gate.cv.notify_all();
+
+    for (auto& t : parked) t.join();
+    CHECK(inconsistent.load() == 0);    // never a verdict implying a phantom actuation
+    CHECK(delivered.load() == 0);       // the stop suppressed BOTH on every parked seq
+}
+
 int main() {
     std::fprintf(stderr, "=== test_emit_gate (scale=%d) ===\n", stress_scale());
     auto t0 = std::chrono::steady_clock::now();
@@ -290,6 +343,7 @@ int main() {
     test_dtor_backstop_on_early_return();
     test_stop_wakes_parked_waiters();
     test_idempotency_and_completion_mode();
+    test_p1_verdict_actuation_consistency();
 
     auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();

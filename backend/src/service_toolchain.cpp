@@ -76,7 +76,8 @@ void resolve_toolchain_(const std::string& folder) {
 void read_script_deps_(const std::string& folder,
                               std::vector<std::string>& include_dirs,
                               std::vector<std::string>& link_libs,
-                              int& openmp_max_threads) {
+                              int& openmp_max_threads,
+                              bool& allow_raw_omp) {
     if (folder.empty()) return;
     namespace fs = std::filesystem;
     std::ifstream in((fs::path(folder) / "project.json").string());
@@ -108,6 +109,11 @@ void read_script_deps_(const std::string& folder,
     // -1 = on uncapped. Adds /openmp (+ cap macro) in the compiler.
     yyjson_val* omp = yyjson_obj_get(root, "openmp_max_threads");
     if (omp && yyjson_is_num(omp)) openmp_max_threads = yyjson_get_int(omp);
+    // Blessed-concurrency opt-out (adoption map item 11): raw `#pragma omp` in a
+    // script is rejected at compile time by default; an author who accepts the
+    // worker-thread safety rules can set "allow_raw_omp": true to bypass the guard.
+    yyjson_val* raw_omp = yyjson_obj_get(root, "allow_raw_omp");
+    if (raw_omp && yyjson_is_bool(raw_omp)) allow_raw_omp = yyjson_get_bool(raw_omp);
     yyjson_doc_free(doc);
 }
 
@@ -118,6 +124,7 @@ void read_script_deps_(const std::string& folder,
 // TODO(linux): equivalent is building the script .so with -Wl,-rpath plus
 // dlopen; AddDllDirectory has no portable analogue.
 void set_project_dll_search_(const std::string& folder) {
+#ifdef _WIN32
     if (g_eng.proj_dll_dir) { RemoveDllDirectory(g_eng.proj_dll_dir); g_eng.proj_dll_dir = nullptr; }
     if (folder.empty()) return;
     int wn = MultiByteToWideChar(CP_UTF8, 0, folder.c_str(), -1, nullptr, 0);
@@ -126,13 +133,28 @@ void set_project_dll_search_(const std::string& folder) {
     MultiByteToWideChar(CP_UTF8, 0, folder.c_str(), -1, w.data(), wn);
     if (!w.empty() && w.back() == L'\0') w.pop_back();
     g_eng.proj_dll_dir = AddDllDirectory(w.c_str());
+#else
+    // POSIX: no process-wide DLL-search-dir mechanism. A script's external .so
+    // deps are resolved via the compiled module's RPATH/$ORIGIN and
+    // LD_LIBRARY_PATH; this is intentionally a no-op. See TODO(linux) above.
+    (void)folder;
+#endif
 }
 
 // Plugin manager (global)
 
 // (forward-declared above use_process_cb) record a per-instance process() crash.
 void note_instance_crash_(const char* name, const char* why) {
-    if (name) g_eng.plugin_mgr.note_instance_crash(name, why ? why : "process() crashed");
+    if (name) {
+        g_eng.plugin_mgr.note_instance_crash(name, why ? why : "process() crashed");
+        // Health contract: a caught process()/exchange() crash marks the instance
+        // runtime-degraded (the quarantine seed, adoption-map item 14). This is the
+        // FAULT path — rare, off the per-frame verdict path — so touching the
+        // health mutex here is allowed. If the system is running this flips the
+        // top-level state to `degraded` and emits health_changed.
+        xi::health().mark_instance_fault(name, xi::CompHealth::Degraded,
+                                         xi::kReasonPluginFault);
+    }
 }
 
 // (forward-declared above use_process_inline_) Part III G2.1 culprit stamp.

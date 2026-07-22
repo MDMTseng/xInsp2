@@ -100,8 +100,12 @@ xi_fuzz_target(fuzz_parse_cmd  fuzz_parse_cmd.cpp  xi_core)
 xi_fuzz_target(fuzz_yyjson     fuzz_yyjson.cpp     yyjson)
 target_include_directories(fuzz_yyjson PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor/yyjson ${CMAKE_SOURCE_DIR}/include)
-# Record::from_json_bytes — the ABI process() JSON decode (links OpenCV via xi_core).
-xi_fuzz_target(fuzz_record_json fuzz_record_json.cpp xi_core)
+# [ABI v12 THE CUT: fuzz_record_json removed — Record::from_json_bytes / the
+#  Record process() JSON decode path was deleted with xi::Record.]
+# Canonical msgpack reader (xi/xi_mp.hpp) — header-only, zero deps, so no libs;
+# just the include dir. The ingress edge's validate()/canonicalize() paths.
+xi_fuzz_target(fuzz_mp fuzz_mp.cpp)
+target_include_directories(fuzz_mp PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 # -------- UBSan build of a subset of the unit suite --------------------------
 # A clang-cl -fsanitize=undefined configuration of the pure (socket-free) unit
@@ -121,7 +125,7 @@ if(XINSP2_FUZZ_UBSAN_TESTS)
             ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
     endfunction()
 
-    xi_ubsan_test(ubsan_record   ${CMAKE_SOURCE_DIR}/tests/test_record.cpp   xi_core)
+    # [ABI v12 THE CUT: ubsan_record removed — tests/test_record.cpp deleted.]
     xi_ubsan_test(ubsan_yyjson   ${CMAKE_SOURCE_DIR}/tests/test_yyjson.cpp   yyjson)
     target_include_directories(ubsan_yyjson PRIVATE
         ${CMAKE_SOURCE_DIR}/vendor/yyjson ${CMAKE_SOURCE_DIR}/include)
@@ -139,8 +143,10 @@ if(XINSP2_FUZZ_UBSAN_TESTS)
             ${CMAKE_CURRENT_BINARY_DIR})
     endfunction()
     xi_ubsan_replay(ubsan_replay_parse_cmd   fuzz_parse_cmd.cpp   xi_core)
-    xi_ubsan_replay(ubsan_replay_record_json fuzz_record_json.cpp xi_core)
+    # [ABI v12 THE CUT: ubsan_replay_record_json removed — fuzz_record_json.cpp deleted.]
     xi_ubsan_replay(ubsan_replay_yyjson      fuzz_yyjson.cpp      yyjson)
     target_include_directories(ubsan_replay_yyjson PRIVATE
         ${CMAKE_SOURCE_DIR}/vendor/yyjson ${CMAKE_SOURCE_DIR}/include)
+    xi_ubsan_replay(ubsan_replay_mp          fuzz_mp.cpp)
+    target_include_directories(ubsan_replay_mp PRIVATE ${CMAKE_SOURCE_DIR}/include)
 endif()

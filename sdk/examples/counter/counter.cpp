@@ -2,7 +2,7 @@
 // counter.cpp — state, persistence, and UI.
 //
 // Demonstrates:
-//   - holding state across frames
+//   - holding state across frames (each pack-door call increments)
 //   - serializing state with get_def / set_def so it survives
 //     hot-reload + project save/load
 //   - a webview UI that triggers commands and displays status
@@ -18,10 +18,11 @@ class Counter : public xi::Plugin {
 public:
     using xi::Plugin::Plugin;
 
-    // Each frame: increment and emit the count.
-    xi::Record process(const xi::Record& /*input*/) override {
+    // The xi.pack@1 door (the sole data plane since the v12 cut). Each call:
+    // increment and answer the running total as an i64 entry.
+    void process(xi::PackIn& /*in*/, xi::PackOut& out) override {
         count_ += step_;
-        return xi::Record().set("count", count_);
+        out.i64("count", count_);
     }
 
     // UI sends:
@@ -59,3 +60,6 @@ private:
 };
 
 XI_PLUGIN_IMPL(Counter)
+// Publish the xi.pack@1 pack-in/pack-out door — required for any plugin that
+// overrides process(PackIn&, PackOut&). Always after XI_PLUGIN_IMPL.
+XI_PLUGIN_PACK_DOOR(Counter)

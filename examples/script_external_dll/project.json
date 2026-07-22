@@ -1,6 +1,0 @@
-{
-  "name": "script_external_dll",
-  "script": "inspect.cpp",
-  "include_dirs": ["include"],
-  "link_libs": ["extmath.lib"]
-}

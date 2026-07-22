@@ -11,12 +11,12 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { XiClient } from "../src/ws-client.mjs";
+import { backendExe, skipLiveBackendTest } from "./backend-exe.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const backendExe = resolve(__dirname, "../../backend/build/Release/xinsp-backend.exe");
 const port = 38000 + Math.floor(Math.random() * 20000);
 
-test("XiClient drives the orchestrator verbs end-to-end", { timeout: 30000 }, async () => {
+test("XiClient drives the orchestrator verbs end-to-end", { skip: skipLiveBackendTest, timeout: 30000 }, async () => {
   const child = spawn(backendExe, [`--port=${port}`], { stdio: ["ignore", "ignore", "inherit"] });
   let c;
   try {
@@ -30,8 +30,10 @@ test("XiClient drives the orchestrator verbs end-to-end", { timeout: 30000 }, as
 
     assert.equal((await c.ping()).pong, true, "ping");
 
-    await c.cmd("load_plugin", { name: "config_swap_probe" });
     await c.cmd("create_project", { folder: resolve(tmpdir(), `xi_shim_${Date.now()}`), name: "shim" });
+    // create_instance resolves + loads the plugin by name itself (the standalone
+    // `load_plugin` WS command was retired at THE CUT, v12 — cmd_create_instance_
+    // now calls plugin_mgr.load_plugin internally, surfacing any load error).
     await c.cmd("create_instance", { name: "sw0", plugin: "config_swap_probe" });
 
     // created → state "created"

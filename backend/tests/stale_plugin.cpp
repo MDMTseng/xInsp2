@@ -15,6 +15,12 @@
 //
 #include <cstdint>
 
+#if defined(_WIN32)
+#  define XI_EXPORT __declspec(dllexport)
+#else
+#  define XI_EXPORT __attribute__((visibility("default")))
+#endif
+
 #ifndef STALE_PLUGIN_ABI
 #define STALE_PLUGIN_ABI 10   // default: the immediately-previous ABI (v10)
 #endif
@@ -22,16 +28,16 @@
 extern "C" {
 
 // The stale version this fixture claims — below the v11 min-compat floor.
-__declspec(dllexport) int xi_plugin_abi_version(void) {
+XI_EXPORT int xi_plugin_abi_version(void) {
     return STALE_PLUGIN_ABI;
 }
 
 // A minimal create so the DLL looks like a real plugin (never reached: the ABI
 // gate refuses before the loader resolves the factory).
-__declspec(dllexport) void* xi_plugin_create(const void* /*host*/, const char* /*name*/) {
+XI_EXPORT void* xi_plugin_create(const void* /*host*/, const char* /*name*/) {
     return nullptr;
 }
 
-__declspec(dllexport) void xi_plugin_destroy(void* /*inst*/) {}
+XI_EXPORT void xi_plugin_destroy(void* /*inst*/) {}
 
 } // extern "C"

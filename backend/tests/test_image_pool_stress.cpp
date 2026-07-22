@@ -253,6 +253,82 @@ static void test_mixed_churn() {
     CHECK(pool.stats().handle_count == 0);
 }
 
+// ---------- 6: Diagnostic walk races churn — the stats() UAF -------
+//
+// Provokes external review 08 finding 1: stats() / stats_by_owner() walk the
+// whole slot array and dereference each PoolEntry (owner, pixels.size()) while
+// worker threads free entries under them via release() and release_all_for().
+// Before the deferred-reclamation fix a walker reads a `delete`d entry — a UAF
+// that faults or trips ASAN. After the fix every entry a walk observes is kept
+// alive (frees deferred) for the walk's duration, so this runs clean.
+static void test_stats_walk_vs_churn_race() {
+    SECTION("stats/stats_by_owner walk races create/release/sweep — no UAF");
+    auto& pool = xi::ImagePool::instance();
+
+    std::atomic<bool> stop{false};
+    std::atomic<long> creates{0};
+    std::atomic<long> walks{0};
+
+    constexpr int WORKERS = 6;
+    constexpr int STATS_THREADS = 3;
+    const int DURATION_MS = 500 * stress_scale();
+
+    // Churn workers: each has its own owner id, creates a batch, releases some
+    // handles individually, then release_all_for() sweeps the rest — a steady
+    // stream of frees for the stats walkers to race.
+    std::vector<std::thread> threads;
+    for (int t = 0; t < WORKERS; ++t) {
+        threads.emplace_back([&] {
+            xi::ImagePoolOwnerId owner = xi::ImagePool::alloc_owner_id();
+            std::vector<xi_image_handle> held;
+            held.reserve(64);
+            while (!stop.load(std::memory_order_relaxed)) {
+                {
+                    xi::ImagePool::OwnerGuard g(owner);
+                    for (int i = 0; i < 64; ++i) {
+                        xi_image_handle h = pool.create(8, 8, 3);
+                        if (h) {
+                            held.push_back(h);
+                            creates.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                }
+                // Free half individually (last-ref delete → the racy free path).
+                for (size_t i = 0; i < held.size(); i += 2) pool.release(held[i]);
+                held.clear();
+                // Sweep everything still tagged to this owner (the other half).
+                pool.release_all_for(owner);
+            }
+        });
+    }
+
+    // Stats hammers: multiple concurrent walkers so active_walkers_ > 1 and the
+    // owner read/write race (release_all_for writes owner=0) is exercised too.
+    for (int t = 0; t < STATS_THREADS; ++t) {
+        threads.emplace_back([&] {
+            while (!stop.load(std::memory_order_relaxed)) {
+                auto s = pool.stats(0);
+                auto v = pool.stats_by_owner();
+                volatile uint64_t sink = s.total_bytes;
+                for (auto& e : v) sink += e.total_bytes;
+                (void)sink;
+                walks.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(DURATION_MS));
+    stop.store(true, std::memory_order_relaxed);
+    for (auto& th : threads) th.join();
+
+    std::fprintf(stderr, "  creates=%ld walks=%ld residual=%d\n",
+                 creates.load(), walks.load(), pool.stats().handle_count);
+    // Every worker completes its final sweep before observing stop (stop is
+    // checked at loop top), so the pool must return to empty — proving the
+    // deferred entries were all drained, not leaked.
+    CHECK(pool.stats().handle_count == 0);
+}
+
 int main() {
     std::fprintf(stderr, "=== test_image_pool_stress ===\n");
     auto t0 = std::chrono::steady_clock::now();
@@ -262,6 +338,7 @@ int main() {
     test_owner_sweep_concurrent();
     test_concurrent_addref_release_balanced();
     test_mixed_churn();
+    test_stats_walk_vs_churn_race();
 
     auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();

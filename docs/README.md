@@ -28,7 +28,7 @@ xInsp2 itself?** Jump to [Develop xInsp2](#develop-xinsp2-itself) below.
 ## Exact contracts (`reference/`)
 | Reference | Subject |
 |---|---|
-| [`reference/c-abi.md`](./reference/c-abi.md) | Plugin DLL exports + the `xi_host_api` service table — one ABI doc. |
+| [`reference/c-abi.md`](./reference/c-abi.md) | Plugin DLL exports + the `xi_host_api` service table + the `get_interface` planes (`xi.pack@1`, the capability plane) + optional script exports — one ABI doc. |
 | [`reference/data-types.md`](./reference/data-types.md) | What crosses the boundary: Record + Image + typed I/O + NA. |
 | [`reference/ws-protocol.md`](./reference/ws-protocol.md) | WebSocket commands / replies / events / binary frames. |
 | [`reference/instances.md`](./reference/instances.md) | Instance load / persist / registry / teardown + `instance.json`. |
@@ -36,11 +36,12 @@ xInsp2 itself?** Jump to [Develop xInsp2](#develop-xinsp2-itself) below.
 ## How it works inside (`internals/`) — SHIPPED design-of-record
 | File | Subsystem |
 |---|---|
-| [`internals/data-layer.md`](./internals/data-layer.md) | yyjson-only + in-process doc pass-by-pointer + γ-4 cross-ABI refcount. |
-| [`internals/dispatch.md`](./internals/dispatch.md) | How an emit becomes a run: trigger bus + `emit_record` + dispatch groups. |
+| [`internals/data-layer.md`](./internals/data-layer.md) | yyjson-only + in-process doc pass-by-pointer + γ-4 cross-ABI refcount (Record-era; the Pack plane is the row below). |
+| [`internals/pack-plane.md`](./internals/pack-plane.md) | The v3 Pack data currency: container memory model, seal/registry/owner sweep, `$fault`/provenance contract, dual-carry dispatch, ingress, XEX1-v3. |
+| [`internals/dispatch.md`](./internals/dispatch.md) | How an emit becomes a run: trigger bus + `emit_record`/`emit_pack` + dispatch groups + staged sinks. |
 | [`internals/fe-be.md`](./internals/fe-be.md) | FE supervisor over the BE compute core, crash history. |
 | [`internals/comms-sidecar.md`](./internals/comms-sidecar.md) | Line safety as a comms plugin's own sidecar process (replaces FE PLC safe-state). |
-| [`internals/typed-io.md`](./internals/typed-io.md) | Nominal types over Record + NA propagation + provenance. |
+| [`internals/typed-io.md`](./internals/typed-io.md) | Typed, compile-checked keyed reads on the pack plane (`_keys.gen.h` constants + script-side `ScriptTypedPack`) + the contract codegen; the retired Record typed-I/O layer kept as labeled history. |
 
 ## Planned / not scheduled (`roadmap/`)
 | File | Subject |
@@ -55,7 +56,7 @@ For working **on** the framework (not just authoring a project on it):
 |---|---|
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | The "where do I start" doc: prerequisites, first build (backend **and** extension), the full pre-push test sweep, branch / commit / PR / coding style, doc culture. |
 | [`guides/build-and-run.md`](./guides/build-and-run.md) | Toolchain setup, build from source, and the edit→run dev loop in detail. |
-| [`testing.md`](./testing.md) | The whole test surface — C++ unit (`ctest`), Node WS suites, VS Code E2E, the `examples/qa_*` drivers — and how to add a test. |
+| [`testing.md`](./testing.md) | The whole test surface — C++ unit (`ctest`), Node WS suites, VS Code E2E, the `qa/qa_*` drivers — and how to add a test. |
 | [`guides/write-a-plugin.md`](./guides/write-a-plugin.md) | Authoring, building (in-project + standalone `cmake`), UI-testing, and exporting a plugin. |
 | [`guides/deploy.md`](./guides/deploy.md) | The `--aot` export bundle (`tools/export_bundle.py`) — ship to a PC with no compiler. |
 
@@ -75,6 +76,7 @@ that file. (No `status.md` ↔ `architecture.md` re-statement to keep in sync.)
 | A plugin DLL export or an `xi_host_api` entry | `reference/c-abi.md` |
 | What crosses the boundary (Record / Image / typed I/O / NA) | `reference/data-types.md` (+ `internals/typed-io.md` if it's the mechanics) |
 | Instance load / persist / `instance.json` | `reference/instances.md` |
+| The pack plane (container / door / `$`-key contract / ingress / XEX1) | `internals/pack-plane.md` (+ `reference/c-abi.md` §6 if the vtable changed) |
 | A data-layer / dispatch / FE-BE internal | the matching `internals/*.md` |
 | A user-facing workflow (build, script, plugin, debug, UI, deploy) | the matching `guides/*.md` |
 | Milestone shipped / spike merged | `roadmap/README.md` (the status table) |

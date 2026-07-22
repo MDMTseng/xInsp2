@@ -1,0 +1,9 @@
+{
+  "plugin": "ui_egress",
+  "config": {
+    "fps": 5,
+    "quality": 80,
+    "downscale_mp": 2,
+    "lru_max": 32
+  }
+}

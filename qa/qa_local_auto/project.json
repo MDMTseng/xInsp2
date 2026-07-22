@@ -1,0 +1,26 @@
+{
+  "name": "qa_local_auto",
+  "script": "inspect.cpp",
+  "trigger_policy": {
+    "policy": "any",
+    "window_ms": 1000,
+    "required": [],
+    "leader": ""
+  },
+  "instances": [
+    {
+      "name": "codec",
+      "plugin": "imgcodec"
+    },
+    {
+      "name": "cam",
+      "plugin": "local_image_source"
+    }
+  ],
+  "plugins": {
+    "local_image_source": {
+      "path": "local_image_source",
+      "compile": true
+    }
+  }
+}

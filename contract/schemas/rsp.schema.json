@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xinsp.dev/contract/schemas/rsp.schema.json",
+  "title": "rsp envelope (backend -> client)",
+  "description": "The generic backend-to-client response frame. `data` is present on success, `error` on failure; both are permissive here because per-command data shapes are modelled in their own schemas (rsp-load-project, rsp-commit-group, rsp-metrics, dispatch-stats). This generic schema validates the OUTER contract that holds for every rsp regardless of command. NOTE: the subset cannot express 'data XOR error keyed on ok' (that needs if/then or oneOf, both banned) — so this schema asserts only the envelope invariants and leaves the ok/data/error correlation to the per-command schemas and to the consumer. That gap is a documented finding.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "id", "ok"],
+  "properties": {
+    "type": { "type": "string", "const": "rsp" },
+    "id": { "type": "integer", "description": "Correlation id, echoes the cmd." },
+    "ok": { "type": "boolean" },
+    "data": { "type": "object", "additionalProperties": true },
+    "error": { "type": "string" }
+  }
+}

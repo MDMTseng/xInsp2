@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const extensionDir = resolve(__dirname, '..');
 const testRunner   = resolve(__dirname, 'e2e', 'index.cjs');
-const workspace    = resolve(__dirname, '..', '..', 'examples');
+const workspace    = resolve(__dirname, '..', '..', 'qa');
 
 process.env.XINSP2_E2E_SUITE = 'user_journey';
 

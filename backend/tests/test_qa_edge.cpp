@@ -24,7 +24,8 @@
 #include <xi/xi_crash_report.hpp>
 #include <xi/xi_crash_history.hpp>
 #include <xi/xi_fe_status.hpp>
-#include <xi/xi_safe_state.hpp>
+#include <xi/xi_be_health.hpp>
+#include <xi/xi_be_exit.hpp>
 
 namespace fs = std::filesystem;
 
@@ -66,7 +67,7 @@ static fs::path scratch(const char* tag) {
 }
 
 int main() {
-    using xi::SafeStateEvent;
+    using xi::BeExitEvent;
 
     // CR-U1: parse a known-good report -> fills exception/module/last_phase.
     {
@@ -79,7 +80,7 @@ int main() {
         write_file(d / "be.log",
                    "[backend] booting\n"
                    "[backend] FATAL — minidump: " + dmp.string() + "\n");
-        SafeStateEvent ev;
+        BeExitEvent ev;
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "be.log").string(), ev));
         CHECK(ev.exception_name == "ACCESS_VIOLATION");
         CHECK(ev.faulting_module == "plugin_v0.dll");
@@ -100,7 +101,7 @@ int main() {
                    R"("context":{"last_phase":""},)"
                    R"("threads":[{"last_phase":"idle"},{"last_phase":"inspect"},{"last_phase":"teardown"}]})");
         write_file(d / "be.log", "minidump: " + dmp.string() + "\n");
-        SafeStateEvent ev;
+        BeExitEvent ev;
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "be.log").string(), ev));
         CHECK(ev.last_phase == "inspect");
         CHECK(ev.exception_name == "ACCESS_VIOLATION");
@@ -111,7 +112,7 @@ int main() {
         fs::path d = scratch("u3");
         write_file(d / "be.log",
                    "[backend] booting\n[backend] healthy (port up)\n[backend] shutting down\n");
-        SafeStateEvent ev;
+        BeExitEvent ev;
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "be.log").string(), ev));
         CHECK(ev.report_path.empty());
         CHECK(ev.exception_name.empty());
@@ -122,7 +123,7 @@ int main() {
     // CR-U3b: be.log itself missing -> no throw, everything empty.
     {
         fs::path d = scratch("u3b");
-        SafeStateEvent ev;
+        BeExitEvent ev;
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "does-not-exist.log").string(), ev));
         CHECK(ev.report_path.empty());
         CHECK(ev.exception_name.empty());
@@ -135,7 +136,7 @@ int main() {
         fs::path dmp = d / "orphan.dmp";
         write_file(dmp, "x");  // .dmp exists, .json deliberately does NOT
         write_file(d / "be.log", "minidump: " + dmp.string() + "\n");
-        SafeStateEvent ev;
+        BeExitEvent ev;
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "be.log").string(), ev));
         CHECK(!ev.report_path.empty());
         CHECK(fs::path(ev.report_path).extension() == ".json");
@@ -153,7 +154,7 @@ int main() {
         write_file(fs::path(dmp).replace_extension(".json"),
                    "{ this is not valid json :: <<>> ");
         write_file(d / "be.log", "minidump: " + dmp.string() + "\n");
-        SafeStateEvent ev;
+        BeExitEvent ev;
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "be.log").string(), ev));
         CHECK(!ev.report_path.empty());
         CHECK(ev.exception_name.empty());
@@ -176,7 +177,7 @@ int main() {
         write_file(d / "be.log",
                    "first run — minidump: " + old_dmp.string() + "\n"
                    "respawn, crashed again — minidump: " + new_dmp.string() + "\n");
-        SafeStateEvent ev;
+        BeExitEvent ev;
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "be.log").string(), ev));
         CHECK(ev.exception_name == "ACCESS_VIOLATION");   // not WRONG_OLD
         CHECK(ev.faulting_module == "plugin_v0.dll");     // not stale.dll
@@ -194,7 +195,7 @@ int main() {
         write_file(fs::path(dmp).replace_extension(".json"),
                    R"({"exception":{"name":"ACCESS_VIOLATION"}})");
         write_file(d / "be.log", "minidump: " + dmp.string() + "  \r\n");  // trailing ws/CR
-        SafeStateEvent ev;
+        BeExitEvent ev;
         CHECK_NOTHROW(xi::enrich_from_crash_report((d / "be.log").string(), ev));
         CHECK(!ev.report_path.empty());
         CHECK(fs::path(ev.report_path).extension() == ".json");
@@ -204,8 +205,8 @@ int main() {
     // CH-U1: a fully-populated event -> all fields present; a Windows path's
     // backslashes are JSON-escaped (\\), the count + cap flag are unquoted.
     {
-        SafeStateEvent ev;
-        ev.reason          = xi::SafeStateReason::BackendExit;
+        BeExitEvent ev;
+        ev.reason          = xi::BeExitReason::BackendExit;
         ev.backend_rc      = (int)0xC0000005;
         ev.exception_name  = "ACCESS_VIOLATION";
         ev.faulting_module = "plugin_v0.dll";
@@ -230,7 +231,7 @@ int main() {
     // CH-U2: empty/default event still yields valid JSON with empty strings and
     // cap_hit=true honored. No throw on empties.
     {
-        SafeStateEvent ev;  // defaults: reason=BackendExit, all strings empty
+        BeExitEvent ev;  // defaults: reason=BackendExit, all strings empty
         std::string line = xi::crash_history_line(ev, /*consecutive=*/6, /*cap_hit=*/true);
         CHECK(line.find("\"exception\":\"\"") != std::string::npos);
         CHECK(line.find("\"module\":\"\"") != std::string::npos);
@@ -242,7 +243,7 @@ int main() {
     // CH-U3: control chars + quotes in a field are escaped (defensive — phase is
     // attacker-adjacent only via a corrupt report, but the builder must be total).
     {
-        SafeStateEvent ev;
+        BeExitEvent ev;
         ev.last_phase = "a\"b\tc\nd";
         std::string line = xi::crash_history_line(ev, 1, false);
         CHECK(line.find(R"(\"b\tc\nd)") != std::string::npos);  // " \t \n all escaped
@@ -258,7 +259,7 @@ int main() {
         // Tiny cap so a few records trip rotation; no preserve dir for this case.
         xi::CrashHistory hist(jsonl.string(), /*preserve_dir=*/std::string(),
                               /*max_bytes=*/200, /*max_preserved=*/100);
-        SafeStateEvent ev; ev.reason = xi::SafeStateReason::BackendExit;
+        BeExitEvent ev; ev.reason = xi::BeExitReason::BackendExit;
         for (int i = 0; i < 40; ++i) CHECK_NOTHROW(hist.record(ev, i, false));
         // Live file stays bounded (≈ one record past the cap), and a rotated .1
         // generation exists — so total on-disk is bounded, not 40 records growing.
@@ -279,7 +280,7 @@ int main() {
             // just exercise the prune). Cap to 4 preserved files.
             xi::CrashHistory hist((d / "h.jsonl").string(), dumps.string(),
                                   /*max_bytes=*/4u*1024*1024, /*max_preserved=*/4);
-            SafeStateEvent ev; ev.dump_path = dmp.string();
+            BeExitEvent ev; ev.dump_path = dmp.string();
             CHECK_NOTHROW(hist.record(ev, i, false));
         }
         // 6 records each copy a .dmp+.json (12 files) but the dir is pruned to ≤4.
@@ -311,8 +312,8 @@ int main() {
         xi::FeStatus st;
         st.state = "safe"; st.reason = "RespawnLimitExceeded"; st.latched = true;
         st.consecutive = 6; st.respawn_max = 5;
-        xi::SafeStateEvent e;
-        e.reason = xi::SafeStateReason::BackendExit;
+        xi::BeExitEvent e;
+        e.reason = xi::BeExitReason::BackendExit;
         e.backend_rc = (int)0xC0000005;
         e.exception_name = "ACCESS_VIOLATION";
         e.faulting_module = "plugin_v0.dll";
@@ -326,6 +327,53 @@ int main() {
         CHECK(j.find("\"last_event\":{") != std::string::npos);
         CHECK(j.find("\"exception\":\"ACCESS_VIOLATION\"") != std::string::npos);
         CHECK(j.find(R"("dump":"C:\\t\\be.dmp")") != std::string::npos);  // path escaped
+    }
+
+    // ---- BE health mirror: parse_be_health + FeStatus.be_health -------------
+    // The FE reads the BE's health-mirror file (it can't call get_health without
+    // stealing the single WS client slot) and re-exposes it in fe_status. These
+    // pin the parser (BH-U*) and the render (FS-U3).
+    {
+        // BH-U1: a well-formed mirror parses into all three fields.
+        xi::BeHealth bh;
+        CHECK(xi::parse_be_health(
+            R"({"state":"degraded","since_ms":1751430000123,"last_reason":"plugin_fault","ts_ms":1751430000200})",
+            bh));
+        CHECK(bh.valid);
+        CHECK(bh.state == "degraded");
+        CHECK(bh.since_ms == 1751430000123LL);
+        CHECK(bh.last_reason == "plugin_fault");
+
+        // BH-U2: a clean running mirror -> empty reason.
+        xi::BeHealth bh2;
+        CHECK(xi::parse_be_health(R"({"state":"running","since_ms":10,"last_reason":"","ts_ms":11})", bh2));
+        CHECK(bh2.state == "running");
+        CHECK(bh2.last_reason.empty());
+
+        // BH-U3: torn / empty / no-"state" reads are rejected (valid=false), so a
+        // mid-write poll just leaves the last-known health in place.
+        xi::BeHealth bad;
+        CHECK(!xi::parse_be_health("", bad));
+        CHECK(!bad.valid);
+        CHECK(!xi::parse_be_health(R"({"state":"degrad)", bad));       // truncated JSON
+        CHECK(!xi::parse_be_health(R"({"since_ms":5})", bad));         // no state key
+        CHECK(!xi::parse_be_health(R"({"state":""})", bad));           // empty state
+    }
+
+    // FS-U3: FeStatus renders be_health as null until set, then as an object; a
+    // real change is reported by set_be_health (drives the FE's publish-on-change).
+    {
+        xi::FeStatus st;
+        st.state = "healthy";
+        CHECK(st.render().find("\"be_health\":null") != std::string::npos);
+        CHECK(st.set_be_health("running", 1751430000000LL, ""));   // first set -> changed
+        CHECK(!st.set_be_health("running", 1751430000000LL, ""));  // identical -> no change
+        CHECK(st.set_be_health("degraded", 1751430009999LL, "plugin_fault"));  // transition
+        std::string j = st.render();
+        CHECK(j.find("\"be_health\":{") != std::string::npos);
+        CHECK(j.find("\"state\":\"degraded\"") != std::string::npos);
+        CHECK(j.find("\"since_ms\":1751430009999") != std::string::npos);
+        CHECK(j.find("\"last_reason\":\"plugin_fault\"") != std::string::npos);
     }
 
     // Cleanup scratch dirs (best-effort).

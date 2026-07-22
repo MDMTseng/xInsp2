@@ -1,15 +1,23 @@
 #pragma once
 //
 // xi_compress_sink.hpp — indirection so a plugin's host_api->compress_image()
-// can reach the backend's JPEG encoder + cache without xi_core depending on the
-// backend's image-codec layer (opencv / turbojpeg / stb).
+// can reach the backend's JPEG encoder without xi_core depending on the codec
+// layer. This header only declares the sink TYPE + holder; the backend
+// (service_main) installs the real function.
 //
 // Same pattern as xi_status_sink / xi_binary_sink: make_host_api() (in xi_core)
-// wires api.compress_image to call through this sink; the backend (service_main)
-// installs the real encoder, which keeps a process-global N-rotate cache keyed by
-// a content hash of the pixels — so the SAME image compressed by several plugins
-// (or repeatedly) is JPEG-encoded ONCE. No sink installed ⇒ compress_image
+// wires api.compress_image to call through this sink; service_main installs the
+// encoder. At v12 (THE CUT) that installed encoder is CAPABILITY-ONLY — it
+// delegates to the "xi.jpeg.encode" capability (imgcodec) via
+// encode_via_capability and, on a miss, returns 0. There is no in-core encode
+// fallback (xi::encode_jpeg) and no host-side memo cache anymore; dedup is
+// owned by imgcodec's content cache. No sink installed ⇒ compress_image
 // returns 0 (the plugin then encodes itself, if it can).
+//
+// The in-core fallback BODY that this comment used to describe lives in
+// service_main.cpp's compress_sink() lambda, NOT here — gutting it is a
+// service_main edit, not a change to this header (the signature below is
+// frozen; xi_image_pool.hpp's compress_image_impl calls through it verbatim).
 //
 #include <cstdint>
 

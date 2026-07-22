@@ -23,7 +23,7 @@ const assert = require('assert');
 const { sleep, makeShooter, clearOldShots } = require('./journey_helpers.cjs');
 
 const REPO    = path.resolve(__dirname, '..', '..', '..');
-const PROJECT = path.join(REPO, 'examples', 'blob_tracker');
+const PROJECT = path.join(REPO, 'qa', 'blob_tracker');
 const INSTANCE = 'det';
 const PLUGIN   = 'blob_centroid_detector';
 
@@ -78,7 +78,7 @@ async function run() {
     // Open the webui the same way a tree button / Ctrl-click does.
     console.log(`Opening webui for ${INSTANCE} (${PLUGIN})...`);
     await vscode.commands.executeCommand('xinsp2.openInstanceUI', INSTANCE, PLUGIN);
-    // The panel HTML + @vscode-elements bundle need a beat to render.
+    // The panel HTML + in-house xi-* kit bundle need a beat to render.
     await sleep(3000);
 
     assert.ok(webuiTabOpen(),

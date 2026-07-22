@@ -13,14 +13,27 @@
 // Extracted from xi_plugin_manager.hpp — no PluginManager state, so a leaf the
 // manager calls into.
 //
-// TODO(linux): run_cmd_capture has the _WIN32 _popen path; the popen() branch is
-// stubbed pending the Linux port (see linux-port.md).
+// TODO(linux): run_cmd_capture has the _WIN32 xi::proc::spawn_bounded path; the
+// popen() branch is stubbed pending the Linux port (see linux-port.md) — when
+// written, it must carry the same timeout bound (kCmakeBuildTimeoutMs + kill).
 //
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <vector>
+
+#include "xi_proc.hpp"   // round-3 #6: the ONE bounded win32 spawn
+
+#ifdef _WIN32
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <windows.h>
+#else
+#  include <sys/wait.h>   // WIFEXITED / WEXITSTATUS for popen'd cmake
+#endif
 
 namespace xi {
 namespace cmake_build {
@@ -50,22 +63,45 @@ inline uint64_t newest_source_mtime(const std::string& dir) {
     return newest;
 }
 
+#ifdef _WIN32
+// Ceiling on one cmake configure/build invocation. rebuild runs on the sole
+// poll thread while holding the quiesce + manager lock, so a wedged toolchain
+// (hung MSBuild node, AV-locked link output, stuck nvcc) must NOT freeze the
+// control plane indefinitely — same rationale as the script compiler's
+// kCompileTimeoutMs, but larger: a cmake plugin build is a full configure +
+// multi-TU (possibly CUDA) build, not a single cl.exe run.
+static constexpr DWORD kCmakeBuildTimeoutMs = 600000;   // 10 min
+#endif
+
 // Run a command, capturing combined stdout+stderr into *log. Returns the
-// process exit code (or -1 if it couldn't be spawned).
+// process exit code, -1 if it couldn't be spawned, or -2 if it exceeded
+// kCmakeBuildTimeoutMs (the whole child tree is killed and the timeout is
+// noted in *log, so the caller reports a failed build instead of hanging).
 inline int run_cmd_capture(const std::string& cmd, std::string& log) {
 #ifdef _WIN32
-    // _popen routes through cmd.exe; the extra outer quotes keep a quoted
-    // exe path + quoted args parsing correctly.
-    std::string full = "\"" + cmd + " 2>&1\"";
-    FILE* pipe = _popen(full.c_str(), "r");
+    // Same cmd.exe routing _popen used; the outer quotes keep a quoted exe
+    // path + quoted args parsing correctly. Round-3 #6: the spawn mechanics
+    // (kill-on-close job object, suspended start, wall-clock bound, non-
+    // blocking pipe drain) moved verbatim into xi::proc::spawn_bounded — this
+    // shape was the correct one; the script compiler's run_with_env now shares
+    // it instead of carrying its own kill-the-immediate-child-only copy.
+    std::string full = "cmd.exe /C \"" + cmd + "\"";
+    return xi::proc::spawn_bounded(full, kCmakeBuildTimeoutMs, nullptr, &log);
+#else
+    // popen routes through /bin/sh; combined stream via 2>&1, no outer-quote wrap
+    // (the Windows form needs it for cmd.exe's quoted-exe parsing; sh doesn't).
+    // TODO(linux): not yet bounded like the _WIN32 path (kCmakeBuildTimeoutMs +
+    // kill-the-tree). A wedged toolchain here still stalls the control plane; a
+    // fork/exec + poll-timeout + killpg version (cf. certify's fork+waitpid) is
+    // the follow-up.
+    std::string full = cmd + " 2>&1";
+    FILE* pipe = ::popen(full.c_str(), "r");
     if (!pipe) { log += "[failed to spawn: " + cmd + "]\n"; return -1; }
     char buf[4096];
     while (fgets(buf, sizeof(buf), pipe)) log += buf;
-    int rc = _pclose(pipe);
-    return rc;
-#else
-    // TODO(linux): popen(cmd + " 2>&1") — same shape, no outer-quote wrap.
-    (void)cmd; log += "[cmake build unsupported on this platform]\n"; return -1;
+    int rc = ::pclose(pipe);
+    if (rc == -1) return -1;
+    return WIFEXITED(rc) ? WEXITSTATUS(rc) : 128;
 #endif
 }
 
@@ -75,8 +111,9 @@ inline int build_cmake_plugin(const std::string& cmake_exe, const std::string& s
                               const std::string& config, const std::string& xinsp_root,
                               const std::string& opencv_dir, std::string& log) {
     auto build_dir = (std::filesystem::path(src_dir) / "build").string();
-    // The command goes through cmd.exe (_popen). `cmake_exe` and `config` come
-    // from the WS client, so reject shell metacharacters (and a `"` that could
+    // The command goes through cmd.exe (run_cmd_capture's `cmd.exe /C`).
+    // `cmake_exe` and `config` come from the
+    // WS client, so reject shell metacharacters (and a `"` that could
     // break out of quoting) before they reach the shell — command-injection
     // guard, mirrors the cl.exe driver's is_safe_path. Paths are quoted below;
     // Windows paths can't contain `"` and `&`/`^` are inert inside quotes.
@@ -87,10 +124,13 @@ inline int build_cmake_plugin(const std::string& cmake_exe, const std::string& s
         log += "[refused: cmake_exe/config contains shell metacharacters]\n";
         return -1;
     }
-    auto q = [](const std::string& s) { return "\"" + s + "\""; };
+    const auto q = &xi::proc::quote_arg;   // round-3 W2 #7: the shared quoter
     if (!std::filesystem::exists(std::filesystem::path(build_dir) / "CMakeCache.txt")) {
         std::string cfg = q(cmake_exe) + " -S " + q(src_dir) + " -B " + q(build_dir) +
-                          " -A x64 -DXINSP2_ROOT=" + q(xinsp_root);
+                          " -DXINSP2_ROOT=" + q(xinsp_root);
+#ifdef _WIN32
+        // VS multi-config generator: select the x64 platform at configure.
+        cfg += " -A x64";
         // OpenCV: pass the resolved `x64/vcNN/lib` SUBDIR (the level whose
         // OpenCVConfig.cmake actually resolves), NOT the top-level pack dir —
         // forcing the top dir makes OpenCV's runtime auto-detect set
@@ -107,10 +147,23 @@ inline int build_cmake_plugin(const std::string& cmake_exe, const std::string& s
                 }
             }
         }
+#else
+        // POSIX: single-config generator (Make/Ninja) picks the build type at
+        // configure, not build; no `-A` (that is VS-only). OpenCV resolves via
+        // the system CMake package (libopencv-dev) or the OpenCV_DIR env var, so
+        // opencv_dir (a Windows pack layout) is not forced. If it happens to point
+        // at a dir holding OpenCVConfig.cmake, honour it.
+        cfg += " -DCMAKE_BUILD_TYPE=" + config;
+        if (!opencv_dir.empty() &&
+            std::filesystem::exists(std::filesystem::path(opencv_dir) / "OpenCVConfig.cmake"))
+            cfg += " -DOpenCV_DIR=" + q(opencv_dir);
+#endif
         log += "[configure] " + cfg + "\n";
         int rc = run_cmd_capture(cfg, log);
         if (rc != 0) return rc;
     }
+    // --config is honoured by multi-config generators (VS) and ignored (with a
+    // benign note) by single-config ones, where the build type was set above.
     std::string bld = q(cmake_exe) + " --build " + q(build_dir) + " --config " + q(config);
     log += "[build] " + bld + "\n";
     return run_cmd_capture(bld, log);

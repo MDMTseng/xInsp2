@@ -11,23 +11,17 @@
 // wrapping layer.
 //
 
-#ifdef _WIN32
-  #ifndef NOMINMAX
-    #define NOMINMAX
-  #endif
-  #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
-  #endif
-  #include <windows.h>
-#endif
+#include "xi_dynlib.hpp"          // HMODULE/LoadLibrary/GetProcAddress/FreeLibrary (win32 or dlopen shim)
 
 #include "xi_abi.h"
+#include "xi_cap_guard.hpp"       // capability plane: data-plane mark (doc 14 pilot)
+#include "xi_fault_policy.hpp"    // OnFault (per-instance post-fault policy, item 14)
 #include "xi_image_pool.hpp"
 #include "xi_instance.hpp"
-#include "xi_record.hpp"          // γ: yyjson_layout_stamp() for the doc-pointer gate
-#include "xi_record_schema.hpp"   // OQ-7: opt-in static Record field contract
 
+#include <atomic>
 #include <condition_variable>
+#include <shared_mutex>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -38,22 +32,24 @@
 
 namespace xi {
 
-// Plugin ABI compatibility check. Two gates, run at load (caller FreeLibrary +
-// skip + record the warning on a false return):
-//   1. ABI VERSION — reads xi_plugin_abi_version(); a plugin requesting a newer
-//      ABI than the host provides is refused, as is one OLDER than
-//      XI_ABI_MIN_COMPAT (built against a pre-layout-break xi_host_api — see the
-//      macro in xi_abi.h). A pre-versioning plugin (no export) is treated as v1,
-//      so it too falls below the floor and is refused.
-//   2. yyjson LAYOUT (γ-4) — reads xi_yyjson_abi(); if it doesn't match the
-//      host's stamp (different yyjson build/version) or is absent, the plugin can
-//      only run the slow JSON-serialize path on every dispatch. We REFUSE it by
-//      default so that perf cliff is visible, unless the manifest opted in with
-//      `"json_fallback": true` (json_fallback_opt_in) — then it loads on the JSON
-//      path with a one-shot warning.
+// Plugin ABI compatibility check — the ABI VERSION gate, run at load (caller
+// FreeLibrary + skip + record the warning on a false return). Reads
+// xi_plugin_abi_version(): a plugin requesting a newer ABI than the host
+// provides is refused, as is one OLDER than XI_ABI_MIN_COMPAT (built against a
+// pre-layout-break xi_host_api — see the macro in xi_abi.h). A pre-versioning
+// plugin (no export) is treated as v1, so it too falls below the floor and is
+// refused.
+//
+// [ABI v12 — THE CUT] The former γ-4 yyjson-LAYOUT gate is GONE: a v12 plugin
+// has no yyjson doc path (the Record doc-pointer dispatch was deleted; the data
+// plane is the xi.pack@1 door), so there is nothing to gate on. The
+// `json_fallback_opt_in` parameter is retained for ABI/call-site stability but
+// no longer consulted. A plugin loads iff its ABI version passes min-compat and
+// it publishes what it needs (the required-capability handshake below).
 inline bool plugin_abi_compatible(HMODULE dll, const std::string& plugin_name,
                                   bool json_fallback_opt_in,
                                   std::string* err_msg = nullptr) {
+    (void)json_fallback_opt_in;   // THE CUT: no yyjson-layout gate remains
     using AbiVerFn = int (*)();
     auto fn = reinterpret_cast<AbiVerFn>(GetProcAddress(dll, "xi_plugin_abi_version"));
     int v = fn ? fn() : 1;
@@ -71,25 +67,6 @@ inline bool plugin_abi_compatible(HMODULE dll, const std::string& plugin_name,
                                 "memory) — rebuild it against the current ABI v"
                               + std::to_string(XI_ABI_VERSION);
         return false;
-    }
-    // γ-4 yyjson layout gate.
-    auto yfn = reinterpret_cast<uint32_t(*)()>(GetProcAddress(dll, "xi_yyjson_abi"));
-    bool layout_ok = yfn && (yfn() == xi::yyjson_layout_stamp());
-    if (!layout_ok) {
-        if (!json_fallback_opt_in) {
-            if (err_msg) *err_msg = "plugin '" + plugin_name + "' has an incompatible "
-                "yyjson layout (" + (yfn ? "different yyjson build/version"
-                                         : "no xi_yyjson_abi export")
-                + ") — it can only run the slow JSON-serialize path, not the "
-                  "zero-copy doc path. Rebuild it against the host's vendored "
-                  "yyjson, or set \"json_fallback\": true in its plugin.json to "
-                  "allow the JSON path.";
-            return false;
-        }
-        std::fprintf(stderr,
-            "[xinsp2] '%s': yyjson layout mismatch — running on JSON fallback "
-            "(json_fallback opt-in; serializes every dispatch)\n",
-            plugin_name.c_str());
     }
     return true;
 }
@@ -117,14 +94,13 @@ struct PluginInfo {
     // (the default) the host serializes calls per instance with a mutex, so a
     // parallel dispatch pool (parallelism.dispatch_threads > 1) is safe by
     // default — only plugins that opt in get true per-instance parallelism.
-    // See docs/guides/write-a-script.md (parallelism) + plugin-abi.md.
+    // See docs/guides/write-a-script.md (parallelism) + docs/guides/write-a-plugin.md.
     bool        reentrant = false;
-    // Opt-in (plugin.json `"json_fallback": true`): allow this plugin to load
-    // even when its yyjson layout doesn't match the host's — it then runs the
-    // slow JSON-serialize path on every dispatch instead of the zero-copy doc
-    // path. Without it, a layout mismatch (or a plugin with no xi_yyjson_abi
-    // export) is REFUSED at load so the perf cliff is never silent. See
-    // plugin_abi_compatible / docs/reference/c-abi.md.
+    // [ABI v12 — THE CUT] Vestigial. Parsed from plugin.json `"json_fallback"`
+    // for manifest back-compat, but NO LONGER CONSULTED: the yyjson-layout load
+    // gate it opted out of was deleted with the Record doc path (a v12 plugin's
+    // data plane is the xi.pack@1 door — no yyjson doc crosses the ABI). Kept as
+    // a field so an older manifest carrying the key still parses cleanly.
     bool        json_fallback = false;
     // Build mode (plugin.json `"build"`): `"source"` (default) = the backend
     // compiles the plugin's .cpp with cl.exe in-place (PluginDev flags). `"cmake"`
@@ -141,6 +117,22 @@ struct PluginInfo {
     // FRAME order even under parallel dispatch. Fire-and-forget: the process()
     // reply is dropped. See run_one_inspection / docs/reference/c-abi.md.
     bool        is_sink = false;
+    // Informational lib-plugin marker (plugin.json `"lib": true`, doc 14): a
+    // capability provider with NO data plane — never wired as a pipeline input/
+    // output. Parsed for documentation + as a sanity signal; the autoload gate
+    // below is the operative flag.
+    bool        is_lib = false;
+    // V3 machine-level autoload (plugin.json `"autoload": true`, doc 14/19 V3).
+    // A `lib` capability provider marked autoload is instantiated ONCE at service
+    // boot under a stable MACHINE owner (PluginManager::machine_instances_), so
+    // its capabilities are registered WITHOUT any project declaring a per-instance
+    // (E1 second cause, doc 06 §6). Machine-scoped: it persists across project
+    // open/close. A project instance of the same plugin still takes precedence —
+    // it evicts the machine provider before its own factory runs (no double-
+    // register), and the machine provider is reinstated when the project provider
+    // goes away. Only meaningful together with `lib` (a data-plane plugin has no
+    // capabilities to autoload).
+    bool        autoload = false;
     std::string folder_path;   // absolute path to plugin folder
     std::string ui_path;       // absolute path to ui/ folder (if has_ui)
     HMODULE     handle = nullptr;
@@ -162,6 +154,12 @@ struct PluginInfo {
     // majority of plugins, which depend only on the always-present legacy surface.
     std::vector<IfaceReq> required_ifaces;
     std::vector<IfaceReq> optional_ifaces;
+
+    // Post-fault policy DEFAULT (plugin.json `"on_fault"`: "reuse" | "reinit" |
+    // "refuse"). item 14 — what happens to an instance whose process() faults and
+    // is caught. `reuse` (the default) keeps today's behavior. A per-instance
+    // instance.json `"on_fault"` overrides this. See xi_fault_policy.hpp.
+    OnFault default_on_fault = OnFault::Reuse;
 
     // New C ABI factory: void* (host_api, name)
     using CFactoryFn = void* (*)(const xi_host_api* host, const char* name);
@@ -264,47 +262,95 @@ public:
         get_def_fn_  = reinterpret_cast<xi_plugin_get_def_fn>(GetProcAddress(dll_, "xi_plugin_get_def"));
         set_def_fn_  = reinterpret_cast<xi_plugin_set_def_fn>(GetProcAddress(dll_, "xi_plugin_set_def"));
         destroy_fn_  = reinterpret_cast<xi_plugin_destroy_fn>(GetProcAddress(dll_, "xi_plugin_destroy"));
-        process_fn_  = reinterpret_cast<xi_plugin_process_fn>(GetProcAddress(dll_, "xi_plugin_process"));
         // ABI v7 (optional — present only if the plugin opted in with
         // XI_PLUGIN_STAGED). Their presence IS the opt-in signal: a plugin that
         // exports prepare promises it touches only its staging slot, so we may
         // call it ungated (concurrent with process). Absent → gated set_def / no-op.
         prepare_fn_  = reinterpret_cast<xi_plugin_prepare_fn>(GetProcAddress(dll_, "xi_plugin_prepare"));
         commit_fn_   = reinterpret_cast<xi_plugin_commit_fn>(GetProcAddress(dll_, "xi_plugin_commit"));
-        // OQ-7 (optional): capture the plugin's declared Record field contract at
-        // LOAD time, once, so a composer can validate the wired pipeline up front
-        // (see xi_record_schema.hpp). Absent export → schema stays undeclared and
-        // the plugin keeps its current schemaless behaviour.
-        if (auto schema_fn = reinterpret_cast<xi_plugin_record_schema_fn>(
-                GetProcAddress(dll_, "xi_plugin_record_schema"))) {
-            std::vector<char> buf(4096);
-            int n = schema_fn(buf.data(), (int)buf.size());
-            // ABI: callee returns -(exact content size). Alloc n+1: content + room for the trailing NUL a get_def-style export may write.
-            if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1); n = schema_fn(buf.data(), (int)buf.size()); }
-            if (n > 0) record_schema_ = parse_record_schema_json(buf.data(), (size_t)n);
+        // prepare/commit are a CONTRACT PAIR — XI_PLUGIN_STAGED exports both, and the
+        // staged path is only coherent when both are present: prepare() stages into the
+        // background slot and commit() swaps it live. A plugin that exports exactly ONE
+        // tears its config either way: commit-only → prepare falls to the gated
+        // InstanceBase::prepare (immediate-live), then commit() swaps a never-prepared
+        // staging slot over live (torn/reverted config, yet commit_group still ok:true);
+        // prepare-only → commit() no-ops, so staged config silently never goes live.
+        // Fail loud AND make it safe: null BOTH so the instance degrades to the coherent
+        // gated InstanceBase::prepare(=set_def)/commit(=no-op) path — an immediate-live
+        // swap with no torn double-slot — instead of the half-wired staged path.
+        if ((prepare_fn_ != nullptr) != (commit_fn_ != nullptr)) {
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                std::fprintf(stderr,
+                    "[xinsp2] plugin '%s' exports only %s of the xi_plugin_prepare/"
+                    "xi_plugin_commit pair — CONTRACT VIOLATION; disabling the staged "
+                    "config path for it (falling back to the gated set_def path). "
+                    "Export BOTH (XI_PLUGIN_STAGED) or NEITHER.\n",
+                    plugin_name_.c_str(),
+                    prepare_fn_ ? "xi_plugin_prepare" : "xi_plugin_commit");
+            }
+            prepare_fn_ = nullptr;
+            commit_fn_  = nullptr;
         }
-        // γ: may we hand this plugin a borrowed yyjson_mut_doc* (in-process zero-
-        // serialize input)? Only if it was built against our yyjson layout.
-        if (auto abi_fn = reinterpret_cast<uint32_t(*)()>(GetProcAddress(dll_, "xi_yyjson_abi")))
-            doc_input_ok_ = (abi_fn() == xi::yyjson_layout_stamp());
+        // polaris2 wave-2 (synthesis §3 pure-door dry run): the plugin's OWN
+        // capability door — the symmetric mirror of host->get_interface, resolved
+        // via GetProcAddress like prepare/commit (ABI-additive). Probe it once for
+        // the pack process capability. A plugin that answers xi.pack@1 speaks
+        // pack-in/pack-out; NULL = it publishes no data-plane door.
+        plugin_get_iface_fn_ = reinterpret_cast<xi_plugin_get_interface_fn>(
+            GetProcAddress(dll_, "xi_plugin_get_interface"));
+        if (plugin_get_iface_fn_)
+            frame_proc_ = static_cast<const xi_pack_proc_v1*>(
+                plugin_get_iface_fn_("xi.pack", 1));
     }
 
     ~CAbiInstanceAdapter() override {
-        if (destroy_fn_ && inst_) destroy_fn_(inst_);
+        if (destroy_fn_ && inst_) {
+            // OwnerGuard so the plugin dtor's own releases (image handles AND
+            // pack refs — cache-style retaining plugins release their ring
+            // here) are attributed to this instance, exactly like every other
+            // entry point. The sweeps below then reclaim only what the plugin
+            // genuinely forgot.
+            ImagePool::OwnerGuard g(owner_id_);
+            destroy_fn_(inst_);
+        }
+        // Capability-plane sweep (doc 14 pilot; slot bridge — null until
+        // install_cap_plane): drop any capability registrations this instance
+        // still provides, so a lib plugin that forgot to unregister on destroy
+        // can never leave a dangling handler/self in the registry. Runs AFTER
+        // destroy_fn_ (a well-behaved plugin's own unregister has already
+        // emptied its bucket). Safe during static destruction: the cap
+        // registry singleton is intentionally leaked (xi_cap_abi.hpp).
+        int cswept = ImagePool::sweep_caps_for(owner_id_);
+        if (cswept > 0) {
+            std::fprintf(stderr,
+                "[xinsp2] '%s' destroyed; swept %d leaked capability registration(s)\n",
+                name_.c_str(), cswept);
+        }
         // Sweep any image handles the plugin allocated and forgot to
         // release. Without this, plugin crashes / careless authors leak
-        // ImagePool entries forever. GUARD g_image_pool_alive: if this adapter is
-        // destroyed during STATIC destruction (a never-closed project reaching
-        // ~PluginManager) the ImagePool Meyers singleton may already be gone —
-        // ImagePool::instance() would return (and re-flag alive on) a destroyed
-        // object and release_all_for would iterate freed slots. Skip the sweep then;
-        // the process is exiting and the OS reclaims the pool memory anyway.
-        if (!g_image_pool_alive.load(std::memory_order_acquire)) return;
+        // ImagePool entries forever. Safe even when this adapter is destroyed
+        // during STATIC destruction (a never-closed project reaching
+        // ~PluginManager): the ImagePool singleton is intentionally leaked, so
+        // it is always alive here. Note this means the pack sweep below also
+        // ALWAYS runs — a caller-owned pack a plugin produced is protected by
+        // the ownership handoff (run_pack_door / the cap funnel retag its
+        // output ref untagged), so the sweep reclaims only genuine leaks.
         int swept = ImagePool::instance().release_all_for(owner_id_);
         if (swept > 0) {
             std::fprintf(stderr,
                 "[xinsp2] '%s' destroyed; swept %d leaked image handle(s)\n",
                 name_.c_str(), swept);
+        }
+        // Pack-plane analogue (via the slot bridge — null until the pack ABI is
+        // installed): reclaim sealed-pack refs this instance retained and forgot
+        // to release, so a careless pack-retaining plugin can't silently leak
+        // packs in the registry until static teardown.
+        int fswept = ImagePool::sweep_packs_for(owner_id_);
+        if (fswept > 0) {
+            std::fprintf(stderr,
+                "[xinsp2] '%s' destroyed; swept %d leaked pack ref(s)\n",
+                name_.c_str(), fswept);
         }
     }
 
@@ -316,7 +362,7 @@ public:
     void adopt_owner_id(ImagePoolOwnerId id) { owner_id_ = id; }
 
     const std::string& name() const override { return name_; }
-    std::string plugin_name() const override { return plugin_name_; }
+    const std::string& plugin_name() const override { return plugin_name_; }
 
     // OwnerGuard wraps every plugin entry-point call so any image
     // handles the plugin allocates via host_api->image_create get
@@ -343,7 +389,12 @@ public:
 #endif
         ImagePool::OwnerGuard g(owner_id_);
         CallScope cs(this);
-        return set_def_fn_(inst_, j.c_str()) == 0;
+        bool ok = set_def_fn_(inst_, j.c_str()) == 0;
+        // item 14: remember the last accepted config so an on_fault=reinit rebuild
+        // can restore it onto a freshly-created instance (dropping the in-flight
+        // state a fault may have corrupted). Cached under the same gate as the call.
+        if (ok) committed_def_ = j;
+        return ok;
     }
 
     std::string exchange(const std::string& cmd_json) override {
@@ -353,27 +404,55 @@ public:
 #endif
         ImagePool::OwnerGuard g(owner_id_);
         CallScope cs(this);
-        std::vector<char> buf(64 * 1024);
+        // B6 (burr audit): per-thread scratch instead of a fresh 64 KiB vector
+        // per call — steady-state exchange() calls stop allocating (grow-only,
+        // never shrunk). RE-ENTRANCY VERDICT: safe. exchange() is entered only
+        // host-side (WS cmd_exchange_instance_, the script's use_exchange_cb,
+        // project save/load) — xi_host_api publishes NO door through which a
+        // plugin's exchange handler could re-enter another instance's
+        // exchange() on the same thread (the cap funnel invokes provider
+        // handlers directly, never via the adapter), so the scratch cannot be
+        // clobbered under our own stack frame. If such a door is ever added,
+        // this needs a TLS depth counter falling back to a local vector.
+        thread_local std::vector<char> buf;
+        if (buf.size() < 64 * 1024) buf.resize(64 * 1024);
         int n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size());
         // ABI: callee returns -(exact content size). Alloc n+1: content + the trailing NUL the export writes.
         if (n < 0) { buf.resize((size_t)(-(int64_t)n) + 1); n = exchange_fn_(inst_, cmd_json.c_str(), buf.data(), (int)buf.size()); }
         return (n > 0) ? std::string(buf.data(), (size_t)n) : "{}";
     }
 
-    // Run the plugin's process() entry point. Wraps the OwnerGuard (image-leak
-    // tagging) and, for a non-reentrant plugin, the per-instance lock so a
-    // parallel dispatch pool can't re-enter the same instance's state
-    // concurrently. Returns output->image_count, or -1 if no process fn.
-    // The caller owns the SEH try/catch boundary (use_process_cb).
-    int process(const xi_record* in, xi_record_out* out) {
-        if (!process_fn_ || !inst_) return -1;
+    // polaris2 wave-2: does this plugin publish the xi.pack@1 pack-in/pack-out
+    // door (resolved once at construction via xi_plugin_get_interface)?
+    bool has_pack_door() const { return frame_proc_ && frame_proc_->process; }
+
+    // Drive the plugin's pack door under the SAME per-instance discipline as
+    // process() (OwnerGuard image-leak tagging + CallScope serialization for a
+    // non-reentrant instance). `in` is a sealed host pack handle (borrowed); the
+    // return is a NEW sealed pack handle the caller owns (host pack registry).
+    // XI_PACK_NULL when the plugin has no door. Caller owns the SEH boundary,
+    // exactly as with process().
+    xi_pack_handle run_pack_door(xi_pack_handle in) {
+        if (!has_pack_door() || !inst_) return XI_PACK_NULL;
 #ifndef NDEBUG
-        LcGate lc(this, "process"); if (!lc.ok()) return -1;
+        LcGate lc(this, "process"); if (!lc.ok()) return XI_PACK_NULL;
 #endif
         ImagePool::OwnerGuard og(owner_id_);
         CallScope cs(this);
-        process_fn_(inst_, in, out);
-        return out->image_count;
+        DataPlaneMark dp;   // capability plane: no registration from inside a door
+        xi_pack_handle out = frame_proc_->process(inst_, in);
+        // Ownership handoff — the same fix as the capability funnel
+        // (xi_pack_abi.hpp): the door sealed its output under
+        // OwnerGuard(owner_id_), stamping THIS producing instance as creator,
+        // but the seal ref is handed to the CALLER, who owns it. Left tagged,
+        // this instance's teardown sweep (dtor → sweep_packs_for) would reclaim
+        // the handed-off ref and free the caller's live pack. Clear the creator
+        // tag while the OwnerGuard/CallScope pin is still held — rc unchanged
+        // (PackRegistry::untag). Every door caller (use_pack_process_cb, the
+        // runner, tests) routes through here, so this is the one central spot.
+        if (out != XI_PACK_NULL)
+            ImagePool::untag_pack_ref(out, owner_id_);
+        return out;
     }
 
     // Frame-perfect config swap (ABI v7). prepare loads the new config's heavy
@@ -382,10 +461,20 @@ public:
     // pipeline. That is sound ONLY because a plugin that exports xi_plugin_prepare
     // (via XI_PLUGIN_STAGED) contracts to touch staging ONLY. A plugin without
     // the export falls back to the base prepare ≡ set_def, which IS gated (safe).
+    //
+    // HAZARD (doc 25 RT3-B1): this ungated entry reads inst_ with NO cap_gate_, so it
+    // would race reinit()'s destroy_fn_(old) → UAF. That combo (staged-prepare +
+    // on_fault=reinit) is DEFUSED at load — set_on_fault downgrades reinit→reuse for a
+    // prepare-exporting (or reentrant) instance — so reinit() never runs here. If that
+    // guard is ever lifted, prepare() MUST take shared_lock(cap_gate_) + re-read inst_.
     bool prepare(const std::string& def, const std::string& folder) override {
         if (!prepare_fn_ || !inst_) return InstanceBase::prepare(def, folder);
         ImagePool::OwnerGuard g(owner_id_);
-        return prepare_fn_(inst_, def.c_str(), folder.c_str()) == 0;
+        bool ok = prepare_fn_(inst_, def.c_str(), folder.c_str()) == 0;
+        // item 14: the staged config is what commit() will make live — cache it
+        // so a later on_fault=reinit rebuild restores this config (see set_def).
+        if (ok) committed_def_ = def;
+        return ok;
     }
 
     // commit swaps staging → live. Gated (CallScope): a lone commit while the
@@ -402,19 +491,157 @@ public:
         commit_fn_(inst_);
     }
 
-    // OQ-7: the plugin's declared cross-plugin Record field contract, captured at
-    // load. .declared == false when the plugin exported no xi_plugin_record_schema
-    // (the opt-in default). Feed a set of these (in pipeline order) to
-    // xi::validate_record_pipeline for wire-time contract checking.
-    const RecordSchema& record_schema() const { return record_schema_; }
-
     void* raw_instance() const { return inst_; }
-    xi_plugin_process_fn process_fn() const { return process_fn_; }
     bool reentrant() const { return reentrant_; }
     bool is_sink()   const { return is_sink_; }   // ordered output sink (see PluginInfo::is_sink)
-    // γ: true ⇒ caller may set xi_record.doc (borrowed yyjson doc) instead of
-    // serializing to data/len. False ⇒ JSON path (foreign/older plugin).
-    bool doc_input_ok() const { return doc_input_ok_; }
+
+    // ---- item 14: post-fault policy + quarantine surface --------------------
+    // The mechanical primitives the service-layer fault boundary (use_process_
+    // inline_) drives; the health-overlay + escalation POLICY lives there, this
+    // adapter just carries the per-instance state and provides the safe in-place
+    // rebuild. Kept here because the per-instance CallScope gate — the natural
+    // serialization point — already lives on the adapter.
+    OnFault on_fault() const { return on_fault_; }
+    // RT3-B1/B2 (doc 25) COMBO GUARD: on_fault=reinit destroys the old inst_ under
+    // the EXCLUSIVE cap_gate_, but that gate is taken ONLY by the capability funnel.
+    // Two data-plane readers it never covers turn reinit into a use-after-free during
+    // fault recovery: (1) the UNGATED prepare() staging entry (a plugin exporting
+    // xi_plugin_prepare), and (2) any entry on a REENTRANT instance (CallScope is a
+    // no-op when effective_cap_()==0). These are dangerous config COMBINATIONS that
+    // nothing in-tree uses. Rather than make the race safe (a shared_lock in prepare()
+    // vs reinit()'s exclusive gate — real work + deadlock-review risk), DEFUSE the
+    // combo at load: refuse reinit for such an instance, fall back to the already-
+    // documented safe policy (reuse), and warn loudly. If the combo is ever a real
+    // need, fix the race and lift this guard — never silently run the UAF path.
+    void set_on_fault(OnFault p) {
+        if (p == OnFault::Reinit && (reentrant_ || prepare_fn_)) {
+            std::fprintf(stderr,
+                "[xinsp2] WARN instance '%s' (plugin '%s'): on_fault=reinit is UNSAFE with %s "
+                "— reinit's destroy races the %s (doc 25 RT3-B1/B2, a use-after-free). "
+                "Downgrading on_fault to 'reuse'.\n",
+                name_.c_str(), plugin_name_.c_str(),
+                reentrant_ ? "a reentrant plugin" : "staged-prepare (xi_plugin_prepare)",
+                reentrant_ ? "reentrant data plane" : "the ungated prepare() path");
+            p = OnFault::Reuse;
+        }
+        on_fault_ = p;
+    }
+
+    // The refuse fail-fast gate: a single relaxed atomic load, cheap enough to
+    // sit on the (non-fault) hot path. True ⇒ the instance is quarantined and
+    // process()/exchange() must fail fast without entering plugin code.
+    bool quarantined() const { return quarantined_.load(std::memory_order_acquire); }
+    void set_quarantined(bool q) { quarantined_.store(q, std::memory_order_release); }
+
+    // on_fault=reinit request bit: set by the fault boundary on a caught fault,
+    // consumed just before the next process() so the rebuild happens off no-frame.
+    bool reinit_pending() const { return reinit_pending_.load(std::memory_order_acquire); }
+    void request_reinit() { reinit_pending_.store(true, std::memory_order_release); }
+
+    // H5: atomically CONSUME the pending-rebuild request — a single test-and-clear.
+    // When several callers fault concurrently on the SAME instance they all observe
+    // reinit_pending()==true; routing the rebuild through this exchange makes exactly
+    // ONE win (gets true) and perform the rebuild + escalation accounting, while the
+    // losers get false and skip. That closes two windows the bare check-then-act had:
+    // the DOUBLE rebuild (a 2nd reinit() destroying the 1st's fresh inst_ and building
+    // a 3rd) and the escalation-ORDERING race (a failing rebuild's note_reinit_fail()
+    // crossing the quarantine threshold before a succeeding rebuild's
+    // reset_reinit_fails(), quarantining a now-healthy instance). reinit() still clears
+    // the bit at its own entry (a direct reinit() consumes its request); after this
+    // exchange that store is the idempotent no-op.
+    bool consume_reinit_pending() { return reinit_pending_.exchange(false, std::memory_order_acq_rel); }
+
+    // Arm the in-place rebuild with the DLL factory + host so reinit() can
+    // reconstruct this instance's plugin object. Called by the PM at each
+    // (re)construction site (it owns the factory pointer). If never armed, an
+    // on_fault=reinit degrades to reuse (documented) — a safe fallback.
+    void arm_reinit(PluginInfo::CFactoryFn factory, const xi_host_api* host) {
+        reinit_factory_ = factory; reinit_host_ = host;
+    }
+
+    // A1/A2 (redteam doc 21) — the reinit gate. The capability funnel runs the
+    // provider handler under NO CallScope (providers contract to be thread-safe),
+    // so reinit()'s destroy_fn_(old) could free inst_ under a concurrent cap
+    // handler — the shared_ptr pin protects the ADAPTER, not inst_. A cap call
+    // takes the SHARED side of this gate around its handler run (and re-resolves
+    // the live handler/self under it); reinit takes the EXCLUSIVE side around the
+    // destroy of the old inst_, so the destroy waits out every in-flight handler
+    // and no handler ever runs against a freed inst_. Reader-writer, not a plain
+    // mutex, so concurrent HEAVY cap calls (doc 14 sizing) still run in parallel;
+    // the exclusive lock is taken only on the rare fault/reinit path.
+    std::shared_mutex& cap_reinit_gate() const { return cap_gate_; }
+
+    // Consecutive-rebuild-failure accounting (escalation to refuse after
+    // kReinitEscalateAfter). Touched only on the rare fault/reinit path, but from a
+    // dispatch worker (bump) and the control thread (reset via re-enable), so atomic.
+    int  note_reinit_fail() { return reinit_fails_.fetch_add(1, std::memory_order_relaxed) + 1; }
+    void reset_reinit_fails() { reinit_fails_.store(0, std::memory_order_relaxed); }
+
+    // Rebuild this instance from its last committed config, DROPPING the in-flight
+    // persistent state a caught fault may have corrupted. Reuses the same
+    // create → set_def steps as the PM reload path (make_adapter_guarded_), but in
+    // place on THIS adapter so the shared_ptr other workers hold stays valid, and
+    // SERIALIZED by CallScope so no process()/exchange() runs concurrently on this
+    // instance. Returns true on a clean rebuild; false leaves the OLD instance
+    // live (corrupt but runnable), mirroring recompile's restore-against-old.
+    // Clears the reinit-pending bit regardless.
+    bool reinit() {
+        reinit_pending_.store(false, std::memory_order_release);
+        if (!reinit_factory_ || !reinit_host_) return false;   // not armed → reuse
+        CallScope cs(this);                 // serialize vs process/exchange/set_def
+        // Capability plane (doc 14 pilot): the registry's handler/self pointers
+        // belong to the CORRUPTED instance this rebuild replaces — sweep them
+        // BEFORE the factory runs so nothing dangles, and so the fresh ctor's
+        // re-registrations (same owner id) land in a clean bucket. If the
+        // factory fails below, the old instance stays live but UNREGISTERED —
+        // honest: a faulted lib whose rebuild failed stops serving (and the
+        // escalation path quarantines it after kReinitEscalateAfter failures).
+        ImagePool::sweep_caps_for(owner_id_);
+        void* fresh = nullptr;
+        {
+            ImagePool::OwnerGuard og(owner_id_);   // tag the ctor's images to us
+            try { fresh = reinit_factory_(reinit_host_, name_.c_str()); }
+            catch (...) { fresh = nullptr; }       // SEH-translated ctor fault, or throw
+        }
+        if (!fresh) return false;                  // keep the old instance live
+        void* old = inst_;
+        inst_ = fresh;                             // swap BEFORE destroying old
+        // A1/A2 (redteam doc 21): the cap funnel runs the provider handler with
+        // no CallScope, so a concurrent cap handler may still be executing against
+        // `old`. Take the EXCLUSIVE side of the reinit gate before destroying it —
+        // this blocks until every in-flight cap handler (each holding the SHARED
+        // side and re-resolving the live handler under it) has drained, so the
+        // destroy can never free inst_ out from under a running handler.
+        // SCOPE (doc 25 RT3-B1/B2): this exclusive gate covers ONLY the capability
+        // funnel's SHARED-side readers. It does NOT cover the ungated prepare() entry
+        // or a reentrant instance's data plane (CallScope is a no-op there) — those
+        // would still race this destroy. They are DEFUSED at load (set_on_fault
+        // downgrades reinit→reuse for a prepare-exporting/reentrant instance), so
+        // reinit() is unreachable for them; do not rely on this gate to cover them.
+        {
+            std::unique_lock<std::shared_mutex> gate(cap_gate_);
+            // Finding ②: attribute the old instance's dtor releases (image
+            // handles AND pack refs) to THIS instance's owner, exactly like the
+            // adapter dtor path (~:314). Without it the old plugin's pack-ref
+            // release runs off-guard as release_as(pack, 0): the creator tag is
+            // cleared only on owner match, so it stays live and lies — a later
+            // owner sweep then over-releases the creator's seal ref while a
+            // consumer still holds the pack → UAF. reinit() is the one
+            // adapter-mutating path that runs without lane quiesce, so this is
+            // where the unguarded destroy bites.
+            ImagePool::OwnerGuard g(owner_id_);
+            if (destroy_fn_ && old) { try { destroy_fn_(old); } catch (...) {} }
+        }
+        // Restore the last committed config onto the fresh instance. (We do NOT
+        // sweep the old instance's leaked pool images here — both share owner_id_,
+        // so a sweep would also free the fresh ctor's images; the rare residual is
+        // reclaimed when the adapter is finally destroyed.)
+        if (set_def_fn_ && !committed_def_.empty()) {
+            ImagePool::OwnerGuard og(owner_id_);
+            try { set_def_fn_(inst_, committed_def_.c_str()); } catch (...) {}
+        }
+        return true;
+    }
 
 private:
     // Effective concurrency cap across process/exchange/get_def/set_def:
@@ -502,12 +729,23 @@ private:
     xi_plugin_get_def_fn  get_def_fn_ = nullptr;
     xi_plugin_set_def_fn  set_def_fn_ = nullptr;
     xi_plugin_destroy_fn  destroy_fn_ = nullptr;
-    xi_plugin_process_fn  process_fn_ = nullptr;
     xi_plugin_prepare_fn  prepare_fn_ = nullptr;   // ABI v7, optional
     xi_plugin_commit_fn   commit_fn_  = nullptr;   // ABI v7, optional
-    RecordSchema          record_schema_;          // OQ-7, optional (declared==false ⇒ none)
-    bool                  doc_input_ok_ = false;
+    xi_plugin_get_interface_fn plugin_get_iface_fn_ = nullptr;  // wave-2, optional
+    const xi_pack_proc_v1*    frame_proc_          = nullptr;  // xi.pack@1 door (null = absent)
     ImagePoolOwnerId      owner_id_ = 0;
+
+    // ---- item 14: post-fault policy state -----------------------------------
+    OnFault                on_fault_ = OnFault::Reuse;   // effective policy (from PM)
+    std::atomic<bool>      quarantined_{false};          // refuse gate (hot path)
+    std::atomic<bool>      reinit_pending_{false};       // deferred-rebuild request
+    std::atomic<int>       reinit_fails_{0};             // consecutive rebuild failures
+    PluginInfo::CFactoryFn reinit_factory_ = nullptr;    // armed by the PM
+    const xi_host_api*     reinit_host_ = nullptr;       // armed by the PM
+    std::string            committed_def_;               // last accepted config (for reinit)
+    // A1/A2 reinit gate: cap calls take it SHARED, reinit's destroy takes it
+    // EXCLUSIVE (see cap_reinit_gate()).
+    mutable std::shared_mutex cap_gate_;
 };
 
 } // namespace xi

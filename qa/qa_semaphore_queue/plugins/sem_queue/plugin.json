@@ -1,0 +1,16 @@
+{
+  "name": "sem_queue",
+  "description": "A 'custom queue' implemented ENTIRELY in a plugin (doc 24): N-way admission via a process-global counting semaphore, with zero core buffering — the plugin's semaphore is the sole admission control ('depth 0' custody) while the ordered output comes for free from the core's per-lane emit gate. ONE DLL, TWO ROLES sharing the semaphore via statics: role 'source' owns a deep std::deque backlog and a dedicated producer thread that acquire()s a permit then emit()s one item into the dispatch lane (at most N ever in flight); the ack role's xi.pack@1 door release()s one permit on completion, driven inline by the inspect's use('sem_ack').process() as its last step. get_def surfaces the shared 'inflight'/'max_inflight' instrumentation so a driver can assert max in-flight == N.",
+  "dll": "sem_queue.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [
+      {"name": "role",    "type": "string", "default": "source"},
+      {"name": "permits", "type": "int",    "default": 4, "min": 1, "max": 1024},
+      {"name": "backlog", "type": "int",    "default": 200, "min": 1, "max": 100000}
+    ],
+    "inputs":  [],
+    "outputs": [{"name": "img", "kind": "image", "doc": "16x16 gray, first 8 bytes = uint64 LE seq"}]
+  }
+}

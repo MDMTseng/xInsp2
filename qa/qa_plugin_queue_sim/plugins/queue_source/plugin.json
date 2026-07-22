@@ -1,0 +1,15 @@
+{
+  "name": "queue_source",
+  "description": "A source that OWNS its own deep work queue (a std::deque of pending items) and paces its emits off the core lane's back-pressure — the exemplar for 'plugin owns the queue' (doc 24). Starts IDLE; exchange 'start' fills the backlog and spins a DEDICATED emit thread that releases one item at a time via emit(); on a queue_depth:0 lane it blocks in the rendezvous until a worker TAKES it, on a queue_depth:1 lane it runs one ahead. exchange 'stop' halts + joins. get_def reports 'emitted', 'backlog', and the run-ahead tells 'first_gap_ms'/'min_gap_ms'/'fast_returns'.",
+  "dll": "queue_source.dll",
+  "factory": "xi_plugin_create",
+  "has_ui": false,
+  "manifest": {
+    "params": [
+      {"name": "backlog", "type": "int", "default": 500, "min": 1, "max": 100000},
+      {"name": "fast_ms", "type": "int", "default": 15, "min": 1, "max": 10000}
+    ],
+    "inputs":  [],
+    "outputs": [{"name": "img", "kind": "image", "doc": "16x16 gray, first 8 bytes = uint64 LE seq"}]
+  }
+}

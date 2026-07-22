@@ -13,6 +13,7 @@
 // to the former in-class definitions.
 //
 #include "xi_pm_manager_core.hpp"
+#include "xi_project.hpp"   // kProjectSchema — the project-file schema identity
 
 #include <cctype>
 #include <cstdio>
@@ -39,7 +40,8 @@ inline bool PluginManager::is_valid_instance_name(const std::string& n) {
 }
 
 // Create a new instance of a plugin inside the current project.
-inline InstanceInfo* PluginManager::create_instance(const std::string& instance_name,
+inline InstanceInfo* PluginManager::create_instance(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                               const std::string& instance_name,
                                const std::string& plugin_name,
                                std::string* err) {
     auto fail = [&](std::string msg) -> InstanceInfo* { if (err) *err = std::move(msg); return nullptr; };
@@ -79,6 +81,13 @@ inline InstanceInfo* PluginManager::create_instance(const std::string& instance_
     // call host->instance_folder() from inside its constructor.
     InstanceFolderRegistry::instance().set(instance_name, ii.folder_path);
 
+    // V3 precedence: if this plugin is machine-autoloaded, evict the machine
+    // provider FIRST so this explicit project instance registers its capability
+    // names cleanly (no ETAKEN double-register). The machine provider is
+    // reinstated when the project instance is removed (remove_instance) or the
+    // project closes (close_project).
+    evict_machine_provider_locked_(plugin_name);
+
     ImagePoolOwnerId created_owner = 0;   // for a later sweep if a save fails
     {
         // C ABI — create via host API. ImagePoolOwnerScope tags every image the
@@ -108,6 +117,11 @@ inline InstanceInfo* PluginManager::create_instance(const std::string& instance_
         auto adapter = std::make_shared<CAbiInstanceAdapter>(
             instance_name, plugin_name, pi.handle, raw, pi.reentrant, /*max_concurrency=*/0, pi.is_sink);
         adapter->adopt_owner_id(owner.release());   // adapter owns the sweep now
+        // item 14: a fresh instance takes the plugin's default policy (no
+        // instance.json override yet); arm the in-place reinit for on_fault=reinit.
+        ii.on_fault = pi.default_on_fault;
+        adapter->set_on_fault(ii.on_fault);
+        adapter->arm_reinit(pi.c_factory, &host);
         ii.instance = std::move(adapter);
     }
     InstanceRegistry::instance().add(ii.instance);
@@ -142,7 +156,8 @@ inline bool PluginManager::save_instance(const std::string& instance_name) {
 
 // Remove an instance: destroys the runtime object + unregisters from
 // both registries. Optionally deletes the on-disk folder.
-inline bool PluginManager::remove_instance(const std::string& instance_name, bool delete_folder) {
+inline bool PluginManager::remove_instance(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                           const std::string& instance_name, bool delete_folder) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = project_.instances.find(instance_name);
     if (it == project_.instances.end()) return false;
@@ -169,6 +184,10 @@ inline bool PluginManager::remove_instance(const std::string& instance_name, boo
             std::filesystem::rename(ij, std::filesystem::path(folder) / "instance.json.removed", ec);
     }
     save_project_locked();
+    // V3: if that was the last project instance of an autoload lib plugin, the
+    // machine provider steps back in (idempotent — no-op for non-autoload plugins
+    // and for plugins still project-provided).
+    autoload_machine_providers_locked_();
     return true;
 }
 
@@ -176,7 +195,8 @@ inline bool PluginManager::remove_instance(const std::string& instance_name, boo
 // name. Rejected if the new name is invalid / in use / the instance is missing
 // (no side effects); Ok on full success; NotPersisted if the runtime renamed
 // but the config write failed.
-inline PluginManager::RenameResult PluginManager::rename_instance(const std::string& old_name, const std::string& new_name) {
+inline PluginManager::RenameResult PluginManager::rename_instance(const QuiesceToken& /*quiesced: proof the caller has quiesced dispatch*/,
+                                                                  const std::string& old_name, const std::string& new_name) {
     std::lock_guard<std::mutex> lk(mu_);
     if (old_name == new_name) return RenameResult::Ok;
     if (!is_valid_instance_name(new_name)) return RenameResult::Rejected;   // no path escape via the name
@@ -200,6 +220,7 @@ inline PluginManager::RenameResult PluginManager::rename_instance(const std::str
     const std::string plugin_name      = it->second.plugin_name;
     const int         old_max_conc      = it->second.max_concurrency;
     const std::string old_group         = it->second.group;
+    const OnFault     old_on_fault      = it->second.on_fault;   // item 14
     std::string saved_def;
     if (it->second.instance) saved_def = it->second.instance->get_def();
 
@@ -252,9 +273,12 @@ inline PluginManager::RenameResult PluginManager::rename_instance(const std::str
     // rename silently dropped the concurrency cap + dispatch group.
     ii.max_concurrency = old_max_conc;
     ii.group           = old_group;
+    ii.on_fault        = old_on_fault;   // item 14: rename preserves the policy
     auto adapter = std::make_shared<CAbiInstanceAdapter>(
         new_name, plugin_name, pi.handle, raw, pi.reentrant, ii.max_concurrency, pi.is_sink);
     adapter->adopt_owner_id(owner.release());   // ctor images now belong to the live adapter
+    adapter->set_on_fault(ii.on_fault);
+    adapter->arm_reinit(pi.c_factory, &host);
     ii.instance = std::move(adapter);
     if (!saved_def.empty()) ii.instance->set_def(saved_def);
     InstanceRegistry::instance().add(ii.instance);
@@ -292,6 +316,22 @@ inline std::string PluginManager::instance_group(const std::string& name) {
             return it->second.group;
     }
     return project_.default_group;
+}
+
+// Locked snapshot for read-only observers — takes the SAME mu_ instance_group()
+// takes, so the observers no longer iterate project_.instances unlocked (which
+// races create/remove/rename_instance → erase-vs-read UAF). Copies each entry's
+// name + plugin_name + a shared_ptr ref (keeps the instance alive for the read),
+// then releases the lock so the caller can safely re-enter the manager (e.g. the
+// health reader's get_instance_state, which also takes mu_).
+inline std::vector<PluginManager::InstanceSnapshot>
+PluginManager::snapshot_instances() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<InstanceSnapshot> out;
+    out.reserve(project_.instances.size());
+    for (auto& [iname, ii] : project_.instances)
+        out.push_back({iname, ii.plugin_name, ii.instance});
+    return out;
 }
 
 inline void PluginManager::set_instance_state(const std::string& name, InstState s,
@@ -381,6 +421,11 @@ inline std::vector<OpenWarning> PluginManager::open_warnings() {
     return last_open_warnings_;
 }
 
+inline std::string PluginManager::open_error() {
+    std::lock_guard<std::mutex> lk(mu_);
+    return last_open_error_;
+}
+
 // Carry over any top-level project.json keys this writer doesn't manage
 // (e.g. `params`, and fields another tool/the VS Code extension adds like
 // `auto_respawn` / `watchdog_ms`). save_project_locked is a FULL rebuild, so
@@ -414,7 +459,7 @@ inline std::string PluginManager::merge_unknown_top_keys_(const std::string& fre
                 // never persist. Anything NOT in this set is owned by another
                 // writer (params / auto_respawn / watchdog_ms / future) → carry over.
                 static const char* const kOwned[] = {
-                    "name", "script", "parallelism", "runtime",
+                    "schema", "name", "script", "parallelism", "runtime",
                     "instances", "plugin_dirs", "plugins",
                 };
                 size_t idx, mx; yyjson_val *k, *v;
@@ -462,6 +507,10 @@ inline bool PluginManager::save_project_locked() {
         return false;
     }
     std::string out = "{\n";
+    // Schema identity (Finding 2 / adoption item 12): stamp the project-file
+    // format so a future reader can recognize (and, at a breaking bump, refuse)
+    // the format rather than guess. Same family/naming as the run-outcome schema.
+    out += "  \"schema\": \""; out += xi::project::kProjectSchema; out += "\",\n";
     out += "  \"name\": "; pm_json_escape(out, project_.name); out += ",\n";
     out += "  \"script\": ";
     pm_json_escape(out, std::filesystem::path(project_.script_path).filename().string());
@@ -584,6 +633,19 @@ inline bool PluginManager::save_instance_json(const InstanceInfo& ii) {
     // drop it, so the source's triggers silently fell back to default_group).
     if (!ii.group.empty()) {
         out += "  \"group\": "; pm_json_escape(out, ii.group); out += ",\n";
+    }
+    // item 14: round-trip a per-instance on_fault OVERRIDE — only when it differs
+    // from the plugin default (so a save doesn't drop a user's override, nor bake
+    // the plugin default into every instance.json).
+    {
+        OnFault plugin_dflt = OnFault::Reuse;
+        if (auto pit = plugins_.find(ii.plugin_name); pit != plugins_.end())
+            plugin_dflt = pit->second.default_on_fault;
+        if (ii.on_fault != plugin_dflt) {
+            out += "  \"on_fault\": \"";
+            out += on_fault_name(ii.on_fault);
+            out += "\",\n";
+        }
     }
     out += "  \"config\": ";
     out += ii.instance ? ii.instance->get_def() : "{}";

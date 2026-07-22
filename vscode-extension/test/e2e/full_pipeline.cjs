@@ -105,8 +105,8 @@ async function run() {
     takeScreenshot('camera_instance_created');
 
     // --- Step 4: Create data_output instance ---
+    // (v12: `load_plugin` retired — create_instance loads the plugin itself.)
     console.log('\n[step 4] Creating data_output instance...');
-    await sendCmd('load_plugin', { name: 'data_output' });
     const sinkRsp = await vscode.commands.executeCommand('xinsp2.createInstance', 'saver0', 'data_output');
     console.log('[step 4] saver0 created');
     await sleep(1000);

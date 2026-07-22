@@ -20,6 +20,7 @@
 #include <xi/xi_working_copy.hpp>
 #include <xi/xi_emit_gate.hpp>
 #include <xi/xi_trigger_bus.hpp>
+#include <xi/xi_pack_abi.hpp>   // THE CUT (v12): the bus is pack-only; drive it via emit_pack
 
 // Minimal test harness — each TEST() runs once; failures print and set a flag.
 static int g_failures = 0;
@@ -126,58 +127,29 @@ static void test_async_cancel_idempotent() {
     CHECK(f.cancelled());
 }
 
-static void test_watchdog_cancel_epoch_scope() {
-    SECTION("watchdog cancel — epoch-scoped: fresh inspect after a trip is NOT cancelled");
-    // Models the dispatch thread reusing one OS thread frame-after-frame.
-    // Inspect A starts (draws a ticket), then the watchdog trips while A is in
-    // flight, then a FRESH inspect B starts on the same thread. A must observe
-    // the cancel; B (started AFTER the trip) must NOT — that fresh-frame-poison
-    // was core-bug-hunt #12.
-    xi::clear_cancel();
-    CHECK(!xi::cancellation_requested());          // nothing armed
-
-    uint64_t a = xi::begin_inspect();              // inspect A starts
-    (void)a;
-    xi::arm_cancel();                              // watchdog trips with A in flight
-    CHECK(xi::cancellation_requested());           // A is targeted → observes cancel
-
-    uint64_t b = xi::begin_inspect();              // fresh inspect B starts (same thread)
-    (void)b;
-    CHECK(b > a);                                  // strictly-increasing ticket
-    CHECK(!xi::cancellation_requested());          // THE FIX: B is not poisoned
-
-    // Escalation preserved: if B *itself* later overruns, a SECOND trip targets
-    // it (cutoff now above B's ticket) and B does observe the cancel.
-    xi::arm_cancel();
-    CHECK(xi::cancellation_requested());
-
-    // Clearing the cancel releases everyone.
-    xi::clear_cancel();
-    CHECK(!xi::cancellation_requested());
-}
-
-static void test_watchdog_cancel_epoch_async_propagates() {
-    SECTION("watchdog cancel — epoch scope propagates into xi::async sub-tasks");
-    // A sub-task spawned by an in-flight (targeted) inspect must see the cancel;
-    // a sub-task spawned by a fresh post-trip inspect must not. Proves the
-    // ticket rides into the worker thread (whose own thread_local would be 0).
-    xi::clear_cancel();
-
-    (void)xi::begin_inspect();                     // inspect A
-    xi::arm_cancel();                              // trip while A in flight
-    bool sub_a_cancelled = xi::async([] {
-        return xi::cancellation_requested();
+// A token-based cooperative cancel propagates into xi::async sub-tasks: a
+// sub-task spawned by a cancelled Future observes the flag on its own worker
+// thread (the token rides into the worker via xi::async's Scope). This is the
+// surviving cancel primitive after the watchdog epoch-cancel was retired.
+static void test_async_cancel_propagates_into_subtask() {
+    SECTION("cancel — a task's cancel token is visible to cancellation_requested() on the worker");
+    std::atomic<bool> started{false};
+    std::atomic<int>  iters{0};
+    auto f = xi::async([&] {
+        started.store(true);
+        for (int i = 0; i < 500; ++i) {
+            if (xi::cancellation_requested()) return -1;   // reads THIS task's token
+            iters.fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return 999;
     });
-    CHECK(sub_a_cancelled);                        // A's sub-task is targeted
-
-    (void)xi::begin_inspect();                     // fresh inspect B (post-trip)
-    bool sub_b_cancelled = xi::async([] {
-        return xi::cancellation_requested();
-    });
-    CHECK(!sub_b_cancelled);                        // B's sub-task is not poisoned
-
-    xi::clear_cancel();
-    CHECK(!xi::cancellation_requested());
+    while (!started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    f.cancel();
+    int rc = f;
+    CHECK(rc == -1);                               // observed the token on the worker
+    CHECK(iters.load() < 100);
 }
 
 static void test_async_wrap() {
@@ -248,7 +220,10 @@ class DummyPlugin : public xi::InstanceBase {
 public:
     explicit DummyPlugin(std::string n) : name_(std::move(n)) {}
     const std::string& name() const override { return name_; }
-    std::string plugin_name() const override { return "DummyPlugin"; }
+    const std::string& plugin_name() const override {
+        static const std::string kName = "DummyPlugin";
+        return kName;
+    }
     int counter = 0;
 private:
     std::string name_;
@@ -625,24 +600,27 @@ static void test_emit_gate() {
 static void test_trigger_bus_reset_prunes_source_map() {
     SECTION("TriggerBus::reset() prunes the per-source emit-time map");
     auto& bus = xi::TriggerBus::instance();
-    // Start from a clean, sink-less bus so emit() takes the no-sink path
-    // (which releases the images it addref'd) and nothing fires elsewhere.
+    // THE CUT (v12): the bus carries PACKS, not Record images. Install the pack
+    // plane so emit_pack has a builder + a releaser, then drive the no-sink path
+    // (emit_pack stamps the per-source liveness map, then releases the pack).
+    xi::install_pack_abi();
+    const xi_pack_v1* pk = xi::pack_v1_iface();
+    // Start from a clean, sink-less bus so emit_pack takes the no-sink path
+    // (which releases the pack it was handed) and nothing fires elsewhere.
     bus.clear_sink();
     bus.reset();
     CHECK(bus.source_emit_ages_us().empty());
 
-    // One real image handle is enough to drive emit() past its image_count
-    // guard; emit() addrefs it and the no-sink path releases that ref.
-    xi_image_handle h = xi::ImagePool::instance().create(2, 2, 1);
-    xi_record_image ri{};
-    ri.handle = h;
-    ri.key    = nullptr;
-
     const int N = 64;
     for (int i = 0; i < N; ++i) {
         std::string src = "cam_" + std::to_string(i);
-        bus.emit(src, xi_trigger_id{0, 0}, /*ts*/0, &ri, /*image_count*/1,
-                 /*meta_doc*/nullptr);
+        // A minimal sealed pack per emit; emit_pack stamps src into the liveness
+        // map before the sink check, then (no sink) drops the ref we hand it.
+        xi_pack_builder b = pk->builder_new();
+        pk->builder_add_i64(b, "seq", i);
+        xi_pack_handle f = pk->builder_seal(b);
+        pk->emit_pack(src.c_str(), xi_trigger_id{0, 0}, f, /*ts*/0);
+        pk->release(f);   // drop our creator ref (the forwarder took its own)
     }
     // Every distinct source name left a permanent entry pre-fix.
     CHECK(bus.source_emit_ages_us().size() == static_cast<size_t>(N));
@@ -650,8 +628,6 @@ static void test_trigger_bus_reset_prunes_source_map() {
     bus.reset();
     // Post-fix: reset() prunes the map. (Pre-fix / gated no-op: stays N -> FAIL.)
     CHECK(bus.source_emit_ages_us().empty());
-
-    xi::ImagePool::instance().release(h);   // drop our own create() ref
 }
 
 int main() {
@@ -667,8 +643,7 @@ int main() {
     test_async_wrap();
     test_async_cancel_cooperative();
     test_async_cancel_idempotent();
-    test_watchdog_cancel_epoch_scope();
-    test_watchdog_cancel_epoch_async_propagates();
+    test_async_cancel_propagates_into_subtask();
 
     test_await_all_mixed_void();
 

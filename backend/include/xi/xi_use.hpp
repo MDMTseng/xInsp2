@@ -9,25 +9,32 @@
 //
 // Usage:
 //
-//   void xi_inspect_entry(int frame) {
+//   XI_INSPECT_ENTRY(t, frame) {
 //       auto& det = xi::use("det0");
-//       // Frames arrive by PUSH — read the current trigger, don't pull:
-//       auto img = xi::current_trigger().image("cam0");
-//       auto result = det.process(xi::Record().image("gray", img));
+//       // Frames arrive by PUSH — read the current trigger's pack, don't pull:
+//       if (auto f = t.pack()) {
+//           auto result = det.process(f);   // drive det0's xi.pack@1 door
+//           if (auto n = result.get_i64("blob_count")) xi::ok(*n);
+//       }
 //   }
 //
 
 #include "xi_abi.h"
 #include "xi_clock.hpp"
-#include "xi_record.hpp"   // wire codec is yyjson JSON (Record::from_json_bytes / data_json)
+#include "xi_pack_contract.hpp"  // reserved $-keys + fault/provenance helpers (U1, doc 15)
 #include "xi_image.hpp"
+#include "xi_image_blob.hpp"     // xi::ImageBlobView + read_image_blob (xi/image consumer)
 #include "xi_script.hpp"   // XI_SCRIPT_EXPORT (A4 entry export macro)
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -65,53 +72,95 @@ struct xi_trigger_view {
     int32_t                       image_count;
     int32_t                       _pad1;
     const char*                   leader_source;  // may be null/empty
-    void*                         meta_doc;       // yyjson_mut_doc*, borrowed (host holds a ref)
+    void*                         meta_doc;       // RESERVED — was the Record meta yyjson_mut_doc*;
+                                                  // the Record/doc meta plane was removed at THE CUT
+                                                  // (v12). Kept as an inert slot for struct stability;
+                                                  // metadata now rides the pack ($-keys / entries).
+    // polaris2 wave-2 (docs/new_gen/08 Wave 2, step 4): the OPTIONAL v3 Pack this
+    // event carries on the dual-carry dispatch path — the SAME xi_pack_handle
+    // TriggerEvent::pack holds. XI_PACK_NULL for every Record-era event. Borrowed
+    // for the call (the dispatch's ref keeps it alive); the SDK Trigger takes its
+    // OWN ref (get_interface("xi.pack",1)->retain) so t.pack() stays valid after.
+    xi_pack_handle               pack;          // XI_PACK_NULL ⇒ no pack on this event
     const xi_host_api*            host;           // pool + doc access; null ⇒ inactive
+    // A4 explicit per-run context (retiring the ambient run_id/frame_path TLS):
+    // the run's arrival id and the optional cmd:run frame_path, filled by the host
+    // beside the rest of the view. Carried onto Trigger::Data so t.run_id() /
+    // t.frame_path() are SELF-CONTAINED — valid on any thread, no ambient thunk.
+    // run_id 0 / frame_path null ⇒ absent (the free-function xi::run_id() /
+    // xi::current_frame_path() read the always-installed host RunContext instead,
+    // which also covers the plain cmd:run / timer-tick runs that carry no Trigger).
+    int64_t                      run_id;         // 0 ⇒ none
+    const char*                  frame_path;     // borrowed for the call; SDK copies
 };
 
 // Defined in xi_script_support.hpp (force-included by the compiler)
-extern void* g_use_process_fn_;
+// THE CUT (v12): g_use_process_fn_ (the Record use()->process bridge) was removed
+// with the xi::Record data plane; xi::use(name).process(ScriptPack) via
+// g_use_pack_process_fn_ is the sole use()->process path.
 extern void* g_use_exchange_fn_;
-extern void* g_use_grab_fn_;
+// polaris2 Gate P2 (docs/new_gen/10): xi::use(...).process(ScriptPack) — the
+// host callback that drives a plugin's xi.pack@1 pack door. Null on an older
+// host (no pack chaining): the ScriptPack overload then returns an empty pack.
+extern void* g_use_pack_process_fn_;
 extern void* g_use_host_api_;   // xi_host_api* into BACKEND's ImagePool
 extern void* g_trigger_info_fn_;
 extern void* g_trigger_image_fn_;
 extern void* g_trigger_sources_fn_;
 extern void* g_trigger_leader_fn_;
-extern void* g_trigger_meta_fn_;
+// polaris2 gate P2 (expose-from-script): host thunk for xi::use(sink).push(pack).
+// Set via the OPTIONAL export xi_script_set_use_push_pack_callback; null on an
+// older host ⇒ push() returns false (degrades like every other optional callback).
+extern void* g_use_push_pack_fn_;
 
 namespace xi {
 
-// Microseconds since the Unix epoch (system_clock). Same clock the host
-// uses to stamp TriggerEvent::timestamp_us / dequeued_at_us, so script-
-// side subtraction across the host/script boundary is meaningful.
-// Defined here (and not pulled from xi_trigger_bus.hpp) so scripts don't
-// have to include host-only headers to compute the latency split.
-// Guarded so the host's xi_trigger_bus.hpp can also define it without
-// ODR conflict when both headers land in the same TU.
-#ifndef XI_NOW_US_DEFINED
-#define XI_NOW_US_DEFINED
-// Thin compat aliases over the canonical clock (xi_clock.hpp). Both now_us and
-// steady_now_us are defined together so the guard can't leave one undefined
-// depending on header include order.
-inline int64_t now_us()        { return xi::wall_us(); }
-inline int64_t steady_now_us() { return xi::mono_us(); }
-#endif
+// Clock access is the canonical xi::wall_us() / xi::mono_us() (xi_clock.hpp).
+// wall_us is the same system_clock the host uses to stamp
+// TriggerEvent::timestamp_us / dequeued_at_us, so script-side subtraction
+// across the host/script boundary is meaningful. (The now_us/steady_now_us
+// compat aliases were deleted — no in-tree caller remained.)
+
+// One formatter for the 128-bit trigger id: 32-char lowercase hex ("hi" then
+// "lo", each zero-padded to 16). Shared by Trigger/TriggerSnapshot::id_string
+// and the host's trigger_id_hex (service_result.cpp), which adds its own
+// null-id → empty-string wire rule on top.
+inline std::string trigger_id_hex128(uint64_t hi, uint64_t lo) {
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%016llx%016llx",
+                  (unsigned long long)hi, (unsigned long long)lo);
+    return std::string(buf);
+}
 
 // Function pointer types for the callbacks
-// γ: `input_doc` carries the caller's borrowed yyjson_mut_doc* for the in-process
-// zero-serialize path. The host callback uses it directly when the target plugin
-// is doc-compatible, else serialises it to JSON itself — so the caller never
-// pays data_json() up front. `input_data`/`input_len` stay in the signature but
-// are null from the doc path (legacy/explicit-JSON callers may still set them).
-using UseProcessFn  = int (*)(const char* name,
-                              const void* input_doc,
-                              const uint8_t* input_data, int32_t input_len,
-                              const xi_record_image* input_images, int input_image_count,
-                              xi_record_out* output);
+// THE CUT (v12): UseProcessFn (the Record use()->process bridge, keyed on
+// xi_record_out/xi_record_image + the borrowed yyjson doc) was removed with the
+// xi::Record data plane. The pack sibling UsePackProcessFn (below) is the sole
+// use()->process callback.
 using UseExchangeFn = int (*)(const char* name, const char* cmd,
                               char* rsp, int rsplen);
 using UseGrabFn     = xi_image_handle (*)(const char* name, int timeout_ms);
+// polaris2 Gate P2: drive the named instance's xi.pack@1 pack door with a
+// sealed input pack. `in` is BORROWED for the call (the script keeps its ref);
+// on success (return 0) `*out` is a NEW sealed pack handle the CALLER OWNS
+// (host pack registry — release through xi_pack_v1) or XI_PACK_NULL if the
+// plugin's door returned nothing (a hard internal failure; a mere CONTRACT
+// failure is a normal sealed pack carrying "$fault", see xi_pack_proc_v1).
+// Negative returns mirror UseProcessFn: -1 no such instance; -2 the door
+// crashed (SEH) or threw; -3 instance quarantined (on_fault=refuse);
+// -4 the plugin publishes no xi.pack@1 door (a Record-only plugin);
+// -5 the target is a declared ORDERED SINK (process-on-sink is a static
+// misuse — feed sinks via use(name).push(pack); U3, docs/new_gen/17).
+using UsePackProcessFn = int (*)(const char* name, xi_pack_handle in,
+                                 xi_pack_handle* out);
+// polaris2 gate P2 (expose-from-script): push a SEALED pack to a named
+// instance's xi.pack@1 door, fire-and-forget (the ack pack is dropped host-
+// side, mirroring how a staged sink's reply Record is dropped). The handle is
+// BORROWED for the call — the host retains its own ref before returning, so
+// the script's ScriptPack ref (t.pack()'s keepalive) is the only one the SDK
+// side manages. Returns: 0 staged/delivered; -1 no such instance; -2 the door
+// crashed; -3 instance quarantined; -4 instance has no xi.pack@1 door.
+using UsePushPackFn = int (*)(const char* name, xi_pack_handle pack);
 
 // Trigger callbacks (host-side wires these in via xi_script_set_trigger_callbacks)
 struct CurrentTriggerInfo {
@@ -122,7 +171,7 @@ struct CurrentTriggerInfo {
     int64_t       dequeued_at_us;   // moment dispatcher worker popped this event
                                     // off g_ev_queue (same clock as timestamp_us).
                                     // queue_wait_us = dequeued_at_us - timestamp_us
-                                    // inspect_us    = now_us()       - dequeued_at_us
+                                    // inspect_us    = wall_us()      - dequeued_at_us
 };
 using TriggerInfoFn    = void (*)(CurrentTriggerInfo* out);
 using TriggerImageFn   = xi_image_handle (*)(const char* source);
@@ -132,11 +181,257 @@ using TriggerSourcesFn = int32_t (*)(char* buf, int32_t buflen);
 // as TriggerSourcesFn: positive return = bytes written, negative return
 // = -needed_bytes (caller resizes and retries), 0 = no leader.
 using TriggerLeaderFn  = int32_t (*)(char* buf, int32_t buflen);
-// ABI v5: returns the event's metadata doc (emit_trigger_record) as a
-// yyjson_mut_doc* with one ref RESERVED for the caller to adopt_shared (==
-// consume) — exactly the share_out/adopt_shared handshake the process()-input
-// doc uses. null when the trigger carries no metadata.
-using TriggerMetaFn    = void* (*)();
+// THE CUT (v12): TriggerMetaFn (the yyjson meta-doc fetch behind t.meta()) was
+// removed with the Record meta plane. Event metadata now rides the pack (t.pack()
+// entries / $-keys), read through the xi.pack@1 door.
+
+// ─── EXPERIMENTAL: the wave-2 Pack pilot surface (t.pack()) ─────────────────
+//
+// A SCRIPT-SIDE, borrowed, read-only view of the v3 Pack (xi_pack.hpp) that a
+// pack-mode source emitted on the xi.pack@1 data plane. This is a WAVE-2 PILOT
+// surface — minimal, opaque-handle-backed, and SUBJECT TO CHANGE: the final
+// script Pack API is a wave-3+ decision (docs/new_gen/08 Wave 2, step 4).
+//
+// WHY OPAQUE, NOT the Pack container directly: a script is a
+// separate JIT-compiled DLL. The Pack container (xi_pack.hpp) owns a slab +
+// pool handles minted host-side, and every inline singleton (PackRegistry) is
+// PER-DLL — so the script cannot touch the container's C++ layout. It reads the
+// pack through the process-stable xi_pack_v1 vtable it resolves from the host
+// (get_interface("xi.pack", 1)): spans in / spans out, keyed by string. The
+// 522ns compile-time-offset slot read is a SAME-DLL property (the pure-door
+// finding, docs/new_gen/08); across the door a consumer reads by key string.
+//
+//   XI_INSPECT_ENTRY(t, frame) {
+//       auto f = t.pack();                       // borrowed; empty if no pack
+//       if (f) {
+//           int64_t seq = f.get_i64("seq").value_or(-1);
+//           if (auto img = f.get_image("frame")) xi::ok(1);   // verdict on it
+//       }
+//   }
+//
+// LIFETIME: the returned ScriptPack holds its OWN ref on the pack handle (the
+// Trigger took it via retain() when it was built from the view). Copies are cheap
+// (a shared_ptr bump) and keep the pack + its pool buffers alive — safe to hold
+// past the dispatch and to capture BY VALUE into xi::async / xi::parallel_for,
+// exactly like an xi::Image or a TriggerSnapshot. ABSENT pack (a Record-era
+// event, or no pack plane on the host) ⇒ an empty ScriptPack: bool-false, all
+// getters std::nullopt — fail-loud in the script's hands, never a crash.
+
+// A borrowed image entry read out of a pack: descriptor + a zero-copy view over
+// the pool buffer's pixels. Valid for the life of the owning ScriptPack.
+struct ScriptPackImage {
+    int32_t width    = 0;
+    int32_t height   = 0;
+    int32_t channels = 0;
+    std::span<const uint8_t> pixels;
+};
+
+// A borrowed self-describing blob read out of a pack (xi.pack@4, spec 30): the
+// descriptor map bytes + the 64B-aligned payload span, both zero-copy over the
+// pool buffer. Valid for the life of the owning ScriptPack. Decode `desc` with
+// xi::mp::Reader — its "t" key names the type ("xi/image", "toolbox/type").
+struct ScriptPackBlob {
+    std::span<const uint8_t> desc;      // canonical msgpack descriptor map
+    std::span<const uint8_t> payload;   // 64B-aligned payload bytes
+};
+
+template <class Schema> class ScriptTypedPack;
+
+class ScriptPack {
+public:
+    ScriptPack() = default;
+    ScriptPack(xi_pack_handle h, const xi_pack_v1* fi,
+                std::shared_ptr<const void> keepalive)
+        : h_(h), fi_(fi), keep_(std::move(keepalive)) {}
+
+    // A pack is present iff we hold a live handle AND the host's pack vtable.
+    bool valid() const { return fi_ && h_ != XI_PACK_NULL; }
+    explicit operator bool() const { return valid(); }
+
+    // Number of keyed entries (0 on an empty pack).
+    int32_t count() const { return (valid() && fi_->count) ? fi_->count(h_) : 0; }
+
+    // ---- typed borrowed reads (std::nullopt on absent key / type mismatch) ----
+    std::optional<int64_t> get_i64(const char* key) const {
+        int64_t v = 0;
+        return (valid() && fi_->get_i64 && fi_->get_i64(h_, key, &v) == 1)
+                   ? std::optional<int64_t>(v) : std::nullopt;
+    }
+    std::optional<double> get_f64(const char* key) const {
+        double v = 0;
+        return (valid() && fi_->get_f64 && fi_->get_f64(h_, key, &v) == 1)
+                   ? std::optional<double>(v) : std::nullopt;
+    }
+    std::optional<bool> get_bool(const char* key) const {
+        int32_t v = 0;
+        return (valid() && fi_->get_bool && fi_->get_bool(h_, key, &v) == 1)
+                   ? std::optional<bool>(v != 0) : std::nullopt;
+    }
+    std::optional<std::string_view> get_str(const char* key) const {
+        const char* p = nullptr; int32_t n = 0;
+        return (valid() && fi_->get_str && fi_->get_str(h_, key, &p, &n) == 1)
+                   ? std::optional<std::string_view>(std::string_view(p ? p : "", n > 0 ? (size_t)n : 0))
+                   : std::nullopt;
+    }
+    std::optional<std::span<const uint8_t>> get_bin(const char* key) const {
+        const void* p = nullptr; int32_t n = 0;
+        return (valid() && fi_->get_bin && fi_->get_bin(h_, key, &p, &n) == 1)
+                   ? std::optional<std::span<const uint8_t>>(
+                         std::span<const uint8_t>(static_cast<const uint8_t*>(p), n > 0 ? (size_t)n : 0))
+                   : std::nullopt;
+    }
+    std::optional<ScriptPackImage> get_image(const char* key) const {
+        if (!valid() || !fi_->get_image) return std::nullopt;
+        xi_pack_image im{};
+        if (fi_->get_image(h_, key, &im) != 1) return std::nullopt;
+        return ScriptPackImage{ im.width, im.height, im.channels,
+            std::span<const uint8_t>(static_cast<const uint8_t*>(im.pixels),
+                                     im.length > 0 ? (size_t)im.length : 0) };
+    }
+    // Opaque nested msgpack pass-through (arrays/maps a producer emitted).
+    std::optional<std::span<const uint8_t>> get_mp(const char* key) const {
+        const void* p = nullptr; int32_t n = 0;
+        return (valid() && fi_->get_mp && fi_->get_mp(h_, key, &p, &n) == 1)
+                   ? std::optional<std::span<const uint8_t>>(
+                         std::span<const uint8_t>(static_cast<const uint8_t*>(p), n > 0 ? (size_t)n : 0))
+                   : std::nullopt;
+    }
+
+    // XI_PACK_TAG_* of a key, or -1 if absent (the raw ABI tag — the script
+    // consumes the opaque door, so it speaks int tags, not the C++ PackTag enum).
+    int32_t tag_of(const char* key) const {
+        return (valid() && fi_->tag_of) ? fi_->tag_of(h_, key) : -1;
+    }
+
+    // ---- xi.pack@4 reads (self-describing blobs, spec 30). Resolved through
+    // the host's "xi.pack"@4 door per call (cheap strcmp resolver); std::nullopt
+    // on a host with no blob plane — the same absent-pack fail-loud discipline as
+    // every getter above. Decode the descriptor with xi::mp::Reader ("t" names
+    // the type); get_image above is the xi/image-convention accessor over @1.
+    std::optional<ScriptPackBlob> get_blob(const char* key) const {
+        const xi_pack_v4* f4 = pack4_();
+        if (!valid() || !f4 || !f4->get_blob) return std::nullopt;
+        const void* d = nullptr; int32_t dl = 0;
+        const void* p = nullptr; int64_t pl = 0;
+        if (f4->get_blob(h_, key, &d, &dl, &p, &pl) != 1) return std::nullopt;
+        return ScriptPackBlob{
+            std::span<const uint8_t>(static_cast<const uint8_t*>(d), dl > 0 ? (size_t)dl : 0),
+            std::span<const uint8_t>(static_cast<const uint8_t*>(p), pl > 0 ? (size_t)pl : 0) };
+    }
+    // Convenience consumer accessor for an `xi/image` self-describing blob (spec
+    // 30): parse the descriptor's {w,h,c,dt} + payload into an ImageBlobView in
+    // ONE fail-loud call (nullopt on absent key, non-blob entry, "t" != "xi/image",
+    // or a malformed/undersized descriptor). Carries the real dtype (get_image
+    // above is the u8-assuming xi/image accessor over the @1 adapter). Wrap it as
+    // a cv::Mat with xi::as_cv_read(ImageBlobView) from <xi/xi_cv.hpp>.
+    std::optional<ImageBlobView> image_blob(const char* key) const {
+        auto b = get_blob(key);
+        if (!b) return std::nullopt;
+        return read_image_blob(b->desc, b->payload);
+    }
+
+    // ---- U1 pack-plane error path + provenance (docs/new_gen/15) ------------
+    // The pack mirror of Record::is_na()/na_reason() + src(): a fault is a
+    // NORMAL sealed pack carrying "$fault" (reason code) — check it before
+    // reading results, exactly as the Record path checks is_na(). $src is the
+    // immediate producer (the door instance / the funnel hop that minted this
+    // pack); $prov is the '/'-joined hop chain, oldest→newest.
+    //
+    //   auto r = xi::use("det0").process(f);
+    //   if (r.is_fault())
+    //       xi::ng(1, std::string(*r.fault_reason()).c_str());   // poison, no results
+    bool is_fault() const { return pack_contract::is_fault(fi_, valid() ? h_ : XI_PACK_NULL); }
+    std::optional<std::string_view> fault_reason() const { return get_str(pack_contract::kFault); }
+    std::optional<std::string_view> fault_key()    const { return get_str(pack_contract::kFaultKey); }
+    std::optional<std::string_view> fault_detail() const { return get_str(pack_contract::kFaultDetail); }
+    std::optional<std::string_view> src()  const { return get_str(pack_contract::kSrc); }
+    std::optional<std::string_view> prov() const { return get_str(pack_contract::kProv); }
+
+    // Generic producer-agnostic walk: fn(std::string_view key, int32_t tag) for
+    // every entry in insertion order — the same enumeration `expose`/record_save
+    // do host-side, exposed to a script that wants to dump an unknown pack.
+    template <class Fn>
+    void for_each(Fn&& fn) const {
+        if (!valid() || !fi_->count || !fi_->key_at || !fi_->tag_at) return;
+        int32_t n = fi_->count(h_);
+        for (int32_t i = 0; i < n; ++i) {
+            int32_t len = 0;
+            const char* k = fi_->key_at(h_, i, &len);
+            fn(std::string_view(k ? k : "", len > 0 ? (size_t)len : 0), fi_->tag_at(h_, i));
+        }
+    }
+
+    // The declared-keyset TYPED view: get_i64<Schema::kSeq>() resolves the slot to
+    // its key string at COMPILE TIME (Schema::keys[slot]) and reads it by string
+    // through the door. Schema is any struct with a constexpr `keys` array —
+    // that is ALL ScriptTypedPack requires (e.g. the generated _keys structs).
+    template <class Schema>
+    ScriptTypedPack<Schema> typed() const { return ScriptTypedPack<Schema>(*this); }
+
+    // Escape hatch for callers that want the raw door (e.g. to forward the handle).
+    xi_pack_handle    handle() const { return h_; }
+    const xi_pack_v1* iface()  const { return fi_; }
+
+private:
+    // The xi.pack@4 blob supplement, resolved fresh from the injected host table
+    // on each blob read (NOT cached in a static: pre-injection the table is null,
+    // and a once-cached null would wrongly stick for the process life).
+    static const xi_pack_v4* pack4_() {
+        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
+        return (host && host->get_interface)
+                   ? static_cast<const xi_pack_v4*>(host->get_interface("xi.pack", 4))
+                   : nullptr;
+    }
+
+    xi_pack_handle             h_    = XI_PACK_NULL;
+    const xi_pack_v1*          fi_   = nullptr;
+    std::shared_ptr<const void> keep_;   // holds the Trigger's pack ref alive
+};
+
+// ScriptTypedPack<Schema> — a schema-keyed convenience over ScriptPack. Reads
+// are STILL by key string through the door (the cross-DLL reality); the schema
+// only fixes key spelling at compile time and turns a bad slot into a compile
+// error. `keys` may hold const char* or std::string_view; both convert to the
+// std::string we pass as a NUL-terminated key (a pilot surface — not the hot
+// path, so correctness over the micro-cost of the copy).
+template <class Schema>
+class ScriptTypedPack {
+public:
+    explicit ScriptTypedPack(ScriptPack f) : f_(std::move(f)) {}
+    bool valid() const { return f_.valid(); }
+    explicit operator bool() const { return f_.valid(); }
+    const ScriptPack& pack() const { return f_; }
+
+    template <int Slot> std::optional<int64_t> get_i64() const {
+        static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
+        return f_.get_i64(std::string(Schema::keys[Slot]).c_str());
+    }
+    template <int Slot> std::optional<double> get_f64() const {
+        static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
+        return f_.get_f64(std::string(Schema::keys[Slot]).c_str());
+    }
+    template <int Slot> std::optional<bool> get_bool() const {
+        static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
+        return f_.get_bool(std::string(Schema::keys[Slot]).c_str());
+    }
+    template <int Slot> std::optional<std::string_view> get_str() const {
+        static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
+        return f_.get_str(std::string(Schema::keys[Slot]).c_str());
+    }
+    template <int Slot> std::optional<ScriptPackImage> get_image() const {
+        static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
+        return f_.get_image(std::string(Schema::keys[Slot]).c_str());
+    }
+    // Blob-plane sibling of get_image<Slot> (spec 30): the xi/image blob view
+    // (w/h/c + dtype + payload), off the deprecated @1 get_image adapter.
+    template <int Slot> std::optional<ImageBlobView> image_blob() const {
+        static_assert(Slot >= 0 && Slot < (int)Schema::keys.size(), "slot not declared in schema");
+        return f_.image_blob(std::string(Schema::keys[Slot]).c_str());
+    }
+
+private:
+    ScriptPack f_;
+};
 
 // xi::Trigger — read-only view of the current inspection event.
 //
@@ -159,10 +454,24 @@ public:
     // current_trigger() path).
     struct Data {
         std::unordered_map<std::string, Image> images;
-        Record                                 meta;
         CurrentTriggerInfo                     info{};
         std::string                            leader;
         bool                                   active = false;
+        // polaris2 wave-2 Pack pilot: an OWNED ref on the event's pack handle
+        // (retained from the view). Released here on the LAST Data ref, so every
+        // ScriptPack the script kept — even one captured into a worker — stays
+        // valid until it (and this Data) drop. XI_PACK_NULL ⇒ no pack carried.
+        xi_pack_handle    pack       = XI_PACK_NULL;
+        const xi_pack_v1* pack_iface = nullptr;
+        // A4 explicit per-run context, copied by value from the view — so a
+        // Trigger copy captured into a worker reads the run's id/frame_path with
+        // zero ambient state.
+        long long         run_id     = 0;
+        std::string       frame_path;
+        ~Data() {
+            if (pack != XI_PACK_NULL && pack_iface && pack_iface->release)
+                pack_iface->release(pack);
+        }
     };
 
     Trigger() = default;
@@ -179,6 +488,8 @@ public:
         d->info.timestamp_us     = v->timestamp_us;
         d->info.dequeued_at_us   = v->dequeued_at_us;
         d->info.is_active        = 1;
+        d->run_id                = (long long)v->run_id;
+        if (v->frame_path) d->frame_path = v->frame_path;
         if (v->leader_source) d->leader = v->leader_source;
         for (int i = 0; i < v->image_count; ++i) {
             xi_image_handle h = v->images ? v->images[i].handle : XI_IMAGE_NULL;
@@ -186,12 +497,20 @@ public:
             Image img = Image::adopt_pool_handle(v->host, h);   // addref → our own ref
             if (!img.empty()) d->images.emplace(v->images[i].key, std::move(img));
         }
-        if (v->meta_doc && v->host->doc_retain && v->host->doc_release) {
-            // Retain our own ref (host keeps its), then adopt_shared FROZEN — the
-            // Record consumes this reserved ref and doc_release's it when it dies.
-            v->host->doc_retain(v->meta_doc);
-            d->meta = Record::adopt_shared((yyjson_mut_doc*)v->meta_doc,
-                                           v->host->doc_release, /*frozen=*/true);
+        // THE CUT (v12): the Record meta plane (v->meta_doc retain + adopt_shared)
+        // was removed. Event metadata now rides the pack — see t.pack() below.
+        // polaris2 wave-2 Pack pilot: if the event carried a pack, resolve the
+        // host's xi.pack@1 vtable and take our OWN ref on the handle (the view's
+        // ref is only borrowed for this call). Data's dtor releases it. Mirrors the
+        // image/meta addref-our-own discipline so t.pack() survives the dispatch.
+        if (v->pack != XI_PACK_NULL && v->host->get_interface) {
+            const auto* fi = static_cast<const xi_pack_v1*>(
+                v->host->get_interface("xi.pack", 1));
+            if (fi && fi->retain && fi->release) {
+                fi->retain(v->pack);
+                d->pack        = v->pack;
+                d->pack_iface = fi;
+            }
         }
         data_ = std::move(d);
     }
@@ -217,27 +536,26 @@ public:
     // process()":
     //
     //   double queue_wait_us = (double)(t.dequeued_at_us() - t.timestamp_us());
-    //   double inspect_us    = (double)(xi::now_us()        - t.dequeued_at_us());
+    //   double inspect_us    = (double)(xi::wall_us()       - t.dequeued_at_us());
     //
     // 0 if the host hasn't stamped one (e.g. single-shot cmd:run path
     // before this field was introduced, or synthetic timer ticks with
     // no trigger). Always check is_active() first.
     int64_t       dequeued_at_us() const { if (data_) return data_->info.dequeued_at_us; ensure(); return info_.dequeued_at_us; }
 
+    // A4 explicit per-run context, self-contained on the Trigger (no ambient
+    // thunk): the run's arrival id + the optional cmd:run frame_path. Non-zero /
+    // non-empty only on a view-constructed (explicit-entry) Trigger; a
+    // default/ambient Trigger returns 0 / "" (use the free functions
+    // xi::run_id() / xi::current_frame_path() on those paths). Safe to read from
+    // a captured copy on any thread.
+    long long   run_id() const     { return data_ ? data_->run_id : 0; }
+    std::string frame_path() const { return data_ ? data_->frame_path : std::string{}; }
+
     std::string id_string() const {
-        if (data_) {
-            char buf[40];
-            std::snprintf(buf, sizeof(buf), "%016llx%016llx",
-                          (unsigned long long)data_->info.id.hi,
-                          (unsigned long long)data_->info.id.lo);
-            return buf;
-        }
+        if (data_) return trigger_id_hex128(data_->info.id.hi, data_->info.id.lo);
         ensure();
-        char buf[40];
-        std::snprintf(buf, sizeof(buf), "%016llx%016llx",
-                      (unsigned long long)info_.id.hi,
-                      (unsigned long long)info_.id.lo);
-        return buf;
+        return trigger_id_hex128(info_.id.hi, info_.id.lo);
     }
 
     // Returns the named source's image as a zero-copy view over the
@@ -274,8 +592,21 @@ public:
     std::vector<std::string> sources() const {
         if (data_) {
             std::vector<std::string> out;
-            out.reserve(data_->images.size());
-            for (auto& [k, v] : data_->images) out.push_back(k);
+            if (!data_->images.empty()) {
+                out.reserve(data_->images.size());
+                for (auto& [k, v] : data_->images) out.push_back(k);
+                return out;
+            }
+            // Pack path (H1): the image map is empty (the frame rides the pack),
+            // so report the pack's source identity — the emitting instance
+            // (leader) and the pack's $src stamp — instead of silently nothing.
+            // Gated on a pack being present ⇒ a bare Record trigger is unchanged.
+            if (auto p = pack()) {
+                if (!data_->leader.empty()) out.push_back(data_->leader);
+                if (auto s = p.src(); s && !s->empty() &&
+                    (out.empty() || out.front() != *s))
+                    out.emplace_back(*s);
+            }
             return out;
         }
         auto fn = reinterpret_cast<TriggerSourcesFn>(g_trigger_sources_fn_);
@@ -331,40 +662,41 @@ public:
         return srcs.empty() ? std::string{} : srcs.front();
     }
 
-    // ABI v5: the event's routing/context metadata (whatever the source put in
-    // the record it emit_trigger_record'd), as a read-only Record. Zero-copy /
-    // zero-serialize — borrows the host-owned metadata doc by pointer (held by
-    // the DocRegistry refcount for the life of this dispatch), exactly as a
-    // plugin's process(in) borrows in.doc. Read fields off it like any Record:
-    //
-    //   auto t = xi::current_trigger();
-    //   if (t.is_active()) {
-    //       auto m = t.meta();
-    //       std::string cmd = m["command"].as_string();   // routing key
-    //   }
-    //
-    // Returns an empty Record when the trigger carries no metadata (the bare
-    // emit_trigger path) or the host predates this callback. The returned
-    // Record is FROZEN (the host still holds its own ref): reads are free,
-    // a mutation copy-on-writes into the script's own doc.
-    Record meta() const {
-        if (data_) return data_->meta;
-        auto fn   = reinterpret_cast<TriggerMetaFn>(g_trigger_meta_fn_);
-        auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
-        if (!fn || !host || !host->doc_release) return Record();
-        void* d = fn();
-        if (!d) return Record();
-        // adopt_shared CONSUMES the ref trigger_meta_cb reserved for us; the
-        // returned Record doc_release's it when it dies, balancing the reserve.
-        return Record::adopt_shared((yyjson_mut_doc*)d, host->doc_release, /*frozen=*/true);
+    // EXPERIMENTAL (wave-2 Pack pilot, docs/new_gen/08 Wave 2): the v3 Pack this
+    // event carried on the dual-carry dispatch path, as a borrowed read-only view
+    // (see ScriptPack above). Empty ScriptPack — bool-false, all getters nullopt
+    // — when the event carried no pack (a Record-era event, the common case), when
+    // the host publishes no xi.pack@1 plane, or on the legacy ambient (non-view)
+    // entry: the pilot rides the explicit XI_INSPECT_ENTRY(t, frame) path. Never a
+    // crash — the absent-pack contract mirrors t.image()'s empty-Image behaviour.
+    ScriptPack pack() const {
+        if (data_ && data_->pack != XI_PACK_NULL && data_->pack_iface)
+            return ScriptPack(data_->pack, data_->pack_iface, data_);
+        return {};
     }
 
     // True if `name` appears in this trigger's source list. Cheap routing
     // affordance for multi-source scripts that switch on source identity
     // without re-implementing string compare or hashing in the hot path.
+    //
+    // Record path: the source is a key in the Record-plane image map.
+    // Pack path (H1): that map is EMPTY (the frame rides the pack), so keying
+    // off it alone always answered false for a pack-plane trigger — forcing
+    // multi-source pack scripts to route via t.primary_source() instead. The
+    // honest source identity of a pack trigger is the emitting instance
+    // (leader_source, what primary_source() returns) plus the pack's own
+    // producer stamp ($src). We consult those ONLY when a pack is actually
+    // carried, so a Record-plane trigger (pack == NULL) is byte-unchanged.
     bool has_source(const char* name) const {
         if (!name) return false;
-        if (data_) return data_->images.find(name) != data_->images.end();
+        if (data_) {
+            if (data_->images.find(name) != data_->images.end()) return true;
+            if (auto p = pack()) {                       // pack path only
+                if (!data_->leader.empty() && data_->leader == name) return true;
+                if (auto s = p.src(); s && *s == name) return true;
+            }
+            return false;
+        }
         for (auto& s : sources()) if (s == name) return true;
         return false;
     }
@@ -427,30 +759,22 @@ public:
         return name && images_.find(name) != images_.end();
     }
 
-    // The trigger's metadata Record (frozen, see Trigger::meta()). Held by value
-    // so it stays valid for the life of the snapshot, off any thread.
-    const Record& meta() const { return meta_; }
+    // THE CUT (v12): TriggerSnapshot::meta() was removed with the Record meta
+    // plane. Snapshot the pack instead if you need event metadata off-thread.
 
     xi_trigger_id id() const           { return info_.id; }
     int64_t       timestamp_us() const { return info_.timestamp_us; }
     int64_t       dequeued_at_us() const { return info_.dequeued_at_us; }
-    std::string   id_string() const {
-        char buf[40];
-        std::snprintf(buf, sizeof(buf), "%016llx%016llx",
-                      (unsigned long long)info_.id.hi,
-                      (unsigned long long)info_.id.lo);
-        return buf;
-    }
+    std::string   id_string() const { return trigger_id_hex128(info_.id.hi, info_.id.lo); }
 
 private:
     friend TriggerSnapshot trigger_snapshot();
     std::unordered_map<std::string, Image> images_;
-    Record                                 meta_;
     CurrentTriggerInfo                     info_{};
     bool                                   active_ = false;
 };
 
-// Capture the current trigger's images + meta into a by-value snapshot. MUST be
+// Capture the current trigger's images into a by-value snapshot. MUST be
 // called on the inspect thread (where the trigger is ambient); the result is then
 // safe to capture into any worker thread. Returns an inactive snapshot when no
 // trigger is in flight (plain cmd:run / timer tick).
@@ -467,141 +791,141 @@ inline TriggerSnapshot trigger_snapshot() {
         Image img = t.image(src);            // addref'd pool view, held by the snapshot
         if (!img.empty()) s.images_.emplace(src, std::move(img));
     }
-    s.meta_ = t.meta();                      // frozen Record — own ref, survives dispatch
     return s;
 }
 
 // Proxy object returned by xi::use()
-// A miss on xi::use("name") — process/exchange returns -1 when no instance by
-// that name is registered — used to be silent (empty Record/Image, no log), so a
-// typo'd or not-yet-created instance name looked like "found nothing". Surface it
-// once per name as an error log so it's discoverable.
-inline void warn_use_miss_(const xi_host_api* host, const char* name) {
+//
+// The once-per-key warn discipline shared by the three warn_use_* surfaces
+// below: a miss/misuse used to be silent (an empty result, no log), so a typo'd
+// name or a wrong-door call looked like "found nothing". Log it ONCE per key
+// through host->log so it's discoverable without flooding the per-frame path.
+//
+// Round-3 S3 (same class as last round's E1/E2 check-then-build fixes): the
+// first consolidation built key AND message strings on EVERY call before
+// probing the once-map — on a per-frame misuse path (a typo'd use() inside
+// inspect()) that was several heap allocs per frame, forever, just to decide
+// "already warned". Restructure: probe first with a cheaply-built key
+// (prefix+name, one small concat); the message only materializes via the
+// builder lambda on the FIRST pass for that key.
+template <class MsgBuilder>
+inline void warn_once_(const xi_host_api* host, const char* prefix,
+                       const char* name, MsgBuilder&& build_msg) {
     if (!host || !host->log) return;
     static std::mutex mu;
     static std::unordered_map<std::string, bool> warned;
-    std::string key = name ? name : "";
+    std::string key = std::string(prefix) + (name ? name : "");
     {
         std::lock_guard<std::mutex> lk(mu);
-        if (!warned.emplace(key, true).second) return;   // warned this name already
+        if (!warned.emplace(std::move(key), true).second) return;   // warned this key already
     }
-    std::string msg = "xi::use(\"" + key + "\"): no such instance — process/exchange "
-                      "returns empty (typo, or instance not created yet?)";
-    host->log(3, msg.c_str());
+    host->log(3, build_msg().c_str());
+}
+
+// A miss on xi::use("name") — process/exchange returns -1 when no instance by
+// that name is registered (typo, or instance not created yet).
+inline void warn_use_miss_(const xi_host_api* host, const char* name) {
+    warn_once_(host, "miss/", name, [&]() -> std::string {
+        std::string n = name ? name : "";
+        return "xi::use(\"" + n + "\"): no such instance — process/exchange "
+               "returns empty (typo, or instance not created yet?)";
+    });
+}
+
+// polaris2 Gate P2: pack-door miss — the instance EXISTS but publishes no
+// xi.pack@1 door (a Record-only plugin), so use(name).process(ScriptPack) can
+// only return an empty pack. Without the log the silent empty looks identical
+// to a real empty result.
+inline void warn_use_no_pack_door_(const xi_host_api* host, const char* name) {
+    warn_once_(host, "no_pack_door/", name, [&]() -> std::string {
+        std::string n = name ? name : "";
+        return "xi::use(\"" + n + "\").process(pack): instance has no "
+               "xi.pack@1 door — returns an empty pack (the target plugin "
+               "publishes no pack door; it cannot be driven on the data plane)";
+    });
+}
+
+// U3 (docs/new_gen/17): process(pack) on a DECLARED ORDERED SINK (-5).
+// process() is request-reply; a sink is fed fire-and-forget via push() (staged
+// + flushed in frame order). Rejected fail-loud instead of staged: a staged
+// call's reply cannot exist until the post-inspect flush, so it could only
+// return an empty pack indistinguishable from a door hard failure.
+inline void warn_use_sink_target_(const xi_host_api* host, const char* name) {
+    warn_once_(host, "sink_target/", name, [&]() -> std::string {
+        std::string n = name ? name : "";
+        return "xi::use(\"" + n + "\").process(pack): target is a declared "
+               "ordered sink — process() is request-reply and is rejected on "
+               "sinks (returns an empty pack); feed the sink with "
+               "xi::use(\"" + n + "\").push(pack) instead "
+               "(staged + flushed in frame order; docs/new_gen/17)";
+    });
 }
 
 class UseProxy {
 public:
     explicit UseProxy(const std::string& name) : name_(name) {}
 
-    Record process(const Record& input) {
-        // NA propagation: a poison input short-circuits — the plugin never runs,
-        // and the NA (with its reason) flows straight through. See
-        // docs/internals/typed-io.md.
-        if (input.is_na()) return Record::na(input.na_reason()).set_src(name_);
-
-        auto process_fn = reinterpret_cast<UseProcessFn>(g_use_process_fn_);
+    // polaris2 Gate P2 (docs/new_gen/10): chain a Pack into this instance's
+    // xi.pack@1 pack door. THE CUT (v12): this is the SOLE use()->process path
+    // (the Record overload was removed); pack currency in and out:
+    //
+    //   XI_INSPECT_ENTRY(t, frame) {
+    //       auto f = t.pack();                              // pack-mode source
+    //       if (!f) return;
+    //       auto r = xi::use("det0").process(f);            // drive the door
+    //       int64_t blobs = r.get_i64("blob_count").value_or(-1);
+    //       if (auto fault = r.get_str("$fault")) xi::ng(1, "det0 fault");
+    //   }
+    //
+    // INPUT: any live ScriptPack — the trigger's own pack (t.pack(), the
+    // chaining case above) or a script-built one. Borrowed for the call; the
+    // caller's ref is untouched. An EMPTY input returns an empty pack without
+    // entering the plugin (absence propagates, never crashes). A FAULT input
+    // (is_fault()) short-circuits HOST-SIDE (use_pack_process_cb, doc 15): the
+    // plugin never runs and the result is a NEW fault pack carrying the
+    // original reason with this instance appended to the $prov chain — the
+    // pack-plane fail-loud short-circuit (the pack analogue of the retired
+    // Record NA propagation).
+    //
+    // OUTPUT: a ScriptPack that OWNS the door's result handle — the keepalive
+    // releases it on the last copy, so (like t.pack()) it is safe to hold past
+    // the dispatch and capture by value into xi::async / xi::parallel_for.
+    // EMPTY on: older host (no pack callback wired), no such instance (-1,
+    // once-per-name error log), door crashed (-2 — a torn result is never
+    // adopted), instance quarantined (-3), a Record-only plugin with no
+    // pack door (-4, once-per-name error log), or a DECLARED ORDERED SINK
+    // target (-5, once-per-name error log — U3, docs/new_gen/17: process()
+    // is request-reply and is rejected on sinks; feed a sink with push()).
+    // A CONTRACT failure (e.g. missing input key) is NOT empty — the door
+    // returns a normal sealed pack carrying "$fault" (fail-loud,
+    // xi_pack_proc_v1 contract), so check that.
+    ScriptPack process(const ScriptPack& input) {
+        auto fn    = reinterpret_cast<UsePackProcessFn>(g_use_pack_process_fn_);
         auto* host = reinterpret_cast<const xi_host_api*>(g_use_host_api_);
-        if (!process_fn || !host) return {};
-
-        // Marshal input Record → C ABI. Pool-backed Images forward
-        // their existing handle (just addref); heap-backed Images
-        // allocate a new pool slot and memcpy the bytes in. The
-        // receiving plugin sees the handle either way.
-        // Per-thread scratch, reused across calls to drop two allocations off
-        // the per-frame dispatch path. Safe because use() calls never nest on a
-        // thread: process_fn is a plugin, and a plugin can't call xi::use()
-        // (it's script-side), so it can't re-enter this with the buffers live.
-        static thread_local std::vector<xi_record_image> in_imgs;
-        static thread_local std::vector<xi_image_handle>  in_handles;
-        in_imgs.clear();
-        in_handles.clear();
-        for (auto& [key, img] : input.images()) {
-            if (img.empty()) continue;
-            xi_image_handle h = XI_IMAGE_NULL;
-            if (img.pool_handle() && img.pool_host() == host) {
-                h = img.pool_handle();
-                host->image_addref(h);
-            } else {
-                h = host->image_create(img.width, img.height, img.channels);
-                if (h == XI_IMAGE_NULL) continue;
-                std::memcpy(host->image_data(h), img.data(), img.size());
-            }
-            in_imgs.push_back({key.c_str(), h});
-            in_handles.push_back(h);
+        if (!fn || !host) return {};              // older host: no pack chaining
+        if (!input.valid()) return {};            // absence propagates
+        xi_pack_handle out = XI_PACK_NULL;
+        int rc = fn(name_.c_str(), input.handle(), &out);
+        if (rc < 0) {
+            if (rc == -1) warn_use_miss_(host, name_.c_str());
+            else if (rc == -4) warn_use_no_pack_door_(host, name_.c_str());
+            else if (rc == -5) warn_use_sink_target_(host, name_.c_str());
+            // -2 (crash) / -3 (quarantined) are logged host-side where the
+            // fault policy runs; `out` from a torn call is never trusted.
+            return {};
         }
-        xi_record_out output;
-        xi_record_out_init(&output);
-
-        // γ-4: share our input doc into the host registry (enroll this side) and
-        // hand the host the registry-managed pointer, so the plugin can adopt it
-        // and cache it across frames zero-copy — no serialize. For a JSON-fallback
-        // target the host serialises it there; the plugin never adopts, and our
-        // enroll ref is released when this input Record dies.
-        const void* in_doc = (host->doc_retain && host->doc_release)
-            ? (const void*)input.share_out(host->doc_retain, host->doc_release)
-            : (const void*)input.doc();
-        int prc = process_fn(name_.c_str(), in_doc,
-                   nullptr, 0,
-                   in_imgs.data(), (int)in_imgs.size(), &output);
-        // Release input handles from the BACKEND pool — plugin's process()
-        // copied what it needed. Done regardless of outcome.
-        for (auto h : in_handles) host->image_release(h);
-
-        // A failed call's `output` is NOT a trustworthy result: -1 = no such
-        // instance; -2 = the plugin's process() crashed (SEH) or threw — in which
-        // case it may have written a partial/torn out_doc before faulting. Adopting
-        // or parsing it would be a use-after-fault, and treating a crashed call as a
-        // valid (empty) result is a silent false-pass downstream. Bail with an empty
-        // provenance-tagged Record instead of interpreting output. (Previously only
-        // -1 was special-cased and the crash path fell through to adopt_shared.)
-        if (prc < 0) {
-            if (prc == -1) {
-                warn_use_miss_(host, name_.c_str());
-                // The instance was never found, so use_process_inline_ returned at
-                // its first line WITHOUT touching the shared doc — the ref share_out
-                // RESERVED for the adopting side (xi_record.hpp share_out) is
-                // unconsumed. Release it here or it (and the host-owned doc + its
-                // pooled chunks) leak on EVERY call — a per-frame unbounded leak when
-                // a script use()'s a renamed/typo'd instance under continuous dispatch.
-                // Scoped to the share_out path: in_doc is the registry pointer only
-                // when doc_retain/doc_release were present (else it's a borrowed
-                // input.doc() we must NOT release). The JSON-fallback and adopt paths
-                // already balance their ref; -2 (crash) is left alone (a torn call may
-                // or may not have adopted — don't risk a double-release).
-                if (host->doc_retain && host->doc_release && in_doc)
-                    host->doc_release(const_cast<void*>(in_doc));
-            }
-            xi_record_out_free(&output);
-            Record empty;
-            empty.set_src(name_);
-            return empty;
-        }
-
-        // γ: adopt the borrowed-doc output by pointer (zero parse) when the
-        // plugin returned one; otherwise decode the JSON bytes. The adopted doc
-        // is host-pool-backed, so freeing it when `result` dies routes through
-        // the host (doc->alc) — safe across the DLL boundary.
-        Record result = output.out_doc
-            ? Record::adopt_shared((yyjson_mut_doc*)output.out_doc, host->doc_release,
-                                   host->doc_refcount && host->doc_refcount((void*)output.out_doc) > 1)
-            : ((output.data && output.len > 0)
-                   ? Record::from_json_bytes(output.data, (size_t)output.len)
-                   : Record());
-        // Output handles live in the BACKEND pool. Zero-copy: wrap as
-        // a pool-backed view (adopt_pool_handle addrefs internally) and
-        // release our process_fn ref. Net refcount: still 1, held by
-        // the script-side xi::Image via its shared_ptr deleter.
-        for (int i = 0; i < output.image_count; ++i) {
-            xi_image_handle h = output.images[i].handle;
-            if (!h) continue;
-            Image img = Image::adopt_pool_handle(host, h);
-            host->image_release(h);
-            if (!img.empty()) result.image(output.images[i].key, std::move(img));
-        }
-        xi_record_out_free(&output);
-        result.set_src(name_);   // provenance: this output came from this instance
-        return result;
+        if (out == XI_PACK_NULL) return {};       // door's hard internal failure
+        // Wrap the result in an OWNING ScriptPack. Prefer the input's cached
+        // vtable (same process-stable host singleton); fall back to resolving
+        // the door — it must exist, since the host just minted `out` on it.
+        const xi_pack_v1* fi = input.iface();
+        if (!fi && host->get_interface)
+            fi = static_cast<const xi_pack_v1*>(host->get_interface("xi.pack", 1));
+        if (!fi || !fi->release) return {};       // unreachable on a sane host
+        std::shared_ptr<const void> keep(
+            static_cast<const void*>(fi),         // any non-null tag; deleter is the point
+            [fi, out](const void*) { fi->release(out); });
+        return ScriptPack(out, fi, std::move(keep));
     }
 
     std::string exchange(const std::string& cmd) {
@@ -624,8 +948,62 @@ public:
     // It contradicted the push-only source model: sources push frames via
     // emit_record into the trigger bus, and scripts read the CURRENT trigger
     // (xi::current_trigger().image("src") / the XI_INSPECT_ENTRY view) rather
-    // than pulling a frame from an instance. The host-side grab plumbing
-    // (g_use_grab_fn_) is left in place but no longer reachable from the SDK.
+    // than pulling a frame from an instance. The SDK-side landing pad
+    // (g_use_grab_fn_) is now gone too; the host passes nullptr into the
+    // retained grab_fn ABI slot (xi_script_set_use_callbacks), which is
+    // discarded until that slot is formally cut.
+
+    // ─── polaris2 gate P2: expose-from-script (push a sealed Pack to a sink) ──
+    //
+    // Push a pack the script holds (t.pack(), or any ScriptPack) to this
+    // instance's xi.pack@1 pack door WITHOUT an intervening plugin:
+    //
+    //   XI_INSPECT_ENTRY(t, frame) {
+    //       if (auto f = t.pack()) xi::use("expose").push(f);
+    //   }
+    //
+    // ZERO-COPY + AS-IS: the sealed pack handle crosses the seam untouched — no
+    // re-encode, no re-key, no host stamping ($seq is NOT injected: a sealed
+    // pack is immutable, and the whole design point is that expose's XEX1-v2
+    // dump of this pack is byte-identical to a direct host-side dump). Routing
+    // ($channel) and ordering ($seq) therefore come from the pack's OWN entries;
+    // a pack without them lands on expose's "default" channel with seq 0.
+    // U3 contract (docs/new_gen/17): producer-stamped entries are THE in-band
+    // identity mechanism — stamp the host arrival id yourself before seal
+    // (b.add_i64("$seq", (int64_t)xi::run_id())) to get the Record-era
+    // host-stamped semantics; the staged flush guarantees DELIVERY ORDER
+    // (frame order under result_order:"arrival") independently of any entry.
+    //
+    // FIRE-AND-FORGET, sink-ordered: a declared sink target is staged by the
+    // host and flushed after the inspect in frame order (the same staged-emit
+    // discipline as use(sink).process(rec)); the ack pack is dropped host-side.
+    // A non-sink pack-door target is driven inline. Pack-out chaining (reading
+    // the door's reply) is NOT this API — that is the use()->door chaining
+    // surface, deliberately separate.
+    //
+    // LIFETIME: `p` is borrowed for the call. The host retains its own ref on
+    // the handle before returning (kept until the staged flush releases it), so
+    // the script may drop its ScriptPack immediately after push() returns.
+    //
+    // Returns true iff the push was accepted (staged, or delivered inline);
+    // false on an older host (no callback), an empty pack, a missing instance /
+    // missing pack door, a quarantined instance, a crashed inline door, or an
+    // OFF-DISPATCH-THREAD call (-6, J4). push() STAGES into the dispatch thread's
+    // frame-ordered sink queue, so it is valid ONLY on the inspect/dispatch thread;
+    // calling it from a xi::async / xi::parallel_for body is a fail-loud programming
+    // error (rejected host-side with a once-per-sink-name log — the WRITE analogue of
+    // the current_trigger() off-thread guard). Capture the pack and push AFTER the
+    // parallel region instead.
+    bool push(const ScriptPack& p) {
+        auto push_fn = reinterpret_cast<UsePushPackFn>(g_use_push_pack_fn_);
+        if (!push_fn || !p.valid()) return false;
+        int rc = push_fn(name_.c_str(), p.handle());
+        if (rc == -1)   // -4 (live instance, no pack door) is NOT a name miss
+            warn_use_miss_(reinterpret_cast<const xi_host_api*>(g_use_host_api_),
+                           name_.c_str());
+        // -6 (off-thread) is logged host-side where the dispatch-thread markers live.
+        return rc >= 0;
+    }
 
     const std::string& name() const { return name_; }
 

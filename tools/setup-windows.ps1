@@ -79,6 +79,22 @@ if (-not $SkipVS) {
     }
 }
 
+# --- 1b. ccache (build accelerator; optional but recommended) -------------
+# gate.py configures with the Ninja Multi-Config generator, which honours a
+# compiler launcher; backend/CMakeLists auto-wires ccache when it's on PATH. Its
+# user-global cache is SHARED across all worktrees, so a reset worktree's cold
+# rebuild reuses objects another build already compiled — the big win. No-op if the
+# build ever falls back to the VS generator (which ignores the launcher).
+if (-not $SkipVS) {
+    Info "Checking ccache (compiler cache)..."
+    if (Get-Command ccache -ErrorAction SilentlyContinue) { Ok "ccache already present." }
+    else {
+        winget install --id Ccache.Ccache -e --accept-source-agreements --accept-package-agreements 2>$null
+        if (Get-Command ccache -ErrorAction SilentlyContinue) { Ok "ccache installed." }
+        else { Warn "ccache not installed (optional) — builds still work, just no cache. Install manually: winget install Ccache.Ccache" }
+    }
+}
+
 # --- 2. OpenCV (required) -------------------------------------------------
 # winget has no clean OpenCV that lays out build\x64\vcXX\lib, so fetch the
 # official self-extracting release and unpack to C:\opencv (the probe default).

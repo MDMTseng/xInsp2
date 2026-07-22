@@ -21,15 +21,7 @@
 // of the class body) — no logic, signature, ABI, or wire change.
 //
 
-#ifdef _WIN32
-  #ifndef NOMINMAX
-    #define NOMINMAX
-  #endif
-  #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
-  #endif
-  #include <windows.h>
-#endif
+#include "xi_dynlib.hpp"       // HMODULE/LoadLibrary/GetProcAddress/FreeLibrary (win32 or dlopen shim)
 
 #include "xi_abi.h"
 #include "xi_atomic_io.hpp"
@@ -37,9 +29,12 @@
 #include "xi_cabi_adapter.hpp" // plugin_abi_compatible / PluginInfo / CAbiInstanceAdapter
 #include "xi_certify.hpp"     // Part III G1: scan/certification isolation (child-process certify + verdict cache)
 #include "xi_image_pool.hpp"
+#include "xi_pack_abi.hpp"   // polaris2 wave-2: install_pack_abi (xi.pack@1 door + dispatch releaser)
+#include "xi_cap_abi.hpp"    // capability plane pilot (doc 14): install_cap_plane (xi.cap@1 + xi.cap.provider@1)
 #include "xi_instance.hpp"
 #include "xi_config_validate.hpp" // validate_config_against_manifest (opt-in diagnostic, extracted leaf)
-#include "xi_pm_json.hpp"      // pm_json_escape / pm_json_quote (extracted leaf)
+#include "xi_pm_json.hpp"      // pm_json_escape (extracted leaf)
+#include "xi_quiesce_token.hpp" // QuiesceToken — proof-of-quiesce capability for destructive methods
 #include <cctype>
 #include <cassert>            // door_matches_fields freeze-guard (default_host_api)
 #include "xi_pm_parse.hpp"     // parse_manifest / extract_string / detail_find_key
@@ -70,7 +65,7 @@
 
 namespace xi {
 
-// (pm_json_escape / pm_json_quote moved to xi_pm_json.hpp)
+// (pm_json_escape moved to xi_pm_json.hpp)
 // (plugin_abi_compatible / PluginInfo / CAbiInstanceAdapter moved to
 //  xi_cabi_adapter.hpp; InstanceInfo / ProjectInfo / CompileEnv to
 //  xi_project_model.hpp — both included above.)
@@ -91,10 +86,22 @@ public:
         // this order at runtime; this is the static-destruction / never-closed-project
         // BACKSTOP (controlled_shutdown_teardown_ now calls close_project for the
         // normal path, but an exit that skips it must still not invert the order).
-        // The adapter's ImagePool sweep is itself guarded by g_image_pool_alive for
-        // the case the pool singleton was already torn down before us.
+        // The adapter's ImagePool sweep is safe even this late: the pool
+        // singleton is intentionally leaked (ImagePool::instance), so it can
+        // never have been torn down before us.
         project_.instances.clear();
         inst_state_.clear();
+        // V3: machine-autoloaded providers are NOT in project_.instances (they
+        // outlive projects), so tear them down here too — BEFORE the FreeLibrary
+        // loop below, for the exact same dangling-destroy_fn reason. Their DLLs
+        // are global (scanned, not project-loaded), so they're in plugins_ and
+        // get freed by the loop after their adapters are gone. Drop the
+        // InstanceRegistry ref FIRST (it holds a shared_ptr too) so clearing the
+        // map actually destroys the adapter here — the same discipline
+        // close_project applies to project instances.
+        for (auto& [pname, inst] : machine_instances_)
+            if (inst) InstanceRegistry::instance().remove(inst->name());
+        machine_instances_.clear();
         // Now release every loaded plugin DLL — no live destroy_fn callers remain.
         for (auto& [name, pi] : plugins_) {
             if (pi.handle) {
@@ -104,8 +111,18 @@ public:
         }
     }
 
+    // DESTRUCTIVE-METHOD CONVENTION: every method that mutates/frees adapters,
+    // instances, or plugin DLLs (which dispatch workers could still be calling
+    // into) takes a `const QuiesceToken&` as its FIRST parameter — proof the
+    // caller has quiesced dispatch. Only DispatchPoolGuard (via
+    // quiesce_dispatch_for_lifecycle_op_) or an explicit
+    // QuiesceToken::assert_no_dispatch() can mint one — forgetting the quiesce
+    // is a compile error. See xi_quiesce_token.hpp.
+
     // ---- plugin discovery / certification / registration (xi_pm_discovery.hpp) ----
-    int  scan_plugins(const std::string& plugins_dir);
+    // DESTRUCTIVE: the "moved" branch FreeLibrary's a plugin DLL a live adapter
+    // may still hold (RT5/J2).
+    int  scan_plugins(const QuiesceToken& quiesced, const std::string& plugins_dir);
     void set_certify_exe(const std::string& exe);
     std::vector<OpenWarning> certify_warnings();
     bool unquarantine_plugin(const std::string& name_or_folder);
@@ -126,8 +143,14 @@ public:
     bool plugin_location(const std::string& name, std::string& folder, std::string& dll);
 
     // ---- project management + working copy (xi_pm_project.hpp) ----
-    bool create_project(const std::string& folder, const std::string& name);
-    void close_project();
+    // DESTRUCTIVE: clears project_.instances + their registry entries (adapter
+    // dtors run) — the same teardown surface as close_project, so it takes the
+    // same proof-of-quiesce token.
+    bool create_project(const QuiesceToken& quiesced,
+                        const std::string& folder, const std::string& name);
+    // DESTRUCTIVE: destroys every instance adapter + FreeLibrary's the
+    // project's plugin DLLs (P0-AB-3).
+    void close_project(const QuiesceToken& quiesced);
     // Constants + the filesystem mechanics (seed/mirror/exclude/gitignore) live
     // in xi_working_copy.hpp; these aliases keep the references terse. The
     // stateful transactional methods (open/commit/discard) stay members.
@@ -136,17 +159,28 @@ public:
     // The canonical project dir when a working copy is active; empty otherwise.
     const std::string& canonical_path() const { return canonical_path_; }
     bool has_working_copy() const { return !canonical_path_.empty(); }
-    bool commit_working_copy();
-    bool reopen_fresh_working_copy();
-    bool open_project(const std::string& folder_arg, bool working_copy = false);
+    // DESTRUCTIVE: the commit mirrors (add/overwrite/delete) the scratch that
+    // continuous workers read/write.
+    bool commit_working_copy(const QuiesceToken& quiesced);
+    // DESTRUCTIVE: close + reopen (both destructive; token threads through).
+    bool reopen_fresh_working_copy(const QuiesceToken& quiesced);
+    // DESTRUCTIVE: tears down the previous project's instances and
+    // FreeLibrary's its plugin DLLs before loading the new one (P0-AB-3).
+    bool open_project(const QuiesceToken& quiesced,
+                      const std::string& folder_arg, bool working_copy = false);
 
     // ---- instance CRUD / lifecycle state / persistence (xi_pm_instances.hpp) ----
     static bool is_valid_instance_name(const std::string& n);
-    InstanceInfo* create_instance(const std::string& instance_name,
+    // DESTRUCTIVE: can EVICT a live machine-autoload provider of the same
+    // plugin (adapter dtor + cap/ref/pack owner sweeps) — RT5/J3.
+    InstanceInfo* create_instance(const QuiesceToken& quiesced,
+                                  const std::string& instance_name,
                                   const std::string& plugin_name,
                                   std::string* err = nullptr);
     bool save_instance(const std::string& instance_name);
-    bool remove_instance(const std::string& instance_name, bool delete_folder);
+    // DESTRUCTIVE: destroys a DLL-backed runtime adapter (finding 5).
+    bool remove_instance(const QuiesceToken& quiesced,
+                         const std::string& instance_name, bool delete_folder);
     // Result of rename_instance. The caller MUST distinguish Rejected (no mutation
     // happened — the old instance is untouched) from NotPersisted (the runtime +
     // on-disk folder were renamed to new_name, only the config save failed): on
@@ -155,11 +189,81 @@ public:
     // save-failed warning, NOT "rename failed" — reporting failure while the
     // runtime moved would desync name-keyed state.
     enum class RenameResult { Rejected, Ok, NotPersisted };
-    RenameResult rename_instance(const std::string& old_name, const std::string& new_name);
+    // DESTRUCTIVE: destroys the OLD adapter in place to rebuild it under the
+    // new name (L1 — the last un-quiesced live-adapter teardown).
+    RenameResult rename_instance(const QuiesceToken& quiesced,
+                                 const std::string& old_name, const std::string& new_name);
 
     ProjectInfo& project() { return project_; }
 
     std::string instance_group(const std::string& name);
+
+    // A locked, read-only snapshot of the live instance set for observers (the
+    // health + image-pool-stats readers) that must NOT iterate project().instances
+    // unlocked — an unlocked read races create/remove/rename_instance's map
+    // mutations (erase() → dangling entry / UAF), the exact race instance_group()
+    // guards mu_ against. Iterate the returned vector instead of the raw map. The
+    // shared_ptr keeps each instance alive for the whole read even if a concurrent
+    // remove erases it from the map. Deliberately a COPIED snapshot (not a locked
+    // visitor callback): the health reader re-enters get_instance_state(), which
+    // takes mu_ — running that under this lock would self-deadlock. Small fields
+    // only; take the lock, copy, release.
+    struct InstanceSnapshot {
+        std::string                   name;         // the map key = instance identity
+        std::string                   plugin_name;
+        std::shared_ptr<InstanceBase> instance;     // held alive for the reader
+    };
+    std::vector<InstanceSnapshot> snapshot_instances();
+
+    // ---- V3 machine-level lib-plugin autoload (doc 14 / doc 19 V3) ----------
+    // Instantiate every discovered plugin marked `"autoload": true` ONCE under a
+    // stable machine owner, so its capabilities register WITHOUT any project
+    // declaring a per-instance (cures E1's second cause, doc 06 §6). Idempotent
+    // + a reconciler: it creates a machine provider only for an autoload plugin
+    // that has NO machine instance yet AND no project instance (a project
+    // instance takes precedence). Called at service boot (after scan_plugins) and
+    // again after project teardown (close_project / remove_instance) to reinstate
+    // providers a closed project had displaced. Returns the count created.
+    // (definition in xi_pm_load.hpp)
+    int autoload_machine_providers();
+    // Deployment opt-in for machine autoload. OFF by default: a stock deployment
+    // is byte-unchanged (no machine providers, so nothing that keys off a
+    // capability's availability — e.g. expose's E2 JPEG preview — flips). The
+    // service sets this from `--autoload-lib` / env XINSP2_AUTOLOAD_LIB BEFORE
+    // the boot autoload pass. While OFF, every autoload path is a no-op, so the
+    // reconcilers wired into open/close/create/remove stay inert too.
+    void set_autoload_enabled(bool on) {
+        std::lock_guard<std::mutex> lk(mu_);
+        autoload_enabled_ = on;
+    }
+    bool autoload_enabled() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return autoload_enabled_;
+    }
+
+    // Deployment lib-plugin config (per machine): plugin name -> its def JSON.
+    // Applied via set_def to each AUTOLOADED machine provider before it serves
+    // (see autoload_machine_providers_locked_), so a deployment can tune a lib
+    // plugin (e.g. imgcodec's encode_max_concurrent) WITHOUT a project instance.
+    // Set from the service's --lib-config / env XINSP2_LIB_CONFIG before boot
+    // autoload. A project instance of the same plugin still wins (it displaces
+    // the machine provider with its own config).
+    void set_lib_config(std::unordered_map<std::string, std::string> cfg) {
+        std::lock_guard<std::mutex> lk(mu_);
+        lib_config_ = std::move(cfg);
+    }
+    // Machine-scoped recovery: rebuild a machine provider from a fresh factory
+    // (the analogue of an operator re-committing a project instance's config to
+    // clear a quarantine). Evicts the current machine adapter for `plugin_name`
+    // and re-autoloads it. Returns true if a provider is live afterwards.
+    // DESTRUCTIVE: evicts a live "@auto:" adapter (dtor + cap/owner sweeps) that
+    // dispatch workers could be mid-call into — hence the QuiesceToken (same
+    // convention as every other destructive method above).
+    // (definition in xi_pm_load.hpp)
+    bool reload_machine_provider(const QuiesceToken& quiesced,
+                                 const std::string& plugin_name);
+    // Test/inspection: names of the plugins currently machine-provided.
+    std::vector<std::string> machine_provider_plugins();
 
     // ---- host-tracked instance lifecycle state -----------------------------
     // The state map is OWNED here, under the same mu_ as the instance set, so
@@ -183,11 +287,30 @@ public:
     // (namespace xi) — used unqualified here, resolves to xi::OpenWarning.
     std::vector<OpenWarning> open_warnings();
 
+    // A hard, whole-project open refusal — distinct from the per-instance
+    // skip-bad warnings above (those still open the project). Currently set only
+    // when project.json declares an unrecognized FUTURE schema major (the
+    // project-file analogue of the plugin ABI gate refusing a too-new plugin).
+    // Empty when the last open_project did not hard-refuse; cleared at the start
+    // of every open_project so a stale reason never leaks into a later open.
+    std::string open_error();
+
 private:
     // Part III G1.1/G1.2 — certify a plugin folder, cached by DLL content hash.
     // (defined in xi_pm_discovery.hpp)
     certify::Verdict certify_folder_locked_(const std::string& folder,
                                             const PluginInfo& info);
+
+    // Off-lock cache-warm for certify_folder_locked_ — runs the throwaway-child
+    // certify subprocess (up to 30s) when the DLL hash is missing/changed and
+    // writes the verdict to the on-disk cache WITHOUT holding mu_. scan_plugins
+    // calls this in an UNLOCKED pre-pass so the subsequent locked certify_folder_
+    // locked_ reads the fresh cache instead of spawning under mu_ (which would
+    // stall instance_group() on the source emit hot path for up to 30s/plugin).
+    // Touches only the passed exe snapshot + the on-disk cache — no PluginManager
+    // shared state — so it is data-race free off-lock. (defined in xi_pm_discovery.hpp)
+    static void precertify_folder_(const std::string& folder, const PluginInfo& info,
+                                   const std::string& certify_exe);
 
     // Record the on-disk write-time of the DLL we just loaded, so
     // reload_changed_plugins() can later tell whether a rebuild produced a new
@@ -213,6 +336,15 @@ private:
         pi.json_fallback = json_flag_true(mc, "json_fallback");
         pi.is_sink       = json_flag_true(mc, "sink") ||
                            (extract_string(mc, "role").value_or("") == "sink");
+        // Keep the doc-14 lib marker + V3 autoload gate refreshed on reload too,
+        // so toggling them in plugin.json + Rebuild takes effect (parse_manifest
+        // is the scan-path twin of this reload-path source of truth).
+        pi.is_lib        = json_flag_true(mc, "lib");
+        pi.autoload      = json_flag_true(mc, "autoload");
+        // item 14: per-plugin post-fault policy DEFAULT (an instance.json
+        // "on_fault" overrides it). Unknown/absent → Reuse (today's behavior).
+        pi.default_on_fault = parse_on_fault(extract_string(mc, "on_fault").value_or(""),
+                                             OnFault::Reuse);
         // Refresh the LV2-style capability handshake too, so a rebuilt plugin that
         // newly declares (or drops) a required interface is re-gated on reload.
         pi.required_ifaces = parse_iface_reqs(mc, "requires");
@@ -238,10 +370,16 @@ private:
     // OpenCV/turbojpeg/IPP are deployed) + System32 + AddDllDirectory dirs in
     // the search set; it deliberately drops CWD/PATH (avoids accidental hijack).
     // NOTE: same-named DLLs still collide across plugins — Windows keeps one
-    // module per base name per process (see adding-a-plugin.md).
+    // module per base name per process (see docs/guides/write-a-plugin.md).
     // TODO(linux): dlopen resolves deps via RPATH/$ORIGIN + LD_LIBRARY_PATH;
     // build plugin .so with -Wl,-rpath,$ORIGIN for the same "deps beside me".
     static HMODULE load_plugin_dll_(const std::string& path) {
+        // `path` is already the resolved platform module file: a JIT build emits a
+        // .so directly, and a manifest-derived name was fs-aware-mapped once in
+        // parse_manifest (xi-<name>.dll -> .so only when the .so exists; a
+        // .dll-named fixture stays .dll). So load it verbatim — do NOT remap the
+        // suffix here, or a fixture that legitimately ships a .dll-named module
+        // would be mis-resolved to a non-existent .so.
         return LoadLibraryExA(path.c_str(), nullptr,
                               LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
@@ -256,13 +394,40 @@ private:
     struct PendingInstance {
         std::string name, folder, def_json;
         int         max_concurrency = 0;
+        OnFault     on_fault = OnFault::Reuse;   // item 14: preserved across reload
     };
 
     // Owner-guarded factory call shared by every (re)instantiation path on the
     // reload/recompile lanes. (defined in xi_pm_load.hpp)
     std::shared_ptr<CAbiInstanceAdapter> make_adapter_guarded_(
             PluginInfo& pi, const std::string& plugin_name,
-            const std::string& inst_name, int max_concurrency);
+            const std::string& inst_name, int max_concurrency,
+            OnFault on_fault = OnFault::Reuse);
+
+    // V3 autoload internals — mu_ MUST be held (definitions in xi_pm_load.hpp).
+    // load_plugin's body factored so autoload can LoadLibrary while holding mu_.
+    bool load_plugin_locked_(const std::string& name, std::string* err);
+    // The reconciler body (autoload_machine_providers wraps it under the lock).
+    int  autoload_machine_providers_locked_();
+    // Destroy the machine provider for `plugin_name` (adapter dtor owner-sweeps
+    // its capability registrations); no-op if none. Called BEFORE a project
+    // instance of that plugin runs its factory, so the project instance registers
+    // the slot cleanly (project precedence, no double-register).
+    void evict_machine_provider_locked_(const std::string& plugin_name);
+    // THE one spelling of "unload this plugin's module": evict the machine
+    // provider, THEN FreeLibrary + null handle/factory. Root cause (RT5/N1
+    // family): a FreeLibrary without the evict leaves the "@auto:" provider's
+    // InstanceRegistry/CapRegistry handlers pointing into the unmapped DLL;
+    // sites kept re-spelling the pair (and one forgot the evict entirely).
+    // (defined in xi_pm_load.hpp)
+    void unload_module_locked_(const std::string& plugin_name);
+    // Targeted Leg-B reinstate: bring the machine autoload provider for `key`
+    // back up on pi's (re)loaded module. Same eligibility gates as the global
+    // reconciler but for THIS plugin only. (defined in xi_pm_load.hpp)
+    bool reinstate_machine_provider_locked_(PluginInfo& pi, const std::string& key,
+                                            const char* lane);
+    // True if some project instance currently uses `plugin_name`.
+    bool project_provides_plugin_locked_(const std::string& plugin_name) const;
 
     // Phase 1 of a reload: snapshot every instance's def, then destroy them and
     // FreeLibrary the plugin's old DLL. (defined in xi_pm_load.hpp)
@@ -290,20 +455,33 @@ public:
         std::vector<xi::script::Diagnostic> diagnostics;
         std::vector<std::string> reattached_instances;
         std::string              error;
+        // Round-3 S2: non-fatal condition on an ok=true result (e.g. the OLD
+        // module is still mapped after a successful versioned-path recompile —
+        // new code is live, but a lingering worker may pin the old mapping).
+        // Surfaced by the WS handler as a "warning" field + a warn-level log.
+        std::string              warning;
     };
-    RecompileResult recompile_project_plugin(const std::string& plugin_name);
+    // DESTRUCTIVE: resets each instance adapter then FreeLibrary's the old DLL
+    // (P0-AB-4).
+    RecompileResult recompile_project_plugin(const QuiesceToken& quiesced,
+                                             const std::string& plugin_name);
 
     struct PluginRebuildReport {
         // status: "rebuilt" | "unchanged" | "failed"
         struct Item { std::string name, status, detail; };
         std::vector<Item> items;
     };
-    PluginRebuildReport rebuild_cmake_plugins(const std::string& cmake_exe,
+    // DESTRUCTIVE: unload → cmake build → reload per changed plugin.
+    PluginRebuildReport rebuild_cmake_plugins(const QuiesceToken& quiesced,
+                                              const std::string& cmake_exe,
                                               const std::string& config,
                                               const std::vector<std::string>& only = {});
 
     using ExportResult = xi::PluginExportResult;
-    ExportResult export_project_plugin(const std::string& plugin_name,
+    // DESTRUCTIVE-adjacent: recompiles in Release while workers could be
+    // mid-call into the same plugin's instances (quiesced like its siblings).
+    ExportResult export_project_plugin(const QuiesceToken& quiesced,
+                                        const std::string& plugin_name,
                                         const std::string& dest_root);
 
 private:
@@ -318,11 +496,25 @@ private:
 
     std::mutex mu_;
     std::unordered_map<std::string, PluginInfo> plugins_;
+    // V3: machine-autoloaded lib providers, keyed by PLUGIN name (one machine
+    // instance per autoload plugin). Distinct from project_.instances — these are
+    // machine-scoped: created at boot, NOT torn down by close_project, swept in
+    // ~PluginManager. Each holds a CAbiInstanceAdapter also registered in
+    // InstanceRegistry (so the capability funnel's resolve_provider_ finds it).
+    std::unordered_map<std::string, std::shared_ptr<CAbiInstanceAdapter>> machine_instances_;
+    // V3 deployment opt-in (see set_autoload_enabled). OFF = no autoload anywhere.
+    bool autoload_enabled_ = false;
+    // Deployment lib-plugin config (see set_lib_config): plugin name -> def JSON,
+    // applied to autoloaded machine providers. Empty = compiled defaults.
+    std::unordered_map<std::string, std::string> lib_config_;
     ProjectInfo project_;
     // Host-tracked instance lifecycle state (see the public set/get above). Guarded
     // by mu_; migrated inline by create/remove/rename so it never drifts.
     std::unordered_map<std::string, InstStateRec> inst_state_;
     std::vector<OpenWarning> last_open_warnings_;
+    // Hard whole-project open refusal reason (see open_error()). Empty unless the
+    // last open_project refused the file outright (unrecognized future schema).
+    std::string last_open_error_;
     // Part III G1 — path to the binary that handles `--certify-plugin <dir>`
     // (self, in practice). Empty disables spawning new certifications; cached
     // verdicts on disk are still honoured. Plugins skipped this scan because
@@ -358,15 +550,25 @@ private:
     // then points at <canonical>/.xinsp_work). Empty = no working copy.
     std::string canonical_path_;
 
-    // Shared host_api for in-process C-ABI plugin factory calls (image-pool host
-    // + trigger hook). One process-wide instance: every factory site used to
-    // declare its own byte-identical function-local static — this dedups them.
-    // Cold path (instance create / recompile / rename), so the single shared
-    // static is fine and costs nothing extra.
+    // Shared host_api for in-process C-ABI plugin factory calls (image-pool
+    // host). One process-wide instance: every factory site used to declare its
+    // own byte-identical function-local static — this dedups them. Cold path
+    // (instance create / recompile / rename), so the single shared static is fine
+    // and costs nothing extra.
     static xi_host_api& default_host_api() {
         static xi_host_api host = []{
             auto a = ImagePool::make_host_api();
-            install_trigger_hook(a);
+            // THE CUT: the Record emit hook (install_trigger_hook) is gone —
+            // sources emit packs through the pack ABI wired below.
+            // polaris2 wave-2: publish the xi.pack@1 data plane + wire the pack
+            // dispatch releaser, so a pack-capable plugin resolving the door off
+            // this table gets a live interface (and emit_pack reaches the bus).
+            install_pack_abi();
+            // Capability plane pilot (docs/new_gen/14): publish xi.cap@1 +
+            // xi.cap.provider@1 and wire the registration owner-sweeper, so a
+            // lib plugin registering in its factory (which runs under this
+            // table) reaches a live registration door.
+            install_cap_plane();
             // DEBUG freeze-guard: this is the FULLY WIRED table plugins receive, so
             // every carved get_interface entry must track its struct-field twin
             // (emit_record via the published slot). Catches door/field drift at

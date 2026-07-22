@@ -18,7 +18,7 @@ src/
     xi-image-viewer.svelte   canvas viewer: wheel-zoom/pan/pixel-probe; tap-out setFrame/fit + pixelpick/viewchange
     xi-image-editor.svelte   teach editor: draw point/rect/polygon (pull model); tap-out setFrame/setTool + commit/cancel
   dashboard/         the HMI dashboard, importable (one source, used by hmi/ + external apps)
-    cards.mjs        xi-card-* dashboard cards (verdict/yield/throughput/groups — run_result/run_ms/dispatch_stats)
+    cards.mjs        xi-card-* dashboard cards (verdict/yield/throughput/groups — run_result/compute_ms/dispatch_stats)
     layout.mjs       N-ary split/tabs layout engine (pure)
     dashboard.mjs    mountDashboard(host,{client,dashboard}) — render cards from a config + feed from WS
   lib/
@@ -90,6 +90,89 @@ def back via `set_instance_def` (no key loss regardless of plugin merge
 semantics). Omit `descriptor` and it's **inferred** from the instance's def
 (number→number, boolean→toggle) — a basic panel with zero declaration. Sections
 carry a `tag` (`setup`/`control`/`status`) — the unit of UI export below.
+
+## Manifest param-panel — `mountParamPanel` (single-parameter `set_param`)
+
+Where `mountPanel` sends the **whole def** (`set_instance_def`), a plugin manifest
+`params` block drives the **single-parameter** `set_param` path (doc 31):
+
+```js
+import { XiClient, mountParamPanel } from "@xinsp2/components";
+mountParamPanel(document.getElementById("params"), {
+  client,
+  params: [                                   // the manifest params block
+    { name: "sigma", min: 0, max: 10, default: 3 },   // min&max → slider
+    { name: "mode", options: ["fast", "fine"] },      // options → dropdown
+    { name: "invert", default: false },               // boolean → toggle
+  ],
+});
+```
+
+Each param is `{ name, type?, min?, max?, step?, default?, options?, label? }`;
+`type` (`slider`/`number`/`toggle`/`radio`/`dropdown`/`text`) is inferred from
+`default`/`options`/`min`&`max` when omitted (`paramsToControls` exposes the
+mapping). Editing a control fires `client.setParam(name, value)` — one named
+parameter, the plugin validates it (rsp ok / error) — and emits an `xi-param`
+`{name,value}` event. The returned handle has `values()` / `setValues(map)` /
+`destroy()`.
+
+## Run a plugin's VS Code webview UI in a browser — the `acquireVsCodeApi` shim
+
+A plugin's own `ui/index.html` (the toolbox panels) is written VS Code-webview
+style: it calls `acquireVsCodeApi()` and talks `{type:'exchange',cmd}` ↔
+`{type:'status',…}` with `data-param` / `data-action` conventions. The **official
+shim** (integration_test FR-3) runs it **unchanged** in a plain browser over WS —
+no per-app adapter, no panel rewrite:
+
+```js
+import { XiClient, installVsCodeShim } from "@xinsp2/components";
+const client = await new XiClient(url).connect();
+
+// Mount the vendored panel in an iframe and install the shim on ITS window
+// BEFORE the panel script runs (each panel binds to one instance):
+const frame = document.querySelector("#meas0-panel");   // <iframe src=".../meas0/ui/index.html">
+frame.addEventListener("load", () =>
+  installVsCodeShim({ client, instance: "meas0", win: frame.contentWindow }));
+```
+
+The shim's `postMessage({type:'exchange', cmd})` → `client.exchange(instance, cmd)`
+→ `window.postMessage({type:'status', …reply})` (the plugin's status body spread
+at the top level; `type` written last so a body's own `type` never shadows the
+envelope). `getState`/`setState` are `sessionStorage`-backed, matching the
+webview persistence contract. `createVsCodeApi(opts)` returns the bare `vscode`
+object if you install it yourself. **No backend change** — it is pure client-side
+transport over the shipped WS `exchange` verb.
+
+## Declarative renderer vocabulary v1 — `renderDescriptor`
+
+The no-code display path (doc 31): a self-describing blob's **descriptor** (its
+canonical-msgpack map — `t`, `w`, `h`, `c`, `dt`, plus an optional `render` hint
+and per-renderer keys) picks the renderer for its payload. One entry point:
+
+```js
+import { renderDescriptor } from "@xinsp2/components";
+renderDescriptor(host, { desc, payload /* Uint8Array/ArrayBuffer */, refs });
+```
+
+`pickRenderer(desc)` chooses by the explicit `render` hint, else infers from
+`t` + `dt` + shape. The descriptor keys each renderer reads:
+
+| renderer | selected when | descriptor keys | payload |
+|---|---|---|---|
+| `image`   | `t:"xi/image"`, `dt:"u8"` | `w`, `h`, `c` | `w*h*c` bytes → RGBA canvas (gray/RGB/RGBA) |
+| `heatmap` | `render:"heatmap"` or `xi/image` `dt` f32/u16/f64 **2-D** | `w`, `h`, `dt`, `range?:[min,max]`, `colormap?:"viridis"\|"gray"\|"jet"` | `w*h` scalars → colormapped canvas |
+| `profile` | `render:"profile"` or an f32/u16/f64 **1×N / N×1** | `w`/`h` (one = 1) or `n`, `dt`, `range?`, `width?`, `height?`, `color?` | `N` scalars → polyline chart |
+| `overlay` | `render:"overlay"` | `w`, `h`, `shapes:[…]`, `image?:<ref key>`, `width?`, `height?` | (none) shapes over an image `ref` |
+| `table`   | `render:"table"` | `value?` (else the payload) | canonical-msgpack **map** → key/value rows |
+| `hex`     | fallback (unknown `t`) | `t` | any bytes → `{type,size,preview}` card |
+
+`overlay` shapes are `{type:"point",x,y,r?,color?}`, `{type:"box",x,y,w,h,color?}`,
+`{type:"polyline",points:[[x,y],…],color?,closed?}` in descriptor (`w`×`h`) space,
+scaled to the viewport. `dt` ∈ `u8`/`u16`/`i32`/`f32`/`f64` (little-endian). Each
+renderer splits a **pure compute core** (`imageRGBA`, `heatmapRGBA`,
+`profilePoints`, `overlayOps`, `tableRows`, `readScalars`, `normalize`,
+`COLORMAPS` — all exported and unit-tested) from a thin canvas/DOM draw, so the
+geometry/color math is testable and reusable outside the canvas.
 
 ## Import the whole HMI dashboard — `mountDashboard`
 

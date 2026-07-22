@@ -8,8 +8,8 @@
 //   5. Open saver UI, set output folder + naming rule, enable
 //   6. Write inspection script that wires them together
 //   7. Save script → auto-compile → auto-run
-//   8. Verify viewer shows correct vars
-//   9. Verify files were saved to disk
+//   8. Run inspections (verdicts ride run_result)
+//   9. Verify .xex1 captures were saved to disk
 //   10. Stop, save project, close
 //
 // All steps use vscode.commands.executeCommand — no internal API calls.
@@ -20,6 +20,7 @@ const fs = require('fs');
 const os = require('os');
 const assert = require('assert');
 const { execSync } = require('child_process');
+const { captureScreenPosix } = require('./journey_helpers.cjs');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -70,6 +71,7 @@ function assertActiveEditor(fileBasename) {
 let mainCodePid = null;
 function resolveMainCodePid() {
     if (mainCodePid) return mainCodePid;
+    if (process.platform !== 'win32') return null;   // no PowerShell / Win32_Process
     try {
         // Walk up the ancestor chain from the extension host (this Node
         // process) to find the first Code.exe that actually owns a
@@ -109,6 +111,7 @@ function takeScreenshot(label) {
     fs.mkdirSync(screenshotDir, { recursive: true });
     const fname = `journey_${String(stepNum).padStart(2,'0')}_${label}.png`;
     const fpath = path.join(screenshotDir, fname);
+    if (process.platform !== 'win32') { captureScreenPosix(fpath, fname); return; }
     const pid = resolveMainCodePid() || 0;
     // PrintWindow with flag 3 = PW_CLIENTONLY | PW_RENDERFULLCONTENT;
     // works with DWM-composited windows (modern VS Code) where older
@@ -233,7 +236,7 @@ async function run() {
     const r1 = await vscode.commands.executeCommand('xinsp2.createProject', projDir, 'my_inspection');
     assert.ok(r1?.ok, 'create_project should succeed');
     assert.ok(fs.existsSync(path.join(projDir, 'project.json')), 'project.json created on disk');
-    assert.ok(fs.existsSync(path.join(projDir, 'inspection.cpp')), 'starter inspection.cpp created');
+    assert.ok(fs.existsSync(path.join(projDir, 'inspect.cpp')), 'starter inspect.cpp created');
     console.log(`  ✓ project created: ${projDir}`);
     try { await vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}
     await sleep(1500);
@@ -366,7 +369,7 @@ async function run() {
     await sleep(300);
     shot('blob_params_set');
 
-    api.clickInWebview('det0', 'vscode-button[onclick="onApply()"], button[onclick="onApply()"]');
+    api.clickInWebview('det0', 'xi-button[onclick="onApply()"], button[onclick="onApply()"]');
     await sleep(1000);
     console.log('  ✓ blob analysis configured');
     shot('blob_applied');
@@ -400,63 +403,65 @@ async function run() {
     shot('saver_enabled');
 
     // ====== STEP 6: User writes inspection script that wires them together ======
-    console.log('\n[STEP 6] User: Edit inspection.cpp');
-    const scriptPath = path.join(projDir, 'inspection.cpp');
+    console.log('\n[STEP 6] User: Edit inspect.cpp');
+    const scriptPath = path.join(projDir, 'inspect.cpp');
+    // v12 (THE CUT): the data plane is the sealed pack — build inputs with
+    // xi::ScriptPackBuilder, drive plugin pack doors with use().process(pack),
+    // and surface the observable via the run_result verdict (VAR is gone).
     const scriptCode = `
-#include <xi/xi.hpp>           // pulls in OpenCV
-#include <xi/xi_record.hpp>
+#include <xi/xi.hpp>           // pulls in OpenCV via the script force-include
 #include <xi/xi_use.hpp>
+#include <xi/xi_script_pack.hpp>
+#include <xi/xi_result.hpp>
+#include <vector>
 
 XI_SCRIPT_EXPORT
 void xi_inspect_entry(int frame) {
-    auto& det = xi::use("det0");
-    auto& saver = xi::use("saver0");
+    // Synthetic frame with two bright blobs (a single-shot cmd:run carries no
+    // camera frame — current_trigger() is inactive).
+    const int W = 320, H = 240;
+    std::vector<uint8_t> img((size_t)W * H, 0);
+    for (int by = 60; by < 100; ++by)
+        for (int bx = 60; bx < 100; ++bx)
+            img[(size_t)by * W + bx] = 255;
+    for (int by = 150; by < 190; ++by)
+        for (int bx = 200; bx < 240; ++bx)
+            img[(size_t)by * W + bx] = 255;
 
-    // Push model: read the pushed frame from the current trigger (no grab()).
-    auto t = xi::current_trigger();
-    auto img = t.is_active() ? t.image("cam0") : xi::Image{};
-    if (img.empty()) {
-        img = xi::Image(320, 240, 1);
-        std::memset(img.data(), 0, 320 * 240);
-        for (int by = 60; by < 100; ++by)
-            for (int bx = 60; bx < 100; ++bx)
-                img.data()[by * 320 + bx] = 255;
-        for (int by = 150; by < 190; ++by)
-            for (int bx = 200; bx < 240; ++bx)
-                img.data()[by * 320 + bx] = 255;
+    // Detection: drive blob_analysis' pack door (input key "gray").
+    xi::ScriptPackBuilder db;
+    db.add_image("gray", W, H, 1, img.data());
+    auto detection = xi::use("det0").process(db.seal());
+    if (detection.is_fault()) {
+        xi::result(-1, std::string(detection.fault_reason().value_or("fault")));
+        return;
     }
-    VAR(input, img);
-    // Source is already 1-channel; if your camera produces RGB, convert
-    // with cv::cvtColor(img.as_cv_mat(), out, cv::COLOR_RGB2GRAY).
+    long long n_blobs = detection.get_i64("blob_count").value_or(-1);
 
-    auto detection = det.process(xi::Record()
-        .image("gray", img));
-    VAR(detection_record, detection);
-
-    int n_blobs = detection["blob_count"].as_int();
-    VAR(blob_count, n_blobs);
-
-    xi::Record save_input;
-    save_input.image("input", img);
-    save_input.image("binary", detection.get_image("binary"));
-    save_input.set("blob_count", n_blobs);
-    save_input.set("frame", frame);
-    VAR(save_input_image_count, (int)save_input.images().size());
-
-    auto save_result = saver.process(save_input);
-    VAR(saved, save_result);
+    // Save: record_save's pack door persists the sealed pack as ONE .xex1
+    // capture (the .json+.bmp export door was deleted with Record).
+    xi::ScriptPackBuilder sb;
+    sb.add_image("input", W, H, 1, img.data());
+    if (auto bin = detection.get_image("binary"))
+        sb.add_image("binary", bin->width, bin->height, bin->channels,
+                     bin->pixels.data());
+    sb.add_i64("blob_count", n_blobs);
+    sb.add_i64("frame", frame);
+    auto save_result = xi::use("saver0").process(sb.seal());
+    bool saved = save_result.get_bool("saved").value_or(false);
+    xi::result((int)n_blobs, saved ? "saved" : "not_saved");
 }
 `;
     fs.writeFileSync(scriptPath, scriptCode);
-    console.log('  ✓ inspection.cpp written');
+    console.log('  ✓ inspect.cpp written');
 
     // Open in editor (so user sees their code — editor title actions visible)
     const doc = await vscode.workspace.openTextDocument(scriptPath);
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
     await sleep(1800);
     shot('script_in_editor');
-    assertActiveEditor('inspection.cpp');
-    console.log(`  ✓ UI assert: inspection.cpp is the active editor`);
+    assertActiveEditor('inspect.cpp');
+    console.log(`  ✓ UI assert: inspect.cpp is the active editor`);
 
     // ====== STEP 7: User compiles via command ======
     console.log('\n[STEP 7] User: Command Palette → "xInsp2: Compile Script"');
@@ -502,27 +507,27 @@ void xi_inspect_entry(int frame) {
     }
     assert.ok(savedFiles.length > 0, 'saver should have written files to disk');
 
-    // 9b: Should have JSON metadata files
-    const jsonFiles = savedFiles.filter(f => f.endsWith('.json'));
-    assert.ok(jsonFiles.length > 0, 'should have .json files');
+    // 9b: v12 — record_save persists ONE canonical .xex1 capture per run
+    // (the legacy .json+.bmp export door was deleted with Record).
+    const xexFiles = savedFiles.filter(f => f.endsWith('.xex1'));
+    assert.ok(xexFiles.length > 0, 'should have .xex1 captures');
 
-    // 9c: Should have BMP image files
-    const bmpFiles = savedFiles.filter(f => f.endsWith('.bmp'));
-    assert.ok(bmpFiles.length > 0, 'should have .bmp files');
-
-    // 9d: Naming rule applied: files start with "inspection_"
+    // 9c: Naming rule applied: files start with "inspection_"
     assert.ok(savedFiles.some(f => f.startsWith('inspection_')),
               'naming rule should produce inspection_* files');
 
-    console.log(`  ✓ ${jsonFiles.length} JSON + ${bmpFiles.length} BMP files saved`);
+    console.log(`  ✓ ${xexFiles.length} .xex1 capture(s) saved`);
     console.log(`  ✓ naming rule "inspection_{count}" applied`);
 
-    // 9e: Verify a JSON file has the inspection record content
-    const jsonPath = path.join(saveDir, jsonFiles[0]);
-    const recorded = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
-    assert.ok('blob_count' in recorded, 'saved JSON contains blob_count field');
-    assert.ok('frame' in recorded, 'saved JSON contains frame field');
-    console.log(`  ✓ recorded data includes: ${Object.keys(recorded).join(', ')}`);
+    // 9d: Verify a capture is a real XEX1 frame (magic 'XEX1' header) with
+    // a plausible payload (two images + scalars ≫ a bare header).
+    const xexPath = path.join(saveDir, xexFiles[0]);
+    const bytes = fs.readFileSync(xexPath);
+    assert.equal(bytes.subarray(0, 4).toString('ascii'), 'XEX1',
+        'capture starts with the XEX1 magic');
+    assert.ok(bytes.length > 320 * 240,
+        `capture carries the frame payload (${bytes.length} bytes)`);
+    console.log(`  ✓ ${xexFiles[0]} is a valid XEX1-v3 capture (${bytes.length} bytes)`);
 
     // Focus the saver UI so the screenshot shows the updated counter.
     try {
@@ -567,6 +572,32 @@ void xi_inspect_entry(int frame) {
     try { await vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}
     await sleep(1500);
     shot('final_after_close');
+
+    // ====== STEP 12: Reopen it — every declared instance must come back ======
+    // open_project is the SILENT path: an instance whose plugin module cannot be
+    // loaded is skipped with one log line while the command still reports ok, so
+    // the project comes up short and nothing fails. That is how a platform module
+    // -naming regression hid (manifests name xi-<n>.dll on every OS; the POSIX
+    // .so mapping is what makes a PREBUILT plugin resolvable — see
+    // platform_module_path in xi_dynlib.hpp). STEP 2 does not cover it: creating
+    // an instance and RESTORING one from project.json are different code paths.
+    // Assert on the count, not just ok.
+    console.log('\n[STEP 12] User: Reopen the project — all instances restored');
+    // open_project's OWN response carries the instances it actually brought up
+    // (PluginManager::to_json). list_instances is no good here: it answers `{}`
+    // and pushes the list as a separate "instances" event.
+    const r12 = await vscode.commands.executeCommand('xinsp2.openProject', projDir);
+    assert.ok(r12?.ok, 'project reopens');
+    await sleep(1500);
+    const names = (r12?.data?.instances ?? []).map(i => i.name ?? i).sort();
+    assert.deepStrictEqual(names, ['cam0', 'det0', 'saver0'],
+        `every declared instance loaded after reopen (got ${JSON.stringify(names)}) — `
+        + 'a missing one means its plugin module did not resolve');
+    console.log(`  ✓ instances restored: ${names.join(', ')}`);
+    try { await vscode.commands.executeCommand('xinsp2.instances.focus'); } catch {}
+    await sleep(1200);
+    shot('reopened_instances_restored');
+    try { await vscode.commands.executeCommand('xinsp2.closeProject'); } catch {}
 
     console.log(`\n=== USER JOURNEY COMPLETE — ${stepNum} screenshots ===`);
     console.log(`Project: ${projDir}`);

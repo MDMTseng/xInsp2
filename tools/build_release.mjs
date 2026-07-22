@@ -5,19 +5,25 @@
 // Output layout:
 //   release/xinsp2-<version>-win-x64/
 //     bin/                xinsp-backend.exe + DLLs
-//     plugins/            built plugins
+//     plugins/            built plugins   (runtime name — the backend
+//                         auto-scans <cwd>/plugins; the SOURCE tree is toolbox/)
 //     sdk/                template + examples + cmake module
 //     extension/          xinsp2-<version>.vsix
 //     docs/               FRAMEWORK / NewDeal / protocol
 //     INSTALL.md
 //     README.md
 //
-// Usage:  node tools/build_release.mjs [--no-rebuild] [--skip-vsix]
+// Usage:  node tools/build_release.mjs [--no-rebuild] [--skip-vsix] [--manifest-only]
+//
+//   --manifest-only  skip the (heavy) backend/plugin/VSIX build and just write
+//                    compat-manifest.json into the staging dir — for inspecting
+//                    or gating the manifest without cutting a full release.
 //
 import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync, statSync, createWriteStream } from 'node:fs';
 import { dirname, resolve, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildManifest, parseAbi } from './compat_manifest.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -25,6 +31,19 @@ const ROOT = resolve(__dirname, '..');
 const args = process.argv.slice(2);
 const NO_REBUILD = args.includes('--no-rebuild');
 const SKIP_VSIX  = args.includes('--skip-vsix');
+const MANIFEST_ONLY = args.includes('--manifest-only');
+
+// compat-manifest.json — a machine-readable statement of what this artifact IS
+// and what it claims compatibility with, written from the real version sources
+// at build time (see tools/compat_manifest.mjs; external review 06). Every field
+// is read from source — nothing hand-typed here.
+function writeCompatManifest(stageDir) {
+    const manifest = buildManifest(ROOT);
+    const dst = join(stageDir, 'compat-manifest.json');
+    writeFileSync(dst, JSON.stringify(manifest, null, 2) + '\n');
+    console.log(`  compat-manifest.json → ${dst}`);
+    return manifest;
+}
 
 // ---- Read version from CMakeLists.txt ----
 function readVersion() {
@@ -34,9 +53,23 @@ function readVersion() {
     return m[1];
 }
 const VERSION = readVersion();
+const ABI_VERSION = parseAbi(ROOT).version;   // for the INSTALL.md rollback note
 const RELEASE_NAME = `xinsp2-${VERSION}-win-x64`;
 const STAGE = join(ROOT, 'release', RELEASE_NAME);
 console.log(`> xInsp2 ${VERSION} → ${STAGE}`);
+
+// --manifest-only: generate just the compat manifest (no heavy build). Writes it
+// into the staging dir if the dir already exists, else prints it to stdout.
+if (MANIFEST_ONLY) {
+    const manifest = buildManifest(ROOT);
+    const json = JSON.stringify(manifest, null, 2) + '\n';
+    if (existsSync(STAGE)) {
+        writeFileSync(join(STAGE, 'compat-manifest.json'), json);
+        console.log(`compat-manifest.json written into ${STAGE}`);
+    }
+    process.stdout.write(json);
+    process.exit(0);
+}
 
 function sh(cmd, opts = {}) {
     console.log(`$ ${cmd}`);
@@ -66,11 +99,11 @@ if (!NO_REBUILD || !existsSync(exePath)) {
 }
 
 // ---- 2. Build plugins (lib only — DLLs already land next to plugin.json) ----
-const pluginsBuild = join(ROOT, 'plugins', 'build');
+const pluginsBuild = join(ROOT, 'toolbox', 'build');
 if (!NO_REBUILD || !existsSync(pluginsBuild)) {
     if (!existsSync(pluginsBuild)) mkdirSync(pluginsBuild, { recursive: true });
-    sh(`cmake -S plugins -B plugins/build -A x64`);
-    sh(`cmake --build plugins/build --config Release`);
+    sh(`cmake -S toolbox -B toolbox/build -A x64`);
+    sh(`cmake --build toolbox/build --config Release`);
 }
 
 // ---- 3. Build VS Code extension (esbuild bundle) and package as VSIX ----
@@ -104,10 +137,16 @@ for (const f of readdirSync(binSrc)) {
     }
 }
 
-// plugins/ — copy each plugin folder (skip build dirs)
-for (const p of readdirSync(join(ROOT, 'plugins'))) {
-    const ps = join(ROOT, 'plugins', p);
-    if (!statSync(ps).isDirectory() || p === 'build') continue;
+// toolbox/ (source) -> plugins/ (bundle): the backend auto-scans <cwd>/plugins,
+// so the shipped folder keeps the runtime name. Skip build dirs.
+// Not every folder under toolbox/ is a plugin. `tests` is the cross-plugin ctest
+// suite and `pluginlets` is a compile-time source library that plugin authors
+// #include — neither is something the backend should find while scanning
+// <cwd>/plugins, and neither belongs in a customer bundle.
+const NOT_A_PLUGIN = new Set(['build', 'tests', 'pluginlets']);
+for (const p of readdirSync(join(ROOT, 'toolbox'))) {
+    const ps = join(ROOT, 'toolbox', p);
+    if (!statSync(ps).isDirectory() || NOT_A_PLUGIN.has(p)) continue;
     copyDir(ps, join(STAGE, 'plugins', p));
 }
 
@@ -187,6 +226,25 @@ bin\\xinsp-runner.exe path\\to\\project --frames=1000 --output=report.json
 | \`sdk/\` | Plugin SDK: scaffold, template, examples, cmake module |
 | \`extension/\` | VS Code extension VSIX |
 | \`docs/\` | Framework reference, dev plan, protocol spec |
+| \`compat-manifest.json\` | Machine-readable identity: versions, plugin-ABI, WS protocol, known-compatible set |
+
+## Identity & rollback
+
+\`compat-manifest.json\` at the root of this artifact records exactly what this
+build is — backend version, git sha, plugin-ABI + min-compat, WS-protocol abi +
+command count + contract schemas — and the package set it was tested against, all
+read from source at build time. A target machine can answer "what am I running,
+and what does it claim compatibility with" from this file alone, with no network
+or source tree.
+
+Rollback here is zip-swap: replace the deployed folder with an older artifact.
+Because each artifact carries its own \`compat-manifest.json\`, the version identity
+travels with the zip — read the manifest of the build you are rolling to. One
+caveat crossing a **plugin-ABI** boundary (this build is v${ABI_VERSION}): a
+plugin binary only loads on the ABI it was built against, so plugins are part of
+the release unit, not independently rollable — a host rolled across an ABI break
+refuses plugins built for the other side (by design, loudly). See
+\`docs/reference/ws-protocol.md\` and \`README.md\` §Versioning.
 
 ## Verify
 
@@ -195,6 +253,9 @@ bin\\xinsp-backend.exe --version
 \`\`\`
 should print \`xinsp-backend ${VERSION} (<commit-hash>)\`.
 `);
+
+// compat-manifest.json — machine-readable identity of this artifact.
+writeCompatManifest(STAGE);
 
 console.log(`\nstaged at ${STAGE}`);
 

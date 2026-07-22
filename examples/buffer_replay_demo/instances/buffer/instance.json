@@ -1,1 +1,0 @@
-{ "plugin": "cache", "isolation": "in_process", "config": { "capacity": 16 } }

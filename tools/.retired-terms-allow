@@ -30,20 +30,22 @@ vscode-extension/src/extension.ts::the script surfaces between them: extension V
 docs/guides/write-a-script.md: legacy VAR/EMIT + legacy-entry material is documented here on purpose (compat appendix + legacy-signature comparison), current API taught first
 
 # --- reference/onboarding prose that DOCUMENTS the retirement on purpose ------
-# These lines mention VAR/EMIT/the legacy entry precisely to TELL the reader the
-# term is retired ("still compiles but no longer publishes", "REMOVED",
-# "Legacy no-op", legacy-signature reference row). Documenting a retired concept
-# is not a copy-paste hazard — the guard's target is examples that TEACH it as
-# current. Anchored to the retirement wording so only the caveat lines are silenced.
-docs/overview.md::still compiles but no longer publishes: overview point 4 documents that VAR is a removed no-op, pointing readers to the expose plugin
-docs/overview.md::declares a local; reusing a name: overview "conventions" note documents the legacy VAR redefinition gotcha as retired
-docs/overview.md::compile but: overview note that VAR/EMIT compile but no longer output — documents the retirement
-docs/reference/data-types.md::no longer emits anything: data-types documents VAR as a removed no-op and redirects to the expose plugin
-docs/reference/ws-protocol.md::still compile but: ws-protocol documents the REMOVED `vars` message and that VAR/EMIT publish nothing
-docs/reference/STUDY-sdk.md::Entry point. Frame count: STUDY signature-reference row for the legacy entry (documents it, does not teach it as current)
-docs/reference/STUDY-sdk.md::Legacy no-op: STUDY primitive-reference rows explicitly labelling VAR/EMIT as legacy no-ops
-docs/reference/STUDY-sdk.md::VAR (legacy): STUDY example-catalog row labels user_script_example.cpp as legacy VAR
-docs/guides/build-and-run.md::still compile but: build-and-run note documents that VAR/EMIT compile but no longer surface, pointing to expose
+# These lines mention VAR()/EMIT() precisely to TELL the reader the term is
+# retired ("were removed and no longer compile", "REMOVED"). Documenting a
+# retired concept is not a copy-paste hazard — the guard's target is examples
+# that TEACH it as current. Anchored to the retirement wording so only the
+# caveat lines are silenced. (overview.md and data-types.md dropped their
+# VAR()/EMIT() token forms in the truth-cut rewrite, so they no longer need a
+# rule; ws-protocol.md dropped its token forms in the v12 THE CUT rewrite;
+# STUDY-sdk.md moved to docs/archive/ and is off the blessed scan set.)
+docs/guides/build-and-run.md::were removed and no: build-and-run note documents that VAR(...)/EMIT(...) were removed and no longer compile, pointing to expose
+# data-types.md names TypedPack/TypedPackBuilder/PackSchema exactly to say the
+# container "was deleted 2026-07-11" and point at Pack/PackBuilder +
+# ScriptTypedPack — retirement notes, not examples. Anchored to that wording.
+docs/reference/data-types.md::container was: data-types documents the TypedPack/TypedPackBuilder/PackSchema deletion on purpose ("container was deleted"), teaching Pack/PackBuilder + ScriptTypedPack as current
+# c-abi.md's xi_script_set_run_ctx_callbacks row says it "Replaces the retired
+# ambient-TLS xi_script_set_run_id (U3) setter" — documenting the retirement.
+docs/reference/c-abi.md::retired ambient-TLS: c-abi run_ctx_callbacks row names xi_script_set_run_id precisely to say it is retired and replaced
 
 # --- docs/archive/** --------------------------------------------------------
 # (No archived page is in the scanned blessed set today; if archived pages are

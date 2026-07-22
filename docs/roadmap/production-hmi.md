@@ -9,7 +9,7 @@
 > **Superseded data path (branch `refactor/remove-var-core`).** This design binds
 > HMI cards to the `vars` message + binary **preview frames** the script emitted
 > via `VAR(...)`. That transport has since been **removed from core** — `VAR`/`EMIT`
-> still compile but publish nothing, and `vars`/preview/`subscribe` are gone from
+> were removed and no longer compile, and `vars`/preview/`subscribe` are gone from
 > the WS protocol. The HMI's per-pass value + image plumbing described below
 > (`vars` items, preview frames, `subscribe` by image name + `gid`) therefore no
 > longer has a live core source; surfacing script output for the HMI now goes

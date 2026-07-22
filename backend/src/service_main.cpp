@@ -38,10 +38,13 @@
 //  included below.)
 #include <xi/xi_image.hpp>
 #include <xi/xi_cli_args.hpp>
-#include <xi/xi_jpeg.hpp>
+// [v12 THE CUT — <xi/xi_jpeg.hpp> (in-core encoder) include removed; encode is
+//  now capability-only via xi.jpeg.encode.]
+#include <xi/xi_jpeg_cap.hpp>    // polaris2 ENCODE eviction: compress_sink delegates to xi.jpeg.encode
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_plugin_manager.hpp>
 #include <xi/xi_certify.hpp>      // Part III G1: --certify-plugin child mode (scan/certification isolation)
+#include <xi/xi_cap_abi.hpp>      // capability plane pilot (doc 14): service fault-note/culprit hooks
 #include <xi/xi_project.hpp>
 #include <xi/xi_owner_lock.hpp>     // F5: advisory single-writer stamp on the project folder
 #include <cassert>
@@ -55,10 +58,19 @@
 #include <xi/xi_ws_server.hpp>
 
 #include <condition_variable>
+#include <csignal>
 #include <filesystem>
 #include <thread>
 
-#include <windows.h>
+#ifdef _WIN32
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
 
 namespace xp = xi::proto;
 
@@ -73,13 +85,9 @@ Engine g_eng;
 
 // Loaded user script state. When null, cmd:run returns an error.
 
-
-// Persistent cross-frame state — survives DLL reloads.
-// Schema version of the DLL that wrote g_eng.persistent_state_json. The
-// next DLL's xi_script_state_schema_version() is compared against
-// this on restore — mismatch (and both non-zero) drops the state
-// rather than letting set_state default-fill into a different shape.
-// 0 means "unversioned" — restore proceeds without the check.
+// [v12 THE CUT — the Record persistent-state channel (persistent_state_json +
+//  xi_script_state_schema_version) was DELETED. Cross-frame script state is now
+//  the kv channel (persistent_kv_bytes + XI_KV_SCHEMA / migrate_kv), doc 16.]
 
 // Cache of every successful `cmd:set_param` value the backend pushed
 // into the live script. compile_and_load replays these into the new
@@ -123,8 +131,8 @@ using xi::seh_exception;
 
 // Forward-declare: runs one inspection cycle (drives sinks + emits the run result).
 // If run_id == 0, auto-generates one. frame_hint is passed to inspect().
-// frame_path (optional) is plumbed to the script via
-// `xi_script_set_run_context`; readable inside the script as
+// frame_path (optional) is carried on the A4 explicit per-run context
+// (RunContextScope); readable inside the script as
 // `xi::current_frame_path()`. Empty string means none.
 // run_one_inspection declared (with default args) in service_internal.hpp.
 
@@ -197,6 +205,21 @@ void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err) {
     push_recent_error("rsp", std::move(err), id);
 }
 
+// Error rsp carrying a data payload (compile diagnostics, partial-commit
+// results, recipe warnings). Wave-2 #2: this overload OWNS the recent-errors
+// push — before it existed, handlers hand-built xp::Rsp{ok:false, data_json}
+// and 3 of 6 sites (compile failed / export failed / recompile failed) forgot
+// push_recent_error, so those failures never surfaced in cmd:recent_errors.
+void send_rsp_err(xi::ws::Server& srv, int64_t id, std::string err, std::string data_json) {
+    xp::Rsp r;
+    r.id = id;
+    r.ok = false;
+    r.error = err;
+    r.data_json = std::move(data_json);
+    srv.send_text(r.to_json());
+    push_recent_error("rsp", std::move(err), id);
+}
+
 // Send a log {level:error, msg:...} AND record it in the recent-error
 // ring so cmd:recent_errors can surface it. Most error logs go
 // through this; a few legacy sites still build the LogMsg inline —
@@ -213,7 +236,7 @@ void send_hello(xi::ws::Server& srv) {
     e.name = "hello";
     e.data_json = std::string(R"({"version":")") + XINSP2_VERSION
                 + R"(","commit":")" + XINSP2_COMMIT
-                + R"(","abi":1})";
+                + R"(","abi":2})";
     srv.send_text(e.to_json());
 }
 
@@ -252,12 +275,10 @@ static const std::unordered_map<std::string_view, HandlerFn> g_cmd_table = {
     {"set_watchdog_ms", cmd_set_watchdog_ms_},
     {"set_process_priority", cmd_set_process_priority_},
     {"set_timer_fps", cmd_set_timer_fps_},
-    {"watchdog_status", cmd_watchdog_status_},
     {"graph_capture", cmd_graph_capture_},
     {"graph_snapshot", cmd_graph_snapshot_},
     {"shutdown", cmd_shutdown_},
     {"compile_and_load", cmd_compile_and_load_},
-    {"unload_script", cmd_unload_script_},
     {"run", cmd_run_},
     {"start", cmd_start_},
     {"stop", cmd_stop_},
@@ -279,8 +300,6 @@ static const std::unordered_map<std::string_view, HandlerFn> g_cmd_table = {
     {"status", cmd_status_},
     {"image_pool_stats", cmd_image_pool_stats_},
     {"rescan_plugins", cmd_rescan_plugins_},
-    {"unquarantine_plugin", cmd_unquarantine_plugin_},
-    {"load_plugin", cmd_load_plugin_},
     {"create_project", cmd_create_project_},
     {"open_project", cmd_open_project_},
     {"close_project", cmd_close_project_},
@@ -293,33 +312,37 @@ static const std::unordered_map<std::string_view, HandlerFn> g_cmd_table = {
     {"create_instance", cmd_create_instance_},
     {"remove_instance", cmd_remove_instance_},
     {"rename_instance", cmd_rename_instance_},
-    {"get_project", cmd_get_project_},
     {"save_instance_config", cmd_save_instance_config_},
     {"get_plugin_ui", cmd_get_plugin_ui_},
     {"get_dashboard", cmd_get_dashboard_},
     {"toolchain_health", cmd_toolchain_health_},
     {"set_toolchain_override", cmd_set_toolchain_override_},
+    {"get_health", cmd_get_health_},
 };
 
+// One dispatch shell (adoption-map item 1 / review 09 findings 1-2). The parse,
+// malformed-envelope handling, handler lookup, and the top-level exception guard
+// all live in xp::dispatch_command_guarded; this is its only production wiring.
+// A handler that throws now becomes `rsp ok:false` correlated to the command id
+// (the documented contract, ws-protocol.md "Error handling") instead of escaping
+// the serve loop into std::terminate. A malformed envelope with a recoverable id
+// gets a correlated error rather than stalling the client to its timeout, and
+// every malformed reject bumps the counter surfaced by dispatch_stats.
 static void handle_command(xi::ws::Server& srv, std::string_view text) {
-    auto parsed = xp::parse_cmd(text);
-    if (!parsed) {
-        xp::LogMsg lm;
-        lm.level = "error";
-        lm.msg   = std::string("malformed cmd: ") + std::string(text.substr(0, 128));
-        srv.send_text(lm.to_json());
-        return;
-    }
-
-    const auto& name = parsed->name;
-    const int64_t id = parsed->id;
-
-    auto it = g_cmd_table.find(name);
-    if (it != g_cmd_table.end()) {
-        it->second(srv, id, &*parsed);
-    } else {
-        send_rsp_err(srv, id, std::string("unknown command: ") + name);
-    }
+    xp::dispatch_command_guarded(
+        text,
+        /*send_err=*/[&](int64_t id, std::string msg) { send_rsp_err(srv, id, std::move(msg)); },
+        /*send_log=*/[&](std::string msg) {
+            xp::LogMsg lm; lm.level = "error"; lm.msg = std::move(msg);
+            srv.send_text(lm.to_json());
+        },
+        /*on_reject=*/[] { g_eng.malformed_cmd_rejected.fetch_add(1, std::memory_order_relaxed); },
+        /*invoke=*/[&](std::string_view name, int64_t id, const xp::ParsedCmd* parsed) -> bool {
+            auto it = g_cmd_table.find(name);
+            if (it == g_cmd_table.end()) return false;
+            it->second(srv, id, parsed);
+            return true;
+        });
 }
 
 
@@ -351,6 +374,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--certify-plugin") {
             const char* dir = (i + 1 < argc) ? argv[i + 1] : nullptr;
+            xi::crash::install_minidump_writer();   // Breakpad when built in
             xi::crash::install();   // a crashed certify still yields a minidump
             int code = dir ? xi::certify::certify_in_process(dir)
                            : xi::certify::kExitAbiMismatch;
@@ -363,16 +387,33 @@ int main(int argc, char** argv) {
     // Install the crash-forensics handlers (minidump filter + CRT death-path
     // interceptors + first-chance logger + fault-stack reserve). Lives in the
     // extracted leaf xi_crash_dump.hpp.
+    xi::crash::install_minidump_writer();   // Breakpad minidump writer when built in
     xi::crash::install();
     // SEH → C++ exception translator so try/catch catches segfaults (a separate
     // concern from the dump machinery; owned here, re-set per inspect thread).
     xi::install_seh_translator();
 
+#ifndef _WIN32
+    // POSIX: a WS client that drops mid-write makes the ws_server's ::send()
+    // raise SIGPIPE, whose default action kills the whole backend (exit rc
+    // -13) — Windows has no such signal, so this was invisible until the fuzz
+    // ws_cmd churn hit it on Linux. Ignore it process-wide; the send() sites
+    // then just observe EPIPE and the normal connection-drop path runs. (The
+    // FE supervisor already does the same for its probe sockets.)
+    ::signal(SIGPIPE, SIG_IGN);
+#endif
+
     // --test-crash: deliberately trigger a fatal exception so the
     // top-level minidump filter fires. Used by runCrashDump E2E.
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--test-crash") {
+#ifdef _WIN32
             RaiseException(0xE0000001, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+#else
+            // POSIX: a genuine access violation so the SIGSEGV crash handler fires,
+            // mirroring the Win32 unhandled-exception filter path.
+            std::raise(SIGSEGV);
+#endif
             return 99;  // unreachable
         }
         // --test-abort: exercise the CRT abort() path (robustness BUG 1) — must
@@ -407,8 +448,8 @@ int main(int argc, char** argv) {
                 "  --host=ADDR          bind address (default 127.0.0.1; use 0.0.0.0 for remote)\n"
                 "  --auth=SECRET        require Bearer SECRET in handshake\n"
                 "  --plugins-dir=DIR    extra plugin folder (repeatable)\n"
-                "  --watchdog=MS        per-inspect budget: cooperative-cancel, then exit\n"
-                "                       for FE respawn if ignored (default 0 = off)\n"
+                "  --watchdog=MS        per-inspect budget: a wedged frame gets a grace\n"
+                "                       window, then exit for FE respawn (default 0 = off)\n"
                 "  --project=DIR        headless autostart: open this project at boot\n"
                 "  --script=PATH        script to compile for --project (default: project.json's)\n"
                 "  --autostart-fps=N    with --project, start continuous mode at N fps (0 = off)\n"
@@ -434,21 +475,21 @@ int main(int argc, char** argv) {
     // Raise the OS timer resolution to 1ms (default ~15.6ms) so timer-tick fps,
     // sleeps, and CV waits are tight. winmm.timeBeginPeriod via runtime-load so we
     // don't add a link dependency. Process-wide; the paired timeEndPeriod is optional.
+    // (POSIX clock_nanosleep is already high-res, so no equivalent is needed.)
     if (HMODULE w = LoadLibraryA("winmm.dll")) {
         if (auto fn = (UINT(WINAPI*)(UINT))GetProcAddress(w, "timeBeginPeriod")) fn(1);
     }
+#endif
     // --priority=<class>: bump the whole backend's process priority (for a
-    // dedicated inspection PC). Default = leave as-is. Also settable live via
-    // cmd:set_process_priority / project.json runtime.process_priority.
+    // dedicated inspection PC). Default = leave as-is. Cross-platform:
+    // SetPriorityClass on Windows, setpriority(nice) on POSIX (see
+    // apply_process_priority_). Also settable live via cmd:set_process_priority /
+    // project.json runtime.process_priority.
     if (std::string pri = xi::cli::parse_str_flag(argc, argv, "--priority"); !pri.empty()) {
         if (!apply_process_priority_(pri))
             std::fprintf(stderr,
                 "[xinsp2] unknown --priority '%s' (high|above|normal|below|realtime)\n", pri.c_str());
     }
-#else
-    // TODO(linux): clock_nanosleep is already high-res; setpriority(PRIO_PROCESS)
-    // / sched_setscheduler for --priority.
-#endif
 
     // Derive include dir for the script compiler. In a normal dev tree the
     // backend .exe is at backend/build/Release, and headers are at
@@ -471,7 +512,21 @@ int main(int argc, char** argv) {
         // back to (see resolve_toolchain_).
         g_eng.include_dir_default = g_eng.include_dir;
     }
-    g_eng.work_dir = (std::filesystem::temp_directory_path() / "xinsp2").string();
+    // J1 (RT5): per-PID so co-resident backends never share script_build + .pch.
+    // Two backends CAN coexist (SO_EXCLUSIVEADDRUSE blocks only the same port;
+    // --port is configurable and the QA free_port() harness runs many at once), and
+    // the version counter resets to 0 each start → both would target inspect_v0.dll
+    // and the fixed-name umbrella.{pch,obj} in one shared dir: one's remove(out_dll)
+    // deletes the other's fresh DLL, or a /Yc PCH write races a /Yu read → corrupt
+    // load / spurious C1852. A per-PID subdir removes the sharing entirely.
+    // Per-PID dirs would otherwise accumulate (~200 MB PCH each) and fill the disk;
+    // reap the ones left by dead backends before claiming ours.
+    std::filesystem::path _xi_base = std::filesystem::temp_directory_path() / "xinsp2";
+    xi::script::reap_stale_build_dirs(_xi_base);
+    g_eng.work_dir = (_xi_base / std::to_string(GetCurrentProcessId())).string();
+    // A reused PID may leave a stale dir from a dead process — start clean.
+    std::error_code _wd_ec;
+    std::filesystem::remove_all(g_eng.work_dir, _wd_ec);
     std::filesystem::create_directories(g_eng.work_dir);
 
     // Probe accelerators once. Logged so the user can see what their
@@ -485,12 +540,22 @@ int main(int argc, char** argv) {
                  g_eng.ipp_root.empty()       ? "no" : g_eng.ipp_root.c_str());
 
     // Find and scan plugins directory (sibling of backend/)
+    //
+    // TWO names, deliberately. "plugins" is the RUNTIME name: a shipped bundle
+    // lays down <bundle>/plugins/ and tools/build_release.mjs stages into it, so
+    // it must keep working and is probed first. "toolbox" is the SOURCE-tree name
+    // of the same folder in this repo — the in-tree plugins the dev backend loads
+    // when it is run straight out of backend/build/. Probing only "plugins" left
+    // g_eng.plugins_dir empty after the rename and every plugin-dependent test
+    // failed at exchange_instance.
     {
         std::filesystem::path p = xi::cli::get_exe_dir();
-        for (int i = 0; i < 6; ++i) {
-            if (std::filesystem::exists(p / "plugins")) {
-                g_eng.plugins_dir = (p / "plugins").string();
-                break;
+        for (int i = 0; i < 6 && g_eng.plugins_dir.empty(); ++i) {
+            for (const char* name : {"plugins", "toolbox"}) {
+                if (std::filesystem::exists(p / name)) {
+                    g_eng.plugins_dir = (p / name).string();
+                    break;
+                }
             }
             if (!p.has_parent_path() || p.parent_path() == p) break;
             p = p.parent_path();
@@ -506,7 +571,10 @@ int main(int argc, char** argv) {
         if (n) g_eng.plugin_mgr.set_certify_exe(std::string(exe, n));
     }
     if (!g_eng.plugins_dir.empty()) {
-        int n = g_eng.plugin_mgr.scan_plugins(g_eng.plugins_dir);
+        // QuiesceToken: boot-time scan — the serve loop / dispatch pool does not
+        // exist yet, so there is nothing to quiesce (see xi_quiesce_token.hpp).
+        int n = g_eng.plugin_mgr.scan_plugins(xi::QuiesceToken::assert_no_dispatch(),
+                                              g_eng.plugins_dir);
         std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, g_eng.plugins_dir.c_str());
     }
     // Additional plugin folders from --plugins-dir / XINSP2_EXTRA_PLUGIN_DIRS.
@@ -516,7 +584,8 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[xinsp2] extra plugin dir not found: %s\n", dir.c_str());
             continue;
         }
-        int n = g_eng.plugin_mgr.scan_plugins(dir);
+        // QuiesceToken: still boot — dispatch pool not started yet.
+        int n = g_eng.plugin_mgr.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), dir);
         std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, dir.c_str());
     }
 
@@ -530,6 +599,73 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[xinsp2] include_dir=%s\n", g_eng.include_dir.c_str());
     std::fprintf(stderr, "[xinsp2] work_dir=%s\n",    g_eng.work_dir.c_str());
     std::fprintf(stderr, "[xinsp2] plugins_dir=%s\n",  g_eng.plugins_dir.c_str());
+
+    // V3 machine-level lib-plugin autoload (docs/new_gen/14, doc 19 V3): bring up
+    // every discovered plugin marked `"autoload": true` (a `lib` capability
+    // provider, e.g. imgcodec) ONCE now, under a stable machine owner, so its
+    // capabilities (xi.image.decode / xi.jpeg.encode) are available WITHOUT any
+    // project declaring a per-instance — clearing E1's second cause (doc 06 §6).
+    // Machine-scoped: these persist across project open/close; an explicit
+    // project instance of the same plugin still takes precedence (it displaces
+    // the machine provider for the life of the project). DEPLOYMENT OPT-IN:
+    // gated on `--autoload-lib` (or env XINSP2_AUTOLOAD_LIB) so a stock
+    // deployment is byte-unchanged — nothing that keys off capability
+    // availability (e.g. expose's E2 JPEG preview, which activates when
+    // xi.jpeg.encode is present) flips implicitly. The app team enables this once
+    // per deployment (E1). Runs after the plugin scan; the first factory call
+    // publishes the cap plane via default_host_api().
+    {
+        const char* env = std::getenv("XINSP2_AUTOLOAD_LIB");
+        bool autoload_lib = xi::cli::has_flag(argc, argv, "--autoload-lib") ||
+                            (env && *env && std::strcmp(env, "0") != 0);
+        g_eng.plugin_mgr.set_autoload_enabled(autoload_lib);
+        // Deployment lib-plugin config (per machine): --lib-config <path> / env
+        // XINSP2_LIB_CONFIG. A JSON OBJECT mapping plugin name -> its def object,
+        // applied to each autoloaded machine provider via set_def BEFORE it serves.
+        // Lets a deployment tune a lib plugin (e.g. imgcodec's encode_max_concurrent
+        // to the box's core count) WITHOUT a project instance, surviving plugin
+        // rebuilds. No file / bad JSON -> compiled defaults (logged, non-fatal). Must
+        // run BEFORE autoload_machine_providers() below.
+        if (autoload_lib) {
+            std::string cfg_path;
+            if (const char* e = std::getenv("XINSP2_LIB_CONFIG"); e && *e) cfg_path = e;
+            for (int i = 1; i + 1 < argc; ++i)
+                if (std::strcmp(argv[i], "--lib-config") == 0) { cfg_path = argv[i + 1]; break; }
+            if (!cfg_path.empty()) {
+                std::ifstream lf(cfg_path, std::ios::binary);
+                if (!lf) {
+                    std::fprintf(stderr, "[xinsp2] --lib-config: cannot open %s\n", cfg_path.c_str());
+                } else {
+                    std::string body((std::istreambuf_iterator<char>(lf)), std::istreambuf_iterator<char>());
+                    yyjson_doc* ldoc = yyjson_read(body.data(), body.size(), 0);
+                    yyjson_val* lroot = ldoc ? yyjson_doc_get_root(ldoc) : nullptr;
+                    std::unordered_map<std::string, std::string> lm;
+                    if (lroot && yyjson_is_obj(lroot)) {
+                        yyjson_val* lk; yyjson_obj_iter lit; yyjson_obj_iter_init(lroot, &lit);
+                        while ((lk = yyjson_obj_iter_next(&lit))) {
+                            yyjson_val* lv = yyjson_obj_iter_get_val(lk);
+                            size_t llen = 0;
+                            char* ls = yyjson_val_write(lv, 0, &llen);
+                            if (ls) { lm.emplace(yyjson_get_str(lk), std::string(ls, llen)); free(ls); }
+                        }
+                    } else {
+                        std::fprintf(stderr, "[xinsp2] --lib-config: %s is not a JSON object\n", cfg_path.c_str());
+                    }
+                    if (ldoc) yyjson_doc_free(ldoc);
+                    if (!lm.empty()) {
+                        std::fprintf(stderr, "[xinsp2] --lib-config: %zu entry(s) from %s\n",
+                                     lm.size(), cfg_path.c_str());
+                        g_eng.plugin_mgr.set_lib_config(std::move(lm));
+                    }
+                }
+            }
+        }
+        if (autoload_lib) {
+            int nlib = g_eng.plugin_mgr.autoload_machine_providers();
+            std::fprintf(stderr, "[xinsp2] lib autoload ENABLED — %d machine "
+                                 "provider(s) up\n", nlib);
+        }
+    }
 
     // Process isolation + SHM removed 2026-05: all plugins run
     // in-process and share the host ImagePool directly (zero-copy via
@@ -586,6 +722,13 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[xinsp2] watchdog enabled: %d ms per inspect\n", g_eng.watchdog_ms.load());
     }
     g_eng.srv_for_bp = &srv;   // status_cb + dropped-frame markers emit through it
+    // Health/state contract (docs/new_gen/04-health-contract.md): route the
+    // registry's health_changed events to WS clients, and — when --health-file is
+    // given (the FE passes it) — mirror the top-level state to that file so the FE
+    // can surface it in fe_status WITHOUT holding the single WS client slot. State
+    // starts at `boot`.
+    std::string health_file = xi::cli::parse_str_flag(argc, argv, "--health-file");
+    install_health_notifier_(health_file);
     // Route plugin host_api->set_status into the status registry. Non-capturing
     // so it converts to the StatusSinkFn function pointer.
     xi::status_sink() = [](const char* who, const char* text) {
@@ -599,6 +742,30 @@ int main(int argc, char** argv) {
         if (auto* s = g_eng.srv_for_bp.load(std::memory_order_acquire))
             s->send_binary(static_cast<const uint8_t*>(data), static_cast<size_t>(len));
     };
+    // xi.emit@2 (perf/ws-lean): the ZERO-COPY owned-emit path. The producer hands
+    // us borrowed segments + an ownership token; the WS server sends them without
+    // copying the payload and releases the token (in the producer's TU) after the
+    // send/drop/teardown. send_binary_owned ALWAYS consumes the token (enqueues it,
+    // or releases it on no-client / byte-cap); if there is no server at all we
+    // release it here so a producer never leaks.
+    xi::binary_owned_sink() = [](const xi_bin_span* spans, int n,
+                                 void* owner, void (*release)(void*)) {
+        auto* s = g_eng.srv_for_bp.load(std::memory_order_acquire);
+        if (!s || n <= 0) { if (owner && release) release(owner); return; }
+        // Translate the ABI spans into the WS server's ABI-free BinSpan vocabulary.
+        // n is tiny (expose emits 1); a small stack array keeps this allocation-free
+        // on the hot path, with a heap fallback for an absurd count.
+        constexpr int kInline = 8;
+        xi::ws::BinSpan inl[kInline];
+        std::vector<xi::ws::BinSpan> heap;
+        xi::ws::BinSpan* segs = inl;
+        if (n > kInline) { heap.resize((size_t)n); segs = heap.data(); }
+        for (int i = 0; i < n; ++i) {
+            segs[i].data = static_cast<const uint8_t*>(spans[i].data);
+            segs[i].len  = (size_t)(spans[i].len > 0 ? spans[i].len : 0);
+        }
+        s->send_binary_owned(segs, n, owner, release);
+    };
     // ABI v9: a generic JPEG-encode host service — process-global N-rotate cache
     // keyed by a content hash of the pixels, so the SAME image compressed by
     // several plugins (or repeatedly) is encoded ONCE globally. Plugin-agnostic
@@ -606,33 +773,33 @@ int main(int argc, char** argv) {
     xi::compress_sink() = [](const void* px, int w, int h, int c, int q,
                              void* out, int cap) -> int {
         if (!px || w <= 0 || h <= 0 || c <= 0) return 0;
-        const size_t nbytes = (size_t)w * (size_t)h * (size_t)c;
-        uint64_t key = 1469598103934665603ull;          // FNV-1a over the pixels...
         const uint8_t* p = static_cast<const uint8_t*>(px);
-        for (size_t i = 0; i < nbytes; ++i) { key ^= p[i]; key *= 1099511628211ull; }
-        key ^= ((uint64_t)w << 40) ^ ((uint64_t)h << 16) ^ (uint64_t)(c * 1000 + q);  // ...+ dims/quality
-        constexpr size_t kCap = 32;
-        static std::mutex cmu;
-        static std::unordered_map<uint64_t, std::vector<uint8_t>> cache;
-        static std::deque<uint64_t> order;
+        xi::Image img = xi::Image::view(w, h, c, const_cast<uint8_t*>(p));
         std::vector<uint8_t> jpeg;
-        {
-            std::lock_guard<std::mutex> lk(cmu);
-            auto it = cache.find(key);
-            if (it != cache.end()) {
-                jpeg = it->second;                       // cache hit → reuse the encode
-            } else {
-                xi::Image img = xi::Image::view(w, h, c, const_cast<uint8_t*>(p));
-                if (!xi::encode_jpeg(img, q, jpeg) || jpeg.empty()) return 0;
-                order.push_back(key);
-                while (order.size() > kCap) { cache.erase(order.front()); order.pop_front(); }
-                cache.emplace(key, jpeg);
-            }
-        }
+        // [v12 THE CUT — capability-only: route through the "xi.jpeg.encode"
+        // capability (the imgcodec lib plugin, which owns the dedup content
+        // cache + the turbojpeg SIMD path). The in-core encoder (xi::encode_jpeg)
+        // and the host memo cache were DELETED — no in-core fallback. Absent /
+        // funnel refusal / handler fault / contract $fault → 0 (no encode). Per-
+        // call availability re-check, reentrancy refusal, and SEH fault
+        // attribution to the lib instance live in encode_via_capability.]
+        if (!xi::encode_via_capability(img, q, jpeg) || jpeg.empty()) return 0;
         if ((int)jpeg.size() > cap) return -(int)jpeg.size();
         std::memcpy(out, jpeg.data(), jpeg.size());
         return (int)jpeg.size();
     };
+
+    // Capability plane pilot (docs/new_gen/14): enrich the header-side funnel
+    // fault mechanics (on_fault policy + health overlay, xi_cap_abi.hpp) with
+    // the service's crash bookkeeping — the same note_instance_crash_ (crash-
+    // loop count + degraded overlay + recent-errors ring) and culprit stamp
+    // the use_pack_process_cb boundary applies. Non-capturing → fn pointers.
+    xi::set_cap_fault_note([](const char* instance, const char* why) {
+        note_instance_crash_(instance, why);
+    });
+    xi::set_cap_precall([](const char* instance, const char* plugin) {
+        stamp_culprit_(instance, std::string(plugin ? plugin : ""));
+    });
 
     // P1-3: forward plugin/script host_api->log to the operator channel. stderr is
     // unwatched on an unattended PC, so a plugin's WARN/ERROR self-diagnostics used
@@ -651,40 +818,33 @@ int main(int argc, char** argv) {
     };
 
     // P2.4 watchdog. Always-on monitor thread; acts when any in-flight inspect
-    // (wd_arm slot) overruns its deadline. Two-phase, now per-worker-aware:
-    //   Phase 1 — cooperative: arm the script's EPOCH-scoped cancel
-    //     (set_global_cancel(1)); xi::ops poll xi::cancellation_requested() and
-    //     bail. 1000 ms grace (big ops — 20 MP gaussian, matchTemplate, contour
-    //     walks — need a few hundred ms to finish their current chunk; 100 ms
-    //     tripped healthy scripts). The arm targets only inspects ALREADY in
-    //     flight at trip time (ticket below the high-water snapshot): under N>1
-    //     it aborts every currently-running frame this round — the intended
-    //     "something's wedged, bail" signal — but a FRESH frame the pool starts
-    //     during the grace draws a higher ticket and is NOT cancelled, so one
-    //     slow frame no longer poisons ~a second of unrelated frames. Healthy
-    //     workers re-run next tick. (Pre-fix the flag was a held global bool, so
-    //     every heavy frame dispatched in the grace window aborted spuriously —
-    //     core-bug-hunt 2026-06 #12.)
-    //   Phase 2 — hard trip: if any slot is STILL overrun after the grace, the
-    //     script ignored cooperative cancel. We do NOT TerminateThread — a kill
-    //     mid process() would leak the per-instance lock (deadlocking that
-    //     instance) and risk heap corruption. The process is unrecoverable, so
-    //     the backend EXITS; the FE supervisor respawns a clean one (and drives
-    //     the line safe). Run without an FE => backend stays down by design.
+    // (wd_arm slot) overruns its deadline. Overrun → grace → HARD trip:
+    //   Grace — after an overrun is seen, wait 1000 ms and re-check. A big op
+    //     (20 MP gaussian, matchTemplate, contour walk) can legitimately run a
+    //     few hundred ms past a tight budget and finish on its own; if the same
+    //     inspect (matched by slot index AND deadline value) has returned by the
+    //     end of the grace it was merely slow, not wedged — leave it alone.
+    //   HARD trip — if the SAME inspect is still overrun after the grace it is
+    //     wedged. We do NOT TerminateThread — a kill mid process() would leak the
+    //     per-instance lock (deadlocking that instance) and risk heap corruption.
+    //     The process is unrecoverable, so the backend EXITS; the FE supervisor
+    //     respawns a clean one (and drives the line safe). Run without an FE =>
+    //     backend stays down by design.
+    //   (The former soft cooperative-cancel phase — set_global_cancel + a polled
+    //   epoch-scoped cancel the script could honour — was retired; a wedged frame
+    //   just runs into the hard trip now.)
     g_eng.watchdog_run = true;
     g_eng.watchdog_thread = std::thread([&srv]() {
         auto now_ms = [] {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
         };
-        // Snapshot of the slot deadlines that were overrun when we armed a
-        // cooperative cancel. After the grace we hard-trip ONLY if one of THESE
-        // same inspects is still stuck (same slot still holds the same deadline)
-        // — i.e. it ignored the cooperative cancel it was actually targeted by.
-        // A different inspect overrunning by then (a fresh frame that started
-        // during the grace, which the epoch-scoped cancel deliberately did NOT
-        // target) is left for the next loop iteration to give its OWN
-        // cooperative round, rather than being hard-killed without warning.
+        // Snapshot of the slot deadlines that were overrun when the grace began.
+        // After the grace we hard-trip ONLY if one of THESE same inspects is
+        // still stuck (same slot still holds the same deadline). A different
+        // inspect overrunning by then (a fresh frame that started during the
+        // grace) is left for the next loop iteration to get its OWN grace,
+        // rather than being hard-killed without warning.
         int64_t wd_snap[WD_SLOTS];
         while (g_eng.watchdog_run.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -697,22 +857,18 @@ int main(int argc, char** argv) {
             }
             if (!any_overran) continue;
 
-            // Phase 1: cooperative cancel + grace. Log the attempt so the
-            // escalation is observable (and a hard trip can be proven to have
-            // tried the soft cancel first, not jumped straight to the kill).
+            // Grace: a slow-but-finishing frame gets 1000 ms to return on its
+            // own before we treat it as wedged. Log the overrun so the escalation
+            // is observable.
             std::fprintf(stderr,
-                "[xinsp2] watchdog: inspect overran %dms — requesting cooperative cancel\n",
+                "[xinsp2] watchdog: inspect overran %dms — grace period before hard trip\n",
                 g_eng.watchdog_ms.load());
-            {
-                std::lock_guard<std::mutex> lk(g_eng.script_mu);
-                if (g_eng.script.set_global_cancel) g_eng.script.set_global_cancel(1);
-            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-            // Did every inspect we TARGETED return? (Its slot is now free or
-            // re-armed by a different inspect with a different deadline.) Match
-            // on slot index AND deadline value so a fresh inspect reusing the
-            // slot is not mistaken for the original stuck one.
+            // Did every inspect that overran return during the grace? (Its slot
+            // is now free or re-armed by a different inspect with a different
+            // deadline.) Match on slot index AND deadline value so a fresh
+            // inspect reusing the slot is not mistaken for the original stuck one.
             bool still_stuck = false;
             for (int i = 0; i < WD_SLOTS; ++i) {
                 if (wd_snap[i] != 0 && g_eng.wd_deadlines[i].load() == wd_snap[i]) {
@@ -720,32 +876,30 @@ int main(int argc, char** argv) {
                 }
             }
             if (!still_stuck) {
-                {
-                    std::lock_guard<std::mutex> lk(g_eng.script_mu);
-                    if (g_eng.script.set_global_cancel) g_eng.script.set_global_cancel(0);
-                }
-                int n = ++g_eng.watchdog_trips;
+                // Slow, not wedged: the frame finished during the grace. No trip.
                 std::fprintf(stderr,
-                    "[xinsp2] watchdog tripped (#%d) — script honoured cooperative cancel\n", n);
-                emit_error_log(srv,
-                    "watchdog tripped — inspect exceeded "
-                    + std::to_string(g_eng.watchdog_ms.load())
-                    + "ms; cooperative cancel succeeded");
+                    "[xinsp2] watchdog: overrunning inspect finished during grace — not tripped\n");
                 continue;
             }
 
-            // Phase 2: hard trip — exit for FE respawn (see header above).
+            // Hard trip — exit for FE respawn (see header above).
             ++g_eng.watchdog_trips;
+            // Health contract: an unrecoverable wedge → `fault`. Best-effort push
+            // before the exit (the FE will respawn into a fresh `boot`).
+            xi::health().set_state(xi::SysState::Fault);
             std::fprintf(stderr,
-                "[xinsp2] watchdog HARD trip - inspect exceeded %dms and ignored "
-                "cooperative cancel; exiting for supervisor respawn (rc=0x%04X)\n",
+                "[xinsp2] watchdog HARD trip - inspect exceeded %dms and stayed "
+                "wedged past the grace; exiting for supervisor respawn (rc=0x%04X)\n",
                 g_eng.watchdog_ms.load(), WATCHDOG_EXIT_CODE);
             emit_error_log(srv,
                 "watchdog HARD trip — inspect exceeded "
                 + std::to_string(g_eng.watchdog_ms.load())
-                + "ms and ignored cooperative cancel; backend exiting for respawn");
+                + "ms and stayed wedged past the grace; backend exiting for respawn");
             std::fflush(stderr);
             std::fflush(stdout);
+            // H7: if a worker is mid-write_minidump, let its dump land before we
+            // hard-exit (bounded — never blocks the respawn forever).
+            xi::crash::await_dump(10000);
             // _Exit: skip static destructors / atexit — a wedged worker may hold
             // locks those would block on. The FE sees the exit and respawns.
             std::_Exit(WATCHDOG_EXIT_CODE);

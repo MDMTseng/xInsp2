@@ -20,8 +20,20 @@
 //   srv.start(7823);
 //   while (srv.is_running()) srv.poll(100);   // 100ms poll interval
 //
-// Outbound sends are thread-safe (guarded by a mutex); inbound callbacks
-// fire on the thread that called poll().
+// Outbound sends are thread-safe AND non-blocking: send_text/send_binary build
+// the whole WS frame into one owned buffer and ENQUEUE it on an ordered outbound
+// queue, then return. A single long-lived writer thread (owned by the Server,
+// spawned in start(), joined in stop()) drains that queue FIFO and does the only
+// blocking ::send. This decouples the caller (dispatch worker inside the
+// ordered-emit gate) from the client's socket drain rate: a slow-but-alive WS
+// client can no longer pin the whole ordered inspection lane on its network I/O
+// (red-team RT8 / doc 21 §P2 — see docs/new_gen/23-rt8-async-writer.md). Inbound
+// callbacks still fire on the thread that called poll().
+//
+// send_frame therefore returns true on ENQUEUE, not on delivery (a WS send was
+// never a delivery guarantee — TCP buffering already meant sent != received). It
+// returns false only when there is NO client, or the outbound byte budget
+// (kOutboundHardCapBytes) is exceeded and the wedged client is dropped.
 //
 
 #ifdef _WIN32
@@ -40,7 +52,9 @@
   #define CLOSESOCK closesocket
 #else
   #include <arpa/inet.h>
+  #include <fcntl.h>        // O_NONBLOCK — the busy-reject drain (see poll())
   #include <netinet/in.h>
+  #include <netinet/tcp.h>   // TCP_NODELAY
   #include <sys/socket.h>
   #include <unistd.h>
   using socket_t = int;
@@ -48,18 +62,24 @@
   #define CLOSESOCK ::close
 #endif
 
+#include "xi_b64.hpp"
 #include "xi_sha256.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace xi::ws {
@@ -176,22 +196,9 @@ inline std::string sha1(std::string_view s) {
     return std::string(reinterpret_cast<char*>(digest), 20);
 }
 
-// base64 encode (fixed 20-byte input is all we need).
-inline std::string base64(const uint8_t* in, size_t n) {
-    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((n + 2) / 3) * 4);
-    for (size_t i = 0; i < n; i += 3) {
-        uint32_t v = (uint32_t)in[i] << 16;
-        if (i + 1 < n) v |= (uint32_t)in[i + 1] << 8;
-        if (i + 2 < n) v |= (uint32_t)in[i + 2];
-        out.push_back(tbl[(v >> 18) & 63]);
-        out.push_back(tbl[(v >> 12) & 63]);
-        out.push_back(i + 1 < n ? tbl[(v >> 6) & 63] : '=');
-        out.push_back(i + 2 < n ? tbl[v & 63]        : '=');
-    }
-    return out;
-}
+// base64 encode (fixed 20-byte input is all we need) — one-line forwarder to
+// the shared SDK leaf (xi_b64.hpp); the local name is kept for call sites.
+inline std::string base64(const uint8_t* in, size_t n) { return xi::b64_encode(in, n); }
 
 inline std::string ws_accept_key(std::string_view sec_key) {
     std::string s = std::string(sec_key) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -205,7 +212,53 @@ inline std::string to_lower(std::string_view s) {
     return o;
 }
 
+// Round-3 W2 #1: the ONE handshake header extractor. Root cause: the three
+// headers the handshake reads (Sec-WebSocket-Key / Authorization /
+// X-Xi-Timestamp) each hand-rolled the same find-in-lowercased-request →
+// skip OWS → find CRLF → substr → rtrim ritual, and the trim sets were one
+// drifted copy away from diverging. `lc` is detail::to_lower(req) (computed
+// once by the caller); `name_lc` is the lowercase header name INCLUDING the
+// trailing ':'. Leading skip is space/tab (RFC 7230 OWS); the trailing trim
+// is the unified, most-correct variant all three copies already agreed on —
+// space/tab (OWS) plus a defensive '\r' (unreachable while the value ends at
+// the found CRLF, kept so a future caller passing a pre-split line can't
+// leak a stray CR). Returns nullopt when the header is absent or unterminated.
+inline std::optional<std::string> get_header_(const std::string& lc,
+                                              const std::string& req,
+                                              const char* name_lc) {
+    size_t pos = lc.find(name_lc);
+    if (pos == std::string::npos) return std::nullopt;
+    pos += std::strlen(name_lc);
+    while (pos < req.size() && (req[pos] == ' ' || req[pos] == '\t')) ++pos;
+    size_t eol = req.find("\r\n", pos);
+    if (eol == std::string::npos) return std::nullopt;
+    std::string v = req.substr(pos, eol - pos);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\r' || v.back() == '\t'))
+        v.pop_back();
+    return v;
+}
+
+// Round-3 W2 #2: constant-time equality for handshake credentials. Root
+// cause: the HMAC digest check and the plain bearer check carried identical
+// inline XOR-fold loops — the one comparison in the tree that must NOT be a
+// drifting copy (a "fixed" early-exit variant would reintroduce the timing
+// side channel). Length mismatch returns false immediately: the length of
+// the expected credential is not secret, only its bytes are.
+inline bool ct_equal(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    unsigned diff = 0;
+    for (size_t i = 0; i < a.size(); ++i)
+        diff |= (unsigned char)a[i] ^ (unsigned char)b[i];
+    return diff == 0;
+}
+
 } // namespace detail
+
+// A borrowed outbound byte segment for the zero-copy owned send path
+// (send_binary_owned / xi.emit@2, perf/ws-lean). Deliberately ABI-free (raw
+// uint8_t*/size_t, not xi_bin_span) so this generic WS server keeps no dependency
+// on xi_abi.h — the host forwarder translates the ABI spans into these.
+struct BinSpan { const uint8_t* data; size_t len; };
 
 // ---------- Server ----------
 
@@ -241,8 +294,30 @@ public:
         listen_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_ == INVALID_SOCK) return false;
         int opt = 1;
+#ifdef _WIN32
+        // SO_EXCLUSIVEADDRUSE, NOT SO_REUSEADDR, on the Windows listen socket.
+        // On Windows SO_REUSEADDR does NOT mean what it means on POSIX: it
+        // permits a *full duplicate active bind* — any other local process can
+        // ::bind() our exact ip:port while we are listening, and the kernel then
+        // splits inbound connections between the two rival listeners
+        // nondeterministically (connection hijack; demonstrated live in the
+        // ws_teardown_race deflake — two listeners on port 39187, each getting a
+        // share of connects, the starved one seeing opens=0). SO_EXCLUSIVEADDRUSE
+        // makes our bind exclusive so no rival can steal the port. It does NOT
+        // reintroduce Linux-style TIME_WAIT rebind pain: on Windows a *listen*
+        // socket in the normal close path frees the port immediately for the same
+        // account, so the FE's rapid BE respawn (close listener → new BE binds
+        // same fixed port) still works — covered by the respawn-cycle test.
+        ::setsockopt(listen_, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                     reinterpret_cast<const char*>(&opt), sizeof(opt));
+#else
+        // POSIX SO_REUSEADDR is the safe, needed one: it does NOT allow a second
+        // active bind on the same ip:port while we are listening (that still
+        // fails with EADDRINUSE), it only lets us rebind a port stuck in
+        // TIME_WAIT from a prior socket — exactly the rapid-respawn case. Keep it.
         ::setsockopt(listen_, SOL_SOCKET, SO_REUSEADDR,
                      reinterpret_cast<const char*>(&opt), sizeof(opt));
+#endif
         sockaddr_in addr{};
         addr.sin_family      = AF_INET;
         // Resolve bind host. Empty / "127.0.0.1" → loopback, "0.0.0.0"
@@ -279,26 +354,101 @@ public:
             listen_ = INVALID_SOCK;
             return false;
         }
+        // Capture the actual bound port. When the caller passes port 0 the OS
+        // assigns an ephemeral one; getsockname reads it back so callers can
+        // discover where to connect (see local_port()). For a fixed non-zero
+        // port this simply echoes it.
+        sockaddr_in bound{};
+        socklen_t bound_len = sizeof(bound);
+        if (::getsockname(listen_, reinterpret_cast<sockaddr*>(&bound), &bound_len) == 0) {
+            local_port_ = ntohs(bound.sin_port);
+        } else {
+            local_port_ = port;
+        }
         running_ = true;
+        // Spawn the ordered outbound writer AFTER the listen socket is up. It is
+        // the ONLY thread the Server owns (the poll loop is driven externally by
+        // the service main loop). It drains out_q_ FIFO and does the sole
+        // blocking ::send — see writer_loop_.
+        writer_stop_ = false;
+        writer_thread_ = std::thread(&Server::writer_loop_, this);
         return true;
     }
 
+    // Idempotent — safe to call twice (stop() may be invoked explicitly AND again
+    // from ~Server()). Order matters: signal + JOIN the writer FIRST (so nothing
+    // is torn down out from under a running writer), THEN close the client and the
+    // listen socket. The join is bounded: a writer blocked in ::send is unblocked
+    // by its own SO_SNDTIMEO (<=1.5s) at worst, after which it observes the stop
+    // flag and exits.
     void stop() {
         running_ = false;
+        // 1) Wake + join the writer. Set the stop flag under out_mu_ so a writer
+        //    parked in out_cv_.wait sees it, then notify. joinable() guards against
+        //    a double-join on the second stop() call.
+        {
+            std::lock_guard<std::mutex> g(out_mu_);
+            writer_stop_ = true;
+        }
+        out_cv_.notify_all();
+        // G5: unblock a writer parked in ::send() to a slow-but-PROGRESSING client
+        // BEFORE joining. SO_SNDTIMEO only catches a fully-wedged 0-drain peer; a
+        // client draining each 1 MiB chunk in <1.5s never trips it, so join() would
+        // otherwise wait out the whole in-flight frame (a 16 MiB preview at
+        // ~500 KB/s ≈ 30s), blowing the ≤1.5s stop bound. shutdown() is the same
+        // unblock close_client()/the writer error path use; full teardown still runs
+        // in close_client() below.
+        {
+            socket_t fd = client_.load(std::memory_order_acquire);
+            if (fd != INVALID_SOCK) ::shutdown(fd, 2 /* SD_BOTH / SHUT_RDWR */);
+        }
+        if (writer_thread_.joinable()) writer_thread_.join();
+        // 2) Now that no writer is touching client_ or the queue, tear down the
+        //    client (close_client also clears the — now unattended — queue).
+        //    Round-3 W2 #3: every other client-death path (poll's proactive-drop
+        //    honor, the read_pending failure) runs close_client()+on_close() as a
+        //    PAIR; stop() was the lone asymmetric path, so a client dropped by
+        //    shutdown never got its on_close bookkeeping. on_close fires on the
+        //    stop() caller's thread — safe for the sole production consumer
+        //    (service_main clears the recent-errors ring under its own mutex,
+        //    and main() calls stop() after the poll loop exits while g_eng is
+        //    still alive). Gated on a live client so the idempotent second
+        //    stop() (~Server) cannot double-fire it.
+        bool had_client = client_.load(std::memory_order_acquire) != INVALID_SOCK;
         close_client();
+        if (had_client && on_close) on_close();
         if (listen_ != INVALID_SOCK) {
             CLOSESOCK(listen_);
             listen_ = INVALID_SOCK;
         }
+        local_port_ = 0;
     }
 
     bool is_running() const { return running_; }
-    bool has_client() const { return client_ != INVALID_SOCK; }
+    bool has_client() const { return client_.load(std::memory_order_acquire) != INVALID_SOCK; }
+
+    // The TCP port the listen socket is actually bound to. Meaningful after a
+    // successful start(); equals the requested port, or the OS-assigned
+    // ephemeral port when start(0) was used. 0 before start()/after a failed
+    // start(). Lets tests bind an ephemeral port (start(0)) and then connect to
+    // it, so they never collide on a shared fixed port.
+    int local_port() const { return local_port_; }
 
     // Blocks up to timeout_ms for activity. Accepts a new client, performs
     // the handshake, and reads any pending frames, dispatching callbacks.
     void poll(int timeout_ms) {
         if (!running_) return;
+
+        // Honor a proactive drop requested by the send side (byte-cap or a failed
+        // writer ::send). close_client()+on_close run HERE, on the poll thread, so
+        // the rx/msg buffers stay single-threaded and a silent wedged client that
+        // never reacts to the FIN is still dropped within one poll tick.
+        if (drop_requested_.exchange(false, std::memory_order_acq_rel)) {
+            if (client_.load(std::memory_order_acquire) != INVALID_SOCK) {
+                close_client();
+                if (on_close) on_close();
+            }
+        }
 
         fd_set rfds;
         FD_ZERO(&rfds);
@@ -312,9 +462,12 @@ public:
             FD_SET(listen_, &rfds);
             maxfd = std::max(maxfd, listen_);
         }
-        if (client_ != INVALID_SOCK) {
-            FD_SET(client_, &rfds);
-            maxfd = std::max(maxfd, client_);
+        // Poll thread is the sole writer of client_, so this snapshot is stable
+        // for the rest of poll(); the writer thread only reads it (under tx_mu_).
+        socket_t cl = client_.load(std::memory_order_acquire);
+        if (cl != INVALID_SOCK) {
+            FD_SET(cl, &rfds);
+            maxfd = std::max(maxfd, cl);
         }
 
         timeval tv;
@@ -329,15 +482,17 @@ public:
             socklen_t peerlen = sizeof(peer);
             socket_t s = ::accept(listen_, reinterpret_cast<sockaddr*>(&peer), &peerlen);
             if (s != INVALID_SOCK) {
-                if (client_ == INVALID_SOCK) {
+                if (cl == INVALID_SOCK) {
                     if (do_handshake(s)) {
-                        // Bound the SEND direction too. send_frame does a blocking
-                        // ::send on the dispatch WORKER threads; a slow client (laggy
-                        // UI, MB-sized JPEG previews) filling the TCP send buffer would
-                        // otherwise block ::send forever under tx_mu_ and freeze EVERY
-                        // worker on that lock — a slow viewer stalling the whole
-                        // inspection line. With SO_SNDTIMEO a stuck send fails after a
-                        // bounded wait and send_frame drops the (now desynced) client.
+                        // Bound the SEND direction. Post-RT8 the blocking ::send
+                        // runs ONLY on the Server's single writer thread (never the
+                        // dispatch workers — they just enqueue). SO_SNDTIMEO still
+                        // matters: it bounds the WRITER's ::send so a FULLY-wedged
+                        // (0-drain) client — TCP window full, never draining — is
+                        // noticed and dropped after a bounded wait instead of parking
+                        // the writer forever. (A slow-but-progressing client that
+                        // never trips this is instead caught by the outbound
+                        // byte-cap, kOutboundHardCapBytes.)
                         const int kSendTimeoutMs = 1500;
 #ifdef _WIN32
                         DWORD sto = kSendTimeoutMs;
@@ -347,7 +502,46 @@ public:
                         sto.tv_usec = (kSendTimeoutMs % 1000) * 1000;
                         ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &sto, sizeof(sto));
 #endif
-                        client_ = s;
+                        // Egress tuning. TCP_NODELAY here (removes the tail-segment
+                        // Nagle stall on each enqueue boundary; cheap, no memory tax).
+                        //
+                        // SO_SNDBUF is DEFERRED — the writer boosts it to 4 MiB the
+                        // FIRST time it is about to send a LARGE frame (>1 MiB) on this
+                        // connection (see kSndbufBoost / writer_loop_). Rationale
+                        // (adaptive SNDBUF, perf/ws-lean): a raw 5-20 MP preview needs
+                        // the big kernel buffer to stream ahead of the writer's chunk
+                        // loop (the default 64 KB throttled the sole writer to ~350
+                        // MB/s), but a big SNDBUF also WIDENS the wedge-detection window
+                        // — the kernel silently absorbs a wedged client's backlog before
+                        // ::send blocks, so SO_SNDTIMEO fires only after SNDBUF fills,
+                        // and the wedge-drop bound grows with SNDBUF/production-rate.
+                        // Setting 4 MiB on EVERY accept made a small-frame slow-consumer
+                        // lane (qa_slow_consumer, ~200 fps modest previews) miss its
+                        // 8s/12s wedge-drop bounds under machine load. Deferring the
+                        // boost to the first large frame keeps SHARP wedge detection for
+                        // small-frame / control-plane clients (they never trip the
+                        // threshold, so they keep the default buffer) AND the raw-preview
+                        // throughput win for large-frame lanes. Do NOT restore an
+                        // unconditional SNDBUF here without re-running qa_slow_consumer
+                        // solo AND inside a full gate (see docs/new_gen/23 §adaptive).
+                        {
+                            int nodelay = 1;
+                            ::setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
+                                         (const char*)&nodelay, sizeof(nodelay));
+                        }
+                        // Publish under tx_mu_ so the store is ordered against
+                        // the writer's snapshot of client_ (which also holds
+                        // tx_mu_) — symmetric with the close side. Bump the
+                        // connection epoch in the SAME lock section: this new
+                        // connection gets a tag distinct from any prior one, so a
+                        // frame still in flight for the previous client (even one
+                        // the writer already popped) fails the writer's epoch check
+                        // and is dropped rather than sent to this client.
+                        {
+                            std::lock_guard<std::mutex> g(tx_mu_);
+                            conn_epoch_.fetch_add(1, std::memory_order_release);
+                            client_.store(s, std::memory_order_release);
+                        }
                         if (on_open) on_open();
                     } else {
                         CLOSESOCK(s);
@@ -372,19 +566,31 @@ public:
                     // misbehaving 2nd connector can't stall the poll loop.
                     // shutdown arg 1 == SD_SEND (Win32) == SHUT_WR (POSIX).
                     ::shutdown(s, 1);
+                    // M4: drain NON-BLOCKING so a benign reconnect storm can't stall the
+                    // poll thread (this runs on it, and it also owns the attached client's
+                    // inbound + drop_requested_ + heartbeat). Was a blocking recv-loop with
+                    // SO_RCVTIMEO=400ms → up to 400ms/reject on the liveness thread. One
+                    // non-blocking pass reads whatever's already buffered; any unread tail
+                    // is discarded by CLOSESOCK (harmless — the connection was rejected).
+                    // Portable (round-3): closing with unread inbound RSTs the 503 away
+                    // on POSIX too, so BOTH platforms flip the socket non-blocking
+                    // (FIONBIO / O_NONBLOCK) and run the same drain loop.
 #ifdef _WIN32
-                    DWORD rto = 400;  // ms
-                    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rto, sizeof(rto));
-                    char drain[1024];
-                    while (::recv(s, drain, (int)sizeof(drain), 0) > 0) { /* until peer FIN/timeout */ }
+                    u_long nb = 1;
+                    ::ioctlsocket(s, FIONBIO, &nb);
+#else
+                    int fl = ::fcntl(s, F_GETFL, 0);
+                    if (fl != -1) ::fcntl(s, F_SETFL, fl | O_NONBLOCK);
 #endif
-                    // TODO(linux): SO_RCVTIMEO via struct timeval, same drain.
+                    char drain[1024];
+                    while (::recv(s, drain, (int)sizeof(drain), 0) > 0) { /* buffered only, no block */ }
                     CLOSESOCK(s);
                 }
             }
         }
 
-        if (client_ != INVALID_SOCK && FD_ISSET(client_, &rfds)) {
+        cl = client_.load(std::memory_order_acquire);
+        if (cl != INVALID_SOCK && FD_ISSET(cl, &rfds)) {
             if (!read_pending()) {
                 close_client();
                 if (on_close) on_close();
@@ -402,6 +608,23 @@ public:
         return send_frame(0x2, data, n);
     }
 
+    // Zero-copy binary send (xi.emit@2 / perf/ws-lean). Enqueue ONE binary WS
+    // message = `nseg` borrowed segments concatenated in order; the host copies
+    // NO payload — it builds only the small WS header and the writer streams the
+    // segments straight from `segs`, which `owner` keeps alive. Takes ownership of
+    // `owner` UNCONDITIONALLY: on a successful enqueue the queued frame releases it
+    // after the send (or a later drop/teardown); on ANY early return here (no
+    // client / byte-cap drop / oversize) it is released before returning — so a
+    // producer never has to worry which happened. `owner`+`release` must be non-
+    // null. Returns true on ENQUEUE (same contract as send_binary), false when
+    // there is no client, the byte-cap fired (wedged client dropped), or the total
+    // exceeds a single legal frame. release() runs on the writer/enqueue thread in
+    // the producer's TU.
+    bool send_binary_owned(const BinSpan* segs, int nseg,
+                           void* owner, void (*release)(void*)) {
+        return enqueue_owned_(0x2, segs, nseg, owner, release);
+    }
+
 private:
     // Upper bound on a single WebSocket frame payload and on the total
     // size of a reassembled fragmented message. 16 MiB comfortably covers
@@ -410,11 +633,186 @@ private:
     static constexpr size_t kMaxFrame   = 16u * 1024u * 1024u;
     static constexpr size_t kMaxMessage = 16u * 1024u * 1024u;
 
+    // Outbound queue byte budget. If enqueuing a frame would push the total
+    // buffered (unsent) outbound bytes past this, the client is a slow-but-alive
+    // consumer that never trips SO_SNDTIMEO yet cannot keep up — we drop it
+    // cleanly (shutdown → poll's recv returns → close_client) rather than let the
+    // backend's memory grow without bound. Sized for RAW-preview streaming
+    // (bench5mp): a 20MP RGB frame is ~59 MB, so the old 64 MiB cap held ONE
+    // frame — any scheduling jitter meant enqueue #2 crossed the cap and dropped
+    // the client on an otherwise-sustainable stream. 256 MiB ≈ a 3-4 frame burst
+    // at 20MP (or ~17 frames at 5MP): plenty for jitter, still a bounded blast
+    // radius for a wedged localhost client.
+    static constexpr size_t kOutboundHardCapBytes = 256u * 1024u * 1024u;
+
+    // Adaptive SO_SNDBUF (perf/ws-lean). Accepted sockets keep the small default
+    // buffer (sharp SO_SNDTIMEO wedge detection, no kernel memory tax on control-
+    // plane / small-frame clients). The writer boosts SO_SNDBUF to kSndbufBoost
+    // the first time it is about to send a frame whose total exceeds
+    // kSndbufBoostThreshold on the current connection — the raw-preview lanes that
+    // actually need the kernel to stream ahead of the chunk loop. Tracked against
+    // conn_epoch_ (sndbuf_boosted_for_epoch_) so a reconnect re-arms the boost.
+    static constexpr int    kSndbufBoost          = 4 * 1024 * 1024;   // 4 MiB
+    static constexpr size_t kSndbufBoostThreshold = 1u * 1024u * 1024u; // >1 MiB frame
+
     socket_t    listen_ = INVALID_SOCK;
-    socket_t    client_ = INVALID_SOCK;
+    int         local_port_ = 0;   // actual bound port (see local_port())
+    // client_ is written by the poll thread (accept / close) and read by the
+    // WRITER thread inside writer_loop_ under tx_mu_. It is atomic so those reads
+    // are not a data race, and — crucially — the actual CLOSESOCK is done under
+    // tx_mu_ (see close_client) so the writer can never be mid-::send on an fd the
+    // poll thread is closing (external review 08 finding 2). tx_mu_ is now taken
+    // ONLY by the single writer thread (not every dispatch worker), so the fd-
+    // reuse-UAF guard is unchanged while the blocking ::send no longer serializes
+    // the workers.
+    std::atomic<socket_t> client_{INVALID_SOCK};
     bool        running_ = false;
     std::vector<uint8_t> rx_buf_;
     std::mutex  tx_mu_;
+
+    // ---- ordered async outbound writer (RT8 / doc 21 §P2) ----
+    // send_frame builds the whole WS frame into one owned buffer and pushes it
+    // here under out_mu_; the writer thread pops FIFO and sends. Because every
+    // send_frame for the ordered lane runs UNDER the emit gate (service_inspect
+    // emit_run_outcome_, between wait_turn() and complete()), enqueue order ==
+    // gate order == wire order. The writer is a strict single drainer, so FIFO ==
+    // exact enqueue order: never reorder or coalesce.
+    //
+    // Each queued frame carries the connection epoch it was built for (see
+    // conn_epoch_) so a frame that outlives its connection — including one the
+    // writer has already POPPED into its local variable when the swap happens — is
+    // dropped instead of being sent to a newly-accepted client.
+    // One queued outbound WS frame. TWO shapes share it:
+    //  • COPY path (send_frame): `bytes` is the WHOLE [hdr|payload] frame, `segs`
+    //    empty, `owner` null. `bytes` is a pooled buffer (recycled by the writer).
+    //  • OWNED path (send_binary_owned, xi.emit@2): `bytes` is ONLY the small host-
+    //    built WS header; the payload rides in `segs`, borrowed and kept alive by
+    //    `owner`. The host copies no payload; the writer sends hdr then each seg,
+    //    then releases `owner`.
+    // OWNER RELEASE IS RAII + MOVE-ONLY: ~OutFrame releases the owner exactly once,
+    // so EVERY drop path — normal send, epoch/connection drop, byte-cap drop,
+    // out_q_.clear() on close_client, stop() abandoning the backlog — frees the
+    // producer's bytes with no hand-written release at each site (the RT8/L1 drain
+    // discipline made structural). `release` runs in the producer's TU.
+    struct OutFrame {
+        uint64_t              epoch   = 0;
+        std::vector<uint8_t>  bytes;                 // whole frame (copy) or just hdr (owned)
+        std::vector<BinSpan>  segs;                  // borrowed payload segments (owned path)
+        void*                 owner   = nullptr;     // ownership token (owned path)
+        void                (*release)(void*) = nullptr;
+        size_t                total   = 0;           // total wire bytes (hdr + all segs)
+
+        OutFrame() = default;
+        OutFrame(const OutFrame&) = delete;
+        OutFrame& operator=(const OutFrame&) = delete;
+        OutFrame(OutFrame&& o) noexcept { steal_(o); }
+        OutFrame& operator=(OutFrame&& o) noexcept {
+            if (this != &o) { release_owner_(); steal_(o); }
+            return *this;
+        }
+        ~OutFrame() { release_owner_(); }
+    private:
+        void release_owner_() {
+            if (owner && release) release(owner);
+            owner = nullptr; release = nullptr;
+        }
+        void steal_(OutFrame& o) {
+            epoch = o.epoch; bytes = std::move(o.bytes); segs = std::move(o.segs);
+            owner = o.owner; release = o.release; total = o.total;
+            o.owner = nullptr; o.release = nullptr; o.total = 0;
+        }
+    };
+    std::deque<OutFrame>      out_q_;
+    size_t                    out_bytes_ = 0;   // sum of out_q_ element byte sizes (guarded by out_mu_)
+    std::mutex                out_mu_;
+    std::condition_variable   out_cv_;
+    std::thread               writer_thread_;
+    bool                      writer_stop_ = false;  // guarded by out_mu_
+
+    // ---- recycled outbound payload buffers (perf/ws-lean) ----
+    // A large WS frame's buffer (a raw 5–20 MP preview is 15–60 MB) is expensive
+    // to allocate: the OS commits + zero-fills fresh pages on first touch (the
+    // "page-zero" fault cost), and a >1 MiB block is released straight back to the
+    // OS on free, so a per-frame FRESH vector re-faults every page EVERY frame.
+    // The writer returns a just-sent frame's buffer here instead of freeing it;
+    // send_frame reuses one of adequate capacity, so a steady same-size stream
+    // pays that fault cost ONCE, not per frame. Bounded by kBufPoolMax buffers so
+    // a transient huge frame cannot pin memory (worst-case idle ≈ kBufPoolMax ×
+    // max-frame). Only buffers at/above kBufPoolMinCap are pooled — tiny control-
+    // frame buffers free normally. Guarded by its OWN short mutex (buf_pool_mu_),
+    // taken only to pop/push a buffer — NEVER held across the big frame memcpy or
+    // the ::send, so it never serializes producers or the writer.
+    std::vector<std::vector<uint8_t>> buf_pool_;
+    std::mutex                        buf_pool_mu_;
+    static constexpr size_t kBufPoolMax    = 4;            // ≤ N idle buffers retained
+    static constexpr size_t kBufPoolMinCap = 64u * 1024u; // don't pool sub-64KiB buffers
+
+    // Take a cleared buffer with capacity ≥ need — a pooled one if available, else
+    // a fresh reservation. Runs OUTSIDE out_mu_ (send_frame calls it before the
+    // enqueue critical section) so the big fill/memcpy that follows is unlocked.
+    std::vector<uint8_t> acquire_buf_(size_t need) {
+        {
+            std::lock_guard<std::mutex> g(buf_pool_mu_);
+            if (!buf_pool_.empty()) {
+                std::vector<uint8_t> v = std::move(buf_pool_.back());
+                buf_pool_.pop_back();
+                v.clear();                          // size→0, capacity (resident pages) kept
+                if (v.capacity() < need) v.reserve(need);
+                return v;
+            }
+        }
+        std::vector<uint8_t> v;
+        v.reserve(need);
+        return v;
+    }
+    // Return a spent buffer for reuse (moves the storage in). Sub-64KiB buffers
+    // and pool-overflow buffers are simply dropped (freed by the vector's dtor).
+    void release_buf_(std::vector<uint8_t>&& v) {
+        if (v.capacity() < kBufPoolMinCap) return;
+        std::lock_guard<std::mutex> g(buf_pool_mu_);
+        if (buf_pool_.size() < kBufPoolMax)
+            buf_pool_.push_back(std::move(v));
+    }
+
+    // Connection epoch. Incremented (under tx_mu_) each time a new client is
+    // published on a successful accept, so every distinct connection has a unique
+    // tag. send_frame stamps the CURRENT epoch onto each queued frame; the writer,
+    // under tx_mu_ (the authoritative check, same lock accept/close use), sends a
+    // frame ONLY if its epoch still equals conn_epoch_. This is what actually
+    // enforces "no frame crosses connections" for a frame the writer already
+    // popped before a close+reaccept: tx_mu_ serializes each op atomically but does
+    // NOT bind a popped frame to the fd that was live at pop time — the epoch does.
+    // Atomic because send_frame reads it under out_mu_ (a DIFFERENT lock than the
+    // tx_mu_ writers), so this cross-lock read must be defined/non-torn; the
+    // tx_mu_-guarded store↔writer-read pair is additionally ordered by tx_mu_.
+    std::atomic<uint64_t>     conn_epoch_{0};
+
+    // Adaptive-SNDBUF state (guarded by tx_mu_, touched ONLY by the writer while it
+    // holds tx_mu_ to send): the conn_epoch_ for which SO_SNDBUF is already boosted.
+    // 0 = none (a live connection's epoch is always >=1 — the first accept bumps
+    // conn_epoch_ to 1 before publishing client_). A reconnect bumps the epoch, so
+    // it no longer matches and the next large frame re-boosts the fresh socket.
+    uint64_t                  sndbuf_boosted_for_epoch_ = 0;
+
+public:
+    // Test-only seam (null in production; a single null-check per frame). Invoked
+    // by the writer AFTER it pops a frame and releases out_mu_, but BEFORE it
+    // acquires tx_mu_ to send — i.e. inside the exact pop→send window that the
+    // connection-epoch tag guards. A test sets it to force a client swap in that
+    // window and prove the popped frame is dropped (epoch mismatch) instead of
+    // crossing onto the new connection. Never set outside tests.
+    std::function<void()> on_writer_after_pop_;
+
+private:
+    // Proactive-drop signal. The send side (send_frame's byte-cap, or the writer's
+    // failed ::send) can only ::shutdown the socket — it must NOT call close_client
+    // itself (close_client owns the poll-thread-only rx/msg buffers). On Windows a
+    // server that shuts down its OWN socket does not make its own select() readable,
+    // so a fully-wedged client that never reacts to the FIN would otherwise stay
+    // attached forever (recv never returns). This flag closes that gap: the send
+    // side sets it, and poll() honors it by running close_client()+on_close on the
+    // poll thread within one poll tick — a bounded, peer-independent drop.
+    std::atomic<bool>         drop_requested_{false};
 
     // Fragmented-message reassembly state (RFC 6455 §5.4). When a data
     // frame arrives with fin=0 we stash its opcode and payload; subsequent
@@ -426,15 +824,158 @@ private:
     std::string          bind_host_;     // empty/127.0.0.1 = loopback
     std::string          auth_secret_;   // empty = no auth required
 
+    // Runs on the poll thread. The actual CLOSESOCK must not happen while a
+    // worker is mid-::send on the fd (an fd-reuse UAF — external review 08
+    // finding 2), yet the poll thread must not block indefinitely on tx_mu_
+    // if a worker is stuck in a slow ::send. Order of operations:
+    //   1. ::shutdown(fd) — unblocks any in-flight ::send (it errors out and
+    //      returns) WITHOUT freeing the fd number, so no reuse can occur yet.
+    //   2. Under tx_mu_: null client_ (no new send will pick up fd), then
+    //      CLOSESOCK(fd). Holding tx_mu_ guarantees no worker is inside ::send
+    //      on fd at the moment we close it — the in-flight one (if any) already
+    //      returned in step 1 and dropped the lock.
     void close_client() {
-        if (client_ != INVALID_SOCK) {
-            CLOSESOCK(client_);
-            client_ = INVALID_SOCK;
-            rx_buf_.clear();
-            msg_buf_.clear();
-            msg_buf_.shrink_to_fit();
-            msg_in_progress_ = false;
-            msg_opcode_      = 0;
+        socket_t fd = client_.load(std::memory_order_acquire);
+        if (fd == INVALID_SOCK) return;
+        ::shutdown(fd, 2 /* SD_BOTH / SHUT_RDWR */);
+        {
+            std::lock_guard<std::mutex> g(tx_mu_);
+            client_.store(INVALID_SOCK, std::memory_order_release);
+            CLOSESOCK(fd);
+        }
+        // Drop this connection's outbound backlog so NO frame crosses connections
+        // (an old client's queued frames must never reach the next client). The
+        // ordering is load-bearing: we null client_ (above, under tx_mu_) BEFORE
+        // clearing the queue (here, under out_mu_). A send_frame racing us either
+        //   (a) acquires out_mu_ before this clear → its frame is enqueued and
+        //       then removed by the clear, or
+        //   (b) acquires out_mu_ after this clear → it re-reads client_ == INVALID
+        //       (nulled above) and enqueues nothing.
+        // Either way no QUEUED frame survives. A frame the writer has already
+        // POPPED (in its local var, no longer in out_q_) is NOT covered by this
+        // clear and is NOT bound to this fd by tx_mu_ (the writer fresh-loads
+        // client_ after the handoff and could see a newly-accepted client). That
+        // case is handled by the connection-epoch tag: the popped frame carries
+        // this connection's epoch, the next accept bumps conn_epoch_, and the
+        // writer's under-tx_mu_ epoch check drops the superseded frame — that
+        // epoch check is the real barrier here. (M3: the notify_all below does NOT
+        // make the writer "re-check client_" — the writer only ever re-evaluates
+        // its wait predicate `writer_stop_ || !out_q_.empty()`, never client_; with
+        // the queue just cleared the predicate is false, so a woken writer simply
+        // re-parks. The notify is a harmless spurious wake, kept for stop-path
+        // symmetry.)
+        {
+            std::lock_guard<std::mutex> g(out_mu_);
+            out_q_.clear();
+            out_bytes_ = 0;
+        }
+        // Drop the recycled-buffer pool too (perf/ws-lean): with no client attached
+        // there is no stream to serve, so idle retained buffers are pure waste. The
+        // next client's first few frames re-fault their pages once — negligible.
+        {
+            std::lock_guard<std::mutex> g(buf_pool_mu_);
+            buf_pool_.clear();
+        }
+        // Clear any pending drop request so it can't fire on the NEXT client (the
+        // one we just closed satisfied it). Safe: the send side only re-arms it
+        // while a client is attached, and none is now.
+        drop_requested_.store(false, std::memory_order_release);
+        out_cv_.notify_all();
+        // rx/msg reassembly buffers are touched only by the poll thread.
+        rx_buf_.clear();
+        msg_buf_.clear();
+        msg_buf_.shrink_to_fit();
+        msg_in_progress_ = false;
+        msg_opcode_      = 0;
+    }
+
+    // The ordered outbound writer. Owns the sole blocking ::send. Runs from
+    // start() to stop(). Pops one frame at a time FIFO (exact enqueue order ==
+    // wire order), then sends it under tx_mu_ so the close_client fd-reuse-UAF
+    // guard (external review 08 finding 2) still holds — now only THIS thread ever
+    // blocks on the socket, never the dispatch workers. Snapshots client_ under
+    // tx_mu_ each frame; if the connection is gone (INVALID) the frame is dropped
+    // (the client it was destined for no longer exists). A short/failed ::send
+    // (incl. an SO_SNDTIMEO timeout from a fully-wedged 0-drain client) means the
+    // stream is desynced: ::shutdown the socket so the poll thread's recv returns
+    // and close_client runs — the SAME terminal outcome as the pre-async drop, but
+    // reached without ever stalling a worker.
+    void writer_loop_() {
+        for (;;) {
+            OutFrame frame;
+            {
+                std::unique_lock<std::mutex> lk(out_mu_);
+                out_cv_.wait(lk, [&] { return writer_stop_ || !out_q_.empty(); });
+                if (writer_stop_) return;            // stop: abandon any backlog (client is going away)
+                frame = std::move(out_q_.front());
+                out_q_.pop_front();
+                out_bytes_ -= frame.total;   // total wire bytes (hdr + payload/segs)
+            }
+            // Test seam: the pop→send window the epoch tag guards (see member).
+            if (on_writer_after_pop_) on_writer_after_pop_();
+            std::lock_guard<std::mutex> g(tx_mu_);
+            socket_t fd = client_.load(std::memory_order_acquire);
+            // Authoritative cross-connection guard: send ONLY if the socket is live
+            // AND this frame's epoch still matches the current connection. The
+            // epoch catches the case tx_mu_ alone cannot — a frame popped for
+            // client A while A is then closed and B accepted: fd would be B's
+            // (valid), but frame.epoch (A's) != conn_epoch_ (B's), so we drop it.
+            if (fd == INVALID_SOCK ||
+                frame.epoch != conn_epoch_.load(std::memory_order_acquire)) {
+                release_buf_(std::move(frame.bytes));  // recycle (perf/ws-lean)
+                continue;                            // connection gone or superseded — drop
+            }
+            // Adaptive SO_SNDBUF (perf/ws-lean): the first LARGE frame on this
+            // connection boosts the kernel send buffer so a raw preview streams
+            // ahead of the chunk loop. Small-frame lanes never reach here (their
+            // frames stay under the threshold), so they keep the small default and
+            // its sharp SO_SNDTIMEO wedge detection. Under tx_mu_ with the fd live
+            // and frame.epoch == conn_epoch_ confirmed just above, so the boost is
+            // stamped against THIS connection; a reconnect (new epoch) re-arms it.
+            if (frame.total > kSndbufBoostThreshold &&
+                sndbuf_boosted_for_epoch_ != frame.epoch) {
+                int sndbuf = kSndbufBoost;
+                ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF,
+                             reinterpret_cast<const char*>(&sndbuf), sizeof(sndbuf));
+                sndbuf_boosted_for_epoch_ = frame.epoch;
+            }
+            // Send one contiguous span in 4 MiB chunks (matches the boosted
+            // SNDBUF for large frames): big enough that a 15 MB raw preview streams
+            // at memory speed, small enough that SO_SNDTIMEO still bounds a wedged
+            // client per chunk (a progressing client must drain >2.7 MB/s, vs
+            // >0.7 with the old 1 MiB chunks — still far below any live localhost
+            // consumer). Returns false on a short/failed ::send (desynced/wedged):
+            // the caller stops sending the rest of the frame and the socket is
+            // dropped. On the OWNED path (perf/ws-lean) `data` may borrow into the
+            // producer's buffer — safe: `owner` keeps it alive until ~OutFrame.
+            auto send_span = [&](const uint8_t* data, size_t len) -> bool {
+                size_t sent = 0;
+                while (sent < len) {
+                    int chunk = (int)std::min<size_t>(len - sent, 4u << 20);
+                    int s = ::send(fd, reinterpret_cast<const char*>(data + sent), chunk, 0);
+                    if (s <= 0) {
+                        // Desynced/dead/wedged: shut the socket AND request a
+                        // proactive drop; the poll thread owns the actual close
+                        // (avoids the recv/fd-reuse race) and does not depend on the
+                        // peer reacting to the FIN.
+                        ::shutdown(fd, 2 /* SD_BOTH / SHUT_RDWR */);
+                        drop_requested_.store(true, std::memory_order_release);
+                        return false;
+                    }
+                    sent += (size_t)s;
+                }
+                return true;
+            };
+            // WS header (or, on the copy path, the whole [hdr|payload] frame) first,
+            // then each borrowed payload segment IN ORDER. Enqueue order == wire
+            // order; segments within a frame concatenate to the exact same bytes the
+            // copy path would have sent.
+            bool ok = send_span(frame.bytes.data(), frame.bytes.size());
+            for (size_t i = 0; ok && i < frame.segs.size(); ++i)
+                ok = send_span(frame.segs[i].data, frame.segs[i].len);
+            release_buf_(std::move(frame.bytes));  // recycle the header/frame buffer
+            // ~OutFrame (end of iteration) releases the owner token — after the send,
+            // and on EVERY drop path (epoch/cap/teardown) — exactly once (RAII).
         }
     }
 
@@ -448,9 +989,26 @@ private:
         // header) held the WS server's poll thread hostage. The
         // server is single-threaded so this DoS'd the entire backend.
         // Apply a per-recv timeout via SO_RCVTIMEO + cap total
-        // handshake duration at 5 s. Closes audit P0-D5.
-        const int kHandshakeRecvTimeoutMs = 2000;
-        const int kHandshakeTotalBudgetMs = 5000;
+        // handshake duration. Closes audit P0-D5.
+        //
+        // P1 (remote-mode DoS hardening): this whole read runs on the SOLE
+        // poll thread BEFORE the credential check below — the auth header
+        // can't be evaluated until the full HTTP header has arrived, so an
+        // UNAUTHENTICATED peer that connects and then dribbles a partial
+        // header (or sends nothing) pins the poll thread for the entire
+        // budget. While it's pinned srv.poll() never returns, the serving
+        // loop's write_heartbeat() (service_main.cpp) doesn't advance, and
+        // the FE (--heartbeat-stale-ms, default 15000) force-respawns the
+        // backend. The original 5 s budget let one unauth socket every ~5 s
+        // starve the heartbeat chronically. The pre-auth budget therefore
+        // MUST stay well under (<<) the FE heartbeat staleness threshold:
+        // a real local/LAN client delivers its whole handshake header in a
+        // single round-trip, so 500 ms total is generous for legitimate
+        // peers while bounding the worst-case pre-auth stall (budget + one
+        // in-flight recv timeout ~= 750 ms) far below the 15 s respawn
+        // window. Do NOT raise these without re-checking that invariant.
+        const int kHandshakeRecvTimeoutMs      = 250;  // per-recv SO_RCVTIMEO
+        const int kHandshakeTotalBudgetMs      = 500;  // total pre-auth read budget; MUST be << FE heartbeat-stale-ms (15000)
         {
 #ifdef _WIN32
             DWORD recv_to = (DWORD)kHandshakeRecvTimeoutMs;
@@ -480,14 +1038,9 @@ private:
         if (header_end == std::string::npos) return false;
 
         auto lc = detail::to_lower(req);
-        auto key_pos = lc.find("sec-websocket-key:");
-        if (key_pos == std::string::npos) return false;
-        key_pos += std::strlen("sec-websocket-key:");
-        while (key_pos < req.size() && (req[key_pos] == ' ' || req[key_pos] == '\t')) ++key_pos;
-        auto eol = req.find("\r\n", key_pos);
-        if (eol == std::string::npos) return false;
-        std::string key = req.substr(key_pos, eol - key_pos);
-        while (!key.empty() && (key.back() == ' ' || key.back() == '\r' || key.back() == '\t')) key.pop_back();
+        auto key_hdr = detail::get_header_(lc, req, "sec-websocket-key:");
+        if (!key_hdr) return false;
+        std::string key = std::move(*key_hdr);
 
         // Optional shared-secret auth. Two modes:
         //
@@ -512,53 +1065,28 @@ private:
             std::string hmac_key = hmac_mode
                 ? auth_secret_.substr(hmac_prefix.size())
                 : std::string{};
-            const std::string tag = "authorization:";
-            auto a_pos = lc.find(tag);
             bool ok = false;
-            if (a_pos != std::string::npos) {
-                a_pos += tag.size();
-                while (a_pos < req.size() && (req[a_pos] == ' ' || req[a_pos] == '\t')) ++a_pos;
-                auto a_eol = req.find("\r\n", a_pos);
-                if (a_eol != std::string::npos) {
-                    std::string hdr = req.substr(a_pos, a_eol - a_pos);
-                    while (!hdr.empty() && (hdr.back() == ' ' || hdr.back() == '\r' || hdr.back() == '\t')) hdr.pop_back();
-                    const std::string prefix = "Bearer ";
-                    if (hdr.size() > prefix.size() &&
-                        hdr.compare(0, prefix.size(), prefix) == 0) {
-                        std::string_view got(hdr.data() + prefix.size(),
-                                             hdr.size() - prefix.size());
-                        if (hmac_mode) {
-                            // Pull X-Xi-Timestamp header.
-                            const std::string ts_tag = "x-xi-timestamp:";
-                            auto ts_pos = lc.find(ts_tag);
-                            if (ts_pos != std::string::npos) {
-                                ts_pos += ts_tag.size();
-                                while (ts_pos < req.size() && (req[ts_pos] == ' ' || req[ts_pos] == '\t')) ++ts_pos;
-                                auto ts_eol = req.find("\r\n", ts_pos);
-                                if (ts_eol != std::string::npos) {
-                                    std::string ts_str = req.substr(ts_pos, ts_eol - ts_pos);
-                                    while (!ts_str.empty() && (ts_str.back() == ' ' || ts_str.back() == '\r' || ts_str.back() == '\t')) ts_str.pop_back();
-                                    int64_t ts = 0;
-                                    try { ts = std::stoll(ts_str); } catch (...) {}
-                                    int64_t now = (int64_t)std::time(nullptr);
-                                    if (ts != 0 && std::abs(now - ts) <= 60) {
-                                        std::string expected =
-                                            xi::sha256::hmac_sha256(hmac_key, ts_str);
-                                        if (got.size() == expected.size()) {
-                                            unsigned diff = 0;
-                                            for (size_t i = 0; i < got.size(); ++i)
-                                                diff |= (unsigned char)got[i] ^ (unsigned char)expected[i];
-                                            ok = (diff == 0);
-                                        }
-                                    }
-                                }
+            if (auto hdr = detail::get_header_(lc, req, "authorization:")) {
+                const std::string prefix = "Bearer ";
+                if (hdr->size() > prefix.size() &&
+                    hdr->compare(0, prefix.size(), prefix) == 0) {
+                    std::string_view got(hdr->data() + prefix.size(),
+                                         hdr->size() - prefix.size());
+                    if (hmac_mode) {
+                        // Pull X-Xi-Timestamp header.
+                        if (auto ts_hdr = detail::get_header_(lc, req, "x-xi-timestamp:")) {
+                            const std::string& ts_str = *ts_hdr;
+                            int64_t ts = 0;
+                            try { ts = std::stoll(ts_str); } catch (...) {}
+                            int64_t now = (int64_t)std::time(nullptr);
+                            if (ts != 0 && std::abs(now - ts) <= 60) {
+                                std::string expected =
+                                    xi::sha256::hmac_sha256(hmac_key, ts_str);
+                                ok = detail::ct_equal(got, expected);
                             }
-                        } else if (got.size() == auth_secret_.size()) {
-                            unsigned diff = 0;
-                            for (size_t i = 0; i < got.size(); ++i)
-                                diff |= (unsigned char)got[i] ^ (unsigned char)auth_secret_[i];
-                            ok = (diff == 0);
                         }
+                    } else {
+                        ok = detail::ct_equal(got, auth_secret_);
                     }
                 }
             }
@@ -607,14 +1135,14 @@ private:
     }
 
     bool read_pending() {
+        // Poll thread only; it is the sole closer of client_, so the fd is
+        // stable across this call.
+        socket_t fd = client_.load(std::memory_order_acquire);
+        if (fd == INVALID_SOCK) return false;
         uint8_t tmp[16384];
-        int n = ::recv(client_, reinterpret_cast<char*>(tmp), (int)sizeof(tmp), 0);
+        int n = ::recv(fd, reinterpret_cast<char*>(tmp), (int)sizeof(tmp), 0);
         if (n <= 0) return false;
         rx_buf_.insert(rx_buf_.end(), tmp, tmp + n);
-        // Guard against unbounded growth: if we've buffered more than a
-        // legal frame's worth without finding a frame boundary, the peer
-        // is either broken or malicious. Drop.
-        if (rx_buf_.size() > kMaxFrame + 16) return false;
 
         // Parse as many frames as present
         for (;;) {
@@ -671,6 +1199,15 @@ private:
                 msg_opcode_      = 0;
             }
         }
+        // Guard against unbounded growth: check AFTER the parse loop has
+        // consumed every completed frame, so this measures the true
+        // UN-parseable remainder (a partial frame's head), not a benign
+        // pipelined backlog. A single recv delivering the tail of a ~max
+        // frame plus the head of the next frame would momentarily exceed
+        // the cap on the raw buffer; here those completed frames are
+        // already erased. If what's LEFT still exceeds a legal frame's
+        // worth, the peer is broken or malicious. Drop.
+        if (rx_buf_.size() > kMaxFrame + 16) return false;
         return true;
     }
 
@@ -714,47 +1251,124 @@ private:
         return ParseResult::Ok;
     }
 
-    bool send_frame(int opcode, const uint8_t* data, size_t n) {
-        std::lock_guard<std::mutex> g(tx_mu_);
-        if (client_ == INVALID_SOCK) return false;
-        uint8_t hdr[10];
-        size_t  hlen = 0;
+    // Build the WHOLE WS frame (header + payload) into one owned buffer and
+    // ENQUEUE it for the writer thread; do NOT touch the socket. Returns true on
+    // ENQUEUE (see the file-header note — WS send was never a delivery guarantee),
+    // false only when there is no client OR the hard byte-cap fired and the wedged
+    // client was dropped. Callable from any thread; when called under the ordered-
+    // emit gate the enqueue order is the wire order.
+    //
+    // Cost: one owned buffer holding a copy of the caller's payload (up to ~16 MiB
+    // for a max preview). That extra memcpy is unavoidable — the caller's buffer
+    // is transient (a staged sink's scratch) and must not outlive this call — and
+    // is a bounded, memcpy-scale price versus the pre-async cost: a blocking
+    // ::send that could stall the whole ordered lane on the client's socket for up
+    // to SO_SNDTIMEO (1.5 s) per frame.
+    // Build the 2/4/10-byte WS frame header for `opcode` + an `n`-byte payload into
+    // `hdr` (must hold >=10 bytes); returns the header length. Factored so the copy
+    // path (send_frame) and the zero-copy owned path (enqueue_owned_) emit BYTE-
+    // IDENTICAL headers.
+    static size_t build_header_(int opcode, size_t n, uint8_t* hdr) {
         hdr[0] = 0x80 | (uint8_t)opcode;
-        if (n < 126) {
-            hdr[1] = (uint8_t)n;
-            hlen = 2;
-        } else if (n <= 0xFFFF) {
+        if (n < 126) { hdr[1] = (uint8_t)n; return 2; }
+        if (n <= 0xFFFF) {
             hdr[1] = 126;
             hdr[2] = (uint8_t)((n >> 8) & 0xFF);
             hdr[3] = (uint8_t)(n & 0xFF);
-            hlen = 4;
-        } else {
-            hdr[1] = 127;
-            uint64_t v = n;
-            for (int i = 0; i < 8; ++i) hdr[2 + i] = (uint8_t)((v >> ((7 - i) * 8)) & 0xFF);
-            hlen = 10;
+            return 4;
         }
-        // A failed/short ::send (incl. an SO_SNDTIMEO timeout from a slow client)
-        // means the WS stream is now desynced — half a frame went out. Don't keep
-        // trying (that freezes this worker, and every other worker on tx_mu_, on a
-        // dead/slow client): shutdown the socket so the poll thread's recv returns
-        // and close_client() runs, and fast-fail. Subsequent send_frame calls hit
-        // ::send on the shut-down socket and error out immediately (no block). The
-        // poll thread owns the actual close (avoids an fd-reuse race with recv).
-        auto drop = [&]() -> bool {
-            if (client_ != INVALID_SOCK) ::shutdown(client_, 2 /* SD_BOTH / SHUT_RDWR */);
+        hdr[1] = 127;
+        uint64_t v = n;
+        for (int i = 0; i < 8; ++i) hdr[2 + i] = (uint8_t)((v >> ((7 - i) * 8)) & 0xFF);
+        return 10;
+    }
+
+    bool send_frame(int opcode, const uint8_t* data, size_t n) {
+        uint8_t hdr[10];
+        size_t  hlen = build_header_(opcode, n, hdr);
+        std::vector<uint8_t> frame = acquire_buf_(hlen + n);  // pooled buffer (perf/ws-lean)
+        frame.insert(frame.end(), hdr, hdr + hlen);
+        if (n) frame.insert(frame.end(), data, data + n);
+
+        std::lock_guard<std::mutex> g(out_mu_);
+        // Re-check client_ UNDER out_mu_ (paired with close_client's null-then-
+        // clear ordering): no client → nothing to send. This also means a frame
+        // built for a just-departed client is never enqueued.
+        if (client_.load(std::memory_order_acquire) == INVALID_SOCK) return false;
+        // Backpressure: a slow-but-alive consumer that never trips SO_SNDTIMEO can
+        // still let the backlog grow without bound. When it would cross the cap,
+        // wedge-drop the client cleanly (shutdown → poll's recv returns →
+        // close_client), clear the backlog, and fail this send. We drop the WHOLE
+        // client rather than silently discarding individual frames: a dropped frame
+        // desyncs the WS stream and gives a monitor a phantom gap; a clean full drop
+        // is honest and terminal (same outcome the FE already handles for a
+        // SO_SNDTIMEO drop).
+        if (out_bytes_ + frame.size() > kOutboundHardCapBytes) {
+            socket_t fd = client_.load(std::memory_order_acquire);
+            if (fd != INVALID_SOCK) {
+                ::shutdown(fd, 2 /* SD_BOTH / SHUT_RDWR */);
+                drop_requested_.store(true, std::memory_order_release);  // poll() finishes the close
+            }
+            out_q_.clear();
+            out_bytes_ = 0;
             return false;
-        };
-        int s1 = ::send(client_, reinterpret_cast<const char*>(hdr), (int)hlen, 0);
-        if (s1 != (int)hlen) return drop();
-        if (n == 0) return true;
-        size_t sent = 0;
-        while (sent < n) {
-            int chunk = (int)std::min<size_t>(n - sent, 1 << 20);
-            int s2 = ::send(client_, reinterpret_cast<const char*>(data + sent), chunk, 0);
-            if (s2 <= 0) return drop();
-            sent += (size_t)s2;
         }
+        // Stamp the frame with the CURRENT connection epoch (read here under
+        // out_mu_; the authoritative match happens in the writer under tx_mu_).
+        OutFrame f;
+        f.epoch = conn_epoch_.load(std::memory_order_acquire);
+        f.total = frame.size();
+        f.bytes = std::move(frame);
+        out_bytes_ += f.total;
+        out_q_.push_back(std::move(f));
+        out_cv_.notify_one();
+        return true;
+    }
+
+    // Zero-copy owned enqueue (xi.emit@2 / perf/ws-lean). Mirrors send_frame's
+    // client / byte-cap / epoch handling, but the payload is BORROWED (`segs`, kept
+    // alive by `owner`) and NEVER copied — only the small WS header is host-owned.
+    // Takes ownership of `owner` UNCONDITIONALLY: the local Guard releases it on
+    // every early return; on a successful enqueue the queued OutFrame owns it and
+    // ~OutFrame releases it after the send (or a later drop/teardown), exactly once.
+    bool enqueue_owned_(int opcode, const BinSpan* segs, int nseg,
+                        void* owner, void (*release)(void*)) {
+        struct Guard {
+            void* o; void (*r)(void*);
+            ~Guard() { if (o && r) r(o); }
+        } guard{owner, release};
+
+        size_t payload = 0;
+        for (int i = 0; i < nseg; ++i)
+            if (segs[i].data) payload += segs[i].len;
+
+        uint8_t hdr[10];
+        size_t  hlen  = build_header_(opcode, payload, hdr);
+        size_t  total = hlen + payload;
+
+        std::lock_guard<std::mutex> g(out_mu_);
+        if (client_.load(std::memory_order_acquire) == INVALID_SOCK) return false;  // Guard frees owner
+        if (out_bytes_ + total > kOutboundHardCapBytes) {
+            socket_t fd = client_.load(std::memory_order_acquire);
+            if (fd != INVALID_SOCK) {
+                ::shutdown(fd, 2 /* SD_BOTH / SHUT_RDWR */);
+                drop_requested_.store(true, std::memory_order_release);
+            }
+            out_q_.clear();
+            out_bytes_ = 0;
+            return false;                                                            // Guard frees owner
+        }
+        OutFrame f;
+        f.epoch = conn_epoch_.load(std::memory_order_acquire);
+        f.bytes.assign(hdr, hdr + hlen);        // small host-owned header only
+        f.segs.assign(segs, segs + nseg);       // borrowed payload spans (tiny copy)
+        f.owner   = owner;
+        f.release = release;
+        f.total   = total;
+        guard.o = nullptr;                      // disarm: the OutFrame owns the token now
+        out_bytes_ += total;
+        out_q_.push_back(std::move(f));
+        out_cv_.notify_one();
         return true;
     }
 };

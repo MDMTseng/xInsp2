@@ -16,7 +16,7 @@ const { sleep, makeShooter, clearOldShots } = require('./journey_helpers.cjs');
 const slash = (s) => s.split('\\').join('/');
 const REPO  = path.resolve(__dirname, '..', '..', '..');
 // The committed, openable example — this e2e doubles as its verification.
-const PROJECT = path.join(REPO, 'examples', 'graph_demo');
+const PROJECT = path.join(REPO, 'qa', 'graph_demo');
 const FRAME   = slash(path.join(PROJECT, 'frames', 'frame_00.png'));
 
 const screenshotDir = path.join(REPO, 'screenshot');

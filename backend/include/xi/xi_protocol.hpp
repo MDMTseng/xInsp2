@@ -2,8 +2,9 @@
 //
 // xi_protocol.hpp — xInsp2 WebSocket protocol types (C++ side).
 //
-// Canonical schema lives in protocol/messages.md. This header mirrors it
-// as plain C++ structs plus minimal JSON encode/decode helpers.
+// Canonical schema lives in docs/reference/ws-protocol.md (with the JSON shapes
+// in contract/schemas/). This header mirrors it as plain C++ structs plus minimal
+// JSON encode/decode helpers.
 //
 // This file deliberately avoids nlohmann/json (and any other dep) so the
 // xi_core target stays header-only. The parser is small and strict — it
@@ -15,10 +16,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -29,12 +32,12 @@ namespace xi::proto {
 // NOTE: the `vars` wire enum (VarKindWire) + VarItem/Vars structs were removed
 // with the v9 vars/value-store teardown — nothing emits a `vars` frame anymore.
 // Script output now leaves as the `expose` plugin's self-framed XEX1 binary
-// frame (plugins/expose/src/expose.cpp), not a core protocol type.
+// frame (toolbox/expose/src/expose.cpp), not a core protocol type.
 
 // NOTE: the old binary "preview header" (gid/codec/w/h/ch, 20-byte big-endian)
 // and its Codec enum were removed with the v9 vars/preview-core teardown. The
 // `expose` plugin now frames its own output as a self-describing XEX1 binary
-// frame (magic + msgpack; see plugins/expose/src/expose.cpp); the core is a dumb
+// frame (magic + msgpack; see toolbox/expose/src/expose.cpp); the core is a dumb
 // byte pipe for it (host emit_binary → broadcast), so no core-side header type.
 
 // ---------- JSON string escape / unescape ----------
@@ -277,8 +280,15 @@ inline bool strip_quotes(std::string& s) {
     return false;
 }
 
+// Round-3 W2 #4: find_key used to take a 5th `const char*& after_out` param
+// (the cursor just past the matched value). It NEVER had a live consumer —
+// every one of the ten call sites (here + service_cmd_dispatch/_project.cpp)
+// declared a phantom `const char* after;` local purely to satisfy the
+// signature and then ignored it. The parameter is deleted, not defaulted:
+// keeping a dead out-param invites the next caller to trust a cursor no test
+// exercises.
 inline bool find_key(const char* p, const char* end, std::string_view key,
-                     std::string& value_out, const char*& after_out) {
+                     std::string& value_out) {
     // Expect we're at '{' or just past it. Advance to interior.
     p = skip_ws(p, end);
     if (p < end && *p == '{') ++p;
@@ -296,7 +306,6 @@ inline bool find_key(const char* p, const char* end, std::string_view key,
         p = extract_value(p, end, v);
         if (k == key) {
             value_out = std::move(v);
-            after_out = p;
             return true;
         }
         p = skip_ws(p, end);
@@ -313,24 +322,23 @@ inline std::optional<ParsedCmd> parse_cmd(std::string_view json) {
 
     // type must be "cmd"
     std::string type_val;
-    const char* after;
-    if (!detail::find_key(p, end, "type", type_val, after)) return std::nullopt;
+    if (!detail::find_key(p, end, "type", type_val)) return std::nullopt;
     detail::strip_quotes(type_val);
     if (type_val != "cmd") return std::nullopt;
 
     ParsedCmd out;
 
     std::string id_val;
-    if (!detail::find_key(p, end, "id", id_val, after)) return std::nullopt;
+    if (!detail::find_key(p, end, "id", id_val)) return std::nullopt;
     try { out.id = std::stoll(id_val); } catch (...) { return std::nullopt; }
 
     std::string name_val;
-    if (!detail::find_key(p, end, "name", name_val, after)) return std::nullopt;
+    if (!detail::find_key(p, end, "name", name_val)) return std::nullopt;
     detail::strip_quotes(name_val);
     out.name = std::move(name_val);
 
     std::string args_val;
-    if (detail::find_key(p, end, "args", args_val, after)) {
+    if (detail::find_key(p, end, "args", args_val)) {
         out.args_json = std::move(args_val);
     } else {
         out.args_json = "{}";
@@ -339,12 +347,80 @@ inline std::optional<ParsedCmd> parse_cmd(std::string_view json) {
     return out;
 }
 
+// Best-effort recovery of a command's numeric `id` from an envelope that
+// parse_cmd() REJECTED (wrong/missing `type`, missing `name`, etc.). Returns the
+// id only when one is present and parseable, so an otherwise-malformed command
+// can still get a CORRELATED error reply instead of stalling the client to its
+// timeout (review 09 finding 2). Returns nullopt when there is genuinely nothing
+// to correlate to (no id, or an id that overflows int64 — e.g. a JS bigint), in
+// which case the caller falls back to a log-only reject.
+inline std::optional<int64_t> recover_cmd_id(std::string_view json) {
+    std::string v;
+    if (!detail::find_key(json.data(), json.data() + json.size(), "id", v))
+        return std::nullopt;
+    detail::strip_quotes(v);   // tolerate a quoted "id":"7" as well as bare 7
+    try {
+        size_t pos = 0;
+        long long r = std::stoll(v, &pos);
+        return r;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// The single dispatch shell (adoption-map item 1 / review 09 findings 1-2).
+// Runs the whole command lifecycle behind ONE top-level guard so that:
+//   * any std::exception (or unexpected throw) escaping a handler becomes a
+//     structured `rsp` ok:false correlated to the command id — the contract
+//     docs/reference/ws-protocol.md already promises — instead of unwinding out
+//     of the serve loop into std::terminate (whole-backend death);
+//   * a malformed envelope replies with a correlated error when an id is
+//     recoverable, else logs; either way it counts a reject.
+//
+// Parameterised on its side effects (not on ws::Server) so the guard itself is
+// unit-testable with fakes; the production wiring in service_main.cpp is the
+// only real instantiation. Contracts:
+//   send_err(int64_t id, std::string msg)   — emit rsp ok:false with `msg`.
+//   send_log(std::string msg)               — emit a log-only line (no id to
+//                                             correlate to).
+//   on_reject()                             — bump the visible malformed-cmd
+//                                             reject counter.
+//   invoke(name, id, parsed) -> bool        — look up & call a handler; false
+//                                             means "no such command". MUST let
+//                                             a handler throw propagate here.
+template <class SendErr, class SendLog, class OnReject, class Invoke>
+inline void dispatch_command_guarded(std::string_view text,
+                                     SendErr&&  send_err,
+                                     SendLog&&  send_log,
+                                     OnReject&& on_reject,
+                                     Invoke&&   invoke) {
+    auto parsed = parse_cmd(text);
+    if (!parsed) {
+        on_reject();
+        if (auto id = recover_cmd_id(text)) {
+            send_err(*id, std::string("malformed command"));
+        } else {
+            send_log(std::string("malformed cmd: ") +
+                     std::string(text.substr(0, 128)));
+        }
+        return;
+    }
+    const int64_t id = parsed->id;
+    try {
+        if (!invoke(std::string_view(parsed->name), id, &*parsed))
+            send_err(id, std::string("unknown command: ") + parsed->name);
+    } catch (const std::exception& e) {
+        send_err(id, std::string(e.what()));
+    } catch (...) {
+        send_err(id, std::string("unknown error in command handler"));
+    }
+}
+
 // Extract a single string field from a small JSON object. Used by command
 // handlers to pluck args like {"path":"..."} without dragging in a parser.
 inline std::optional<std::string> get_string_field(std::string_view json, std::string_view key) {
     std::string v;
-    const char* after;
-    if (!detail::find_key(json.data(), json.data() + json.size(), key, v, after)) {
+    if (!detail::find_key(json.data(), json.data() + json.size(), key, v)) {
         return std::nullopt;
     }
     if (!detail::strip_quotes(v)) return std::nullopt;
@@ -353,8 +429,7 @@ inline std::optional<std::string> get_string_field(std::string_view json, std::s
 
 inline std::optional<double> get_number_field(std::string_view json, std::string_view key) {
     std::string v;
-    const char* after;
-    if (!detail::find_key(json.data(), json.data() + json.size(), key, v, after)) {
+    if (!detail::find_key(json.data(), json.data() + json.size(), key, v)) {
         return std::nullopt;
     }
     try { return std::stod(v); } catch (...) { return std::nullopt; }

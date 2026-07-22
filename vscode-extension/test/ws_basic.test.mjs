@@ -96,7 +96,7 @@ test('hello event on connect', async () => {
         const hello = await c.next();
         assert.equal(hello.type, 'event');
         assert.equal(hello.name, 'hello');
-        assert.equal(hello.data.abi, 1);
+        assert.equal(hello.data.abi, 2);
     });
 });
 
@@ -120,7 +120,7 @@ test('cmd version returns version string', async () => {
         const rsp = await c.next();
         assert.equal(rsp.ok, true);
         assert.match(rsp.data.version, /^\d+\.\d+\.\d+/);
-        assert.equal(rsp.data.abi, 1);
+        assert.equal(rsp.data.abi, 2);
     });
 });
 

@@ -1,0 +1,19 @@
+{
+  "name": "qa_plugin_queue_sim",
+  "script": "inspect.cpp",
+  "trigger_policy": { "policy": "any", "window_ms": 1000, "required": [], "leader": "" },
+  "parallelism": {
+    "default_group": "rv",
+    "groups": [
+      { "name": "rv",   "max_parallel": 1, "queue_depth": 0, "overflow": "block" },
+      { "name": "pipe", "max_parallel": 1, "queue_depth": 1, "overflow": "block" }
+    ]
+  },
+  "instances": [
+    { "name": "src_rv",   "plugin": "queue_source" },
+    { "name": "src_pipe", "plugin": "queue_source" }
+  ],
+  "plugins": {
+    "queue_source": { "path": "queue_source", "compile": true }
+  }
+}
