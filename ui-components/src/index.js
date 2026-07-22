@@ -33,6 +33,11 @@ export { renderDescriptor, pickRenderer, RENDERERS, COLORMAPS,
          imageRGBA, heatmapRGBA, profilePoints, overlayOps, tableRows,
          readScalars, normalize } from "./renderers.mjs";
 
+// Pluginlet runtime mount (doc 37, the third consumer of plugin.json "pluginlets"):
+// given a plugin's declared plet list (list_plugins surfaces it), mount each plet's
+// UI. The registry is generated from the plet manifests by the build.
+export { mountPluginlets } from "./pluginlet-mount.mjs";
+
 // Teach tools (task #77): pluggable draw tools for xi-image-editor.
 export { TOOLS, registerTool, makeTool } from "../../toolbox/pluginlets/live-view/ui/lib/tools.mjs";
 
