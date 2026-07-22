@@ -585,8 +585,8 @@ roles" pattern again (identity / build address / bind address):
 | consumer | what it does with `"pluginlets"` | status |
 |---|---|---|
 | **C++ build** | `xi_wire_pluginlets(target dir)` reads it → `xi_use_pluginlet(target <name>)` per entry → applies the plet's include root + `build.native.links` from its manifest | **landed** |
-| **webui build** | bundle each plet's `ui` half + register its widgets | not built |
-| **runtime** | the host knows which plets a plugin uses → the UI auto-mounts `mountSchema` / a live-view into the `view` slot | not built |
+| **webui build** | the `xi-pluginlet-ui` vite plugin scans each manifest's `build.ui.widgets` and compiles/bundles them | **landed** |
+| **runtime** | the backend surfaces `pluginlets` on `list_plugins`; `mountPluginlets(host,{client,instance,pluginlets})` mounts each plet's UI from a manifest-generated registry | **landed** |
 
 The C++ consumer is landed: `xi_use_pluginlet` / `xi_wire_pluginlets`
 (toolbox/CMakeLists.txt) turn "declare the plet in plugin.json" into the only step —
