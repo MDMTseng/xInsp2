@@ -20,12 +20,11 @@ test("XiClient drives the orchestrator verbs end-to-end", { skip: skipLiveBacken
   const child = spawn(backendExe, [`--port=${port}`], { stdio: ["ignore", "ignore", "inherit"] });
   let c;
   try {
-    // Wait for the port to accept, then connect with a version check.
-    for (let i = 0; i < 40 && !c; i++) {
-      await sleep(150);
-      try { c = await new XiClient(`ws://127.0.0.1:${port}/`).connect({ checkVersion: /\d+\.\d+\.\d+/ }); }
-      catch { c = null; }
-    }
+    // Wait for the port to accept, then connect with a version check. `retry`
+    // rides out the boot window (connection refused before the server is up) so
+    // this test no longer hand-rolls a sleep/connect loop.
+    c = await new XiClient(`ws://127.0.0.1:${port}/`)
+          .connect({ checkVersion: true, retry: { attempts: 40, delayMs: 150 } });
     assert.ok(c, "connected + version check passed");
 
     assert.equal((await c.ping()).pong, true, "ping");

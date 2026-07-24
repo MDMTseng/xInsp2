@@ -60,7 +60,9 @@ const status = (t) => (document.getElementById("status").textContent = t);
 (async () => {
   try {
     // Version binding: pin the protocol; fail fast on a mismatched backend.
-    const client = await new XiClient("${url}").connect({ checkVersion: /\\d+\\.\\d+\\.\\d+/ });
+    // checkVersion:true uses the library's canonical version probe (XI_VERSION_RE);
+    // pass your own RegExp/string/function to pin a specific build.
+    const client = await new XiClient("${url}").connect({ checkVersion: true });
     status("connected ${url}");
 
     // The <xi-image-viewer> is a generic component — feed it from whatever frame

@@ -61,7 +61,10 @@ npm test           # jsdom element smoke + WS-shim smoke vs a real backend
    ```js
    import "@xinsp2/components";                 // registers <xi-*>
    import { XiClient } from "@xinsp2/components/ws-client";
-   const c = await new XiClient("ws://127.0.0.1:7823/").connect({ checkVersion: /\d+\.\d+\.\d+/ });
+   // checkVersion:true fails fast on a mismatched backend (canonical XI_VERSION_RE);
+   // retry rides out a not-yet-up / single-client-busy backend on the first connect.
+   const c = await new XiClient("ws://127.0.0.1:7823/")
+     .connect({ checkVersion: true, retry: { attempts: 20, delayMs: 250 } });
    ```
 
 Components expose a **tap-out** API (properties / methods / `change`·`input`
