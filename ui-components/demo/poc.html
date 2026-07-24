@@ -31,7 +31,7 @@
     $("connect").onclick = async () => {
       const url = $("url").value;
       try {
-        client = await new XiClient(url).connect({ checkVersion: /\d+\.\d+\.\d+/ });
+        client = await new XiClient(url).connect({ checkVersion: true });
         log(`connected ${url}`, "ok");
 
         // A real instance to drive: config_swap_probe (def {value:0..255}).

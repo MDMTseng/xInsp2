@@ -41,11 +41,10 @@ test("get_health honours the health contract (or degrades cleanly)", { skip: ski
   const child = spawn(backendExe, [`--port=${port}`], { stdio: ["ignore", "ignore", "inherit"] });
   let c;
   try {
-    for (let i = 0; i < 40 && !c; i++) {
-      await sleep(150);
-      try { c = await new XiClient(`ws://127.0.0.1:${port}/`).connect({ checkVersion: /\d+\.\d+\.\d+/ }); }
-      catch { c = null; }
-    }
+    // `retry` rides out the backend boot window (refused-before-open) so this
+    // test no longer hand-rolls a sleep/connect loop.
+    c = await new XiClient(`ws://127.0.0.1:${port}/`)
+          .connect({ checkVersion: true, retry: { attempts: 40, delayMs: 150 } });
     assert.ok(c, "connected + version check passed");
 
     const boot = await getHealth(c);
