@@ -14,7 +14,8 @@
 
 // WS close code the serve.mjs reverse-proxy uses to relay a backend
 // `503 single-client-busy` upgrade reject to a browser (which cannot read the
-// HTTP status itself). Application range (4000-4999). Keep in sync with hmi/serve.mjs.
+// HTTP status itself). Application range (4000-4999). This is the ONE definition:
+// hmi/serve.mjs imports it from here rather than re-declaring a copy to hand-sync.
 export const BUSY_CLOSE_CODE = 4003;
 
 // Classify why a socket closed. `busy` means the backend refused us because

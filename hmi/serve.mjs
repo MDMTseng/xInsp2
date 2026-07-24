@@ -14,7 +14,10 @@ import { readFile, mkdir } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, normalize, extname, sep } from "node:path";
 import { createRequire } from "node:module";
-// Single source of truth for the busy close code (shim <-> proxy contract).
+// Busy close code (shim <-> proxy contract): imported from its one definition in
+// ui-components/src/ws-client.mjs, never re-declared here. Imported from the shim
+// SOURCE, not the staged hmi/lib/xi-components.esm.js bundle — that bundle calls
+// customElements.define() at module load, which throws in this node process.
 import { BUSY_CLOSE_CODE } from "../ui-components/src/ws-client.mjs";
 
 const HMI = dirname(fileURLToPath(import.meta.url));
