@@ -57,21 +57,6 @@
         "icon": "$(file-code)"
       },
       {
-        "command": "xinsp2.startRecording",
-        "title": "xInsp2: Start Recording…",
-        "icon": "$(record)"
-      },
-      {
-        "command": "xinsp2.stopRecording",
-        "title": "xInsp2: Stop Recording",
-        "icon": "$(debug-stop)"
-      },
-      {
-        "command": "xinsp2.replayRecording",
-        "title": "xInsp2: Replay Recording…",
-        "icon": "$(debug-restart)"
-      },
-      {
         "command": "xinsp2.openImageViewer",
         "title": "xInsp2: Open Interactive Image Viewer",
         "icon": "$(eye)"

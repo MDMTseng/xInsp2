@@ -807,14 +807,6 @@ class Client:
 
     # ---- runtime control ---------------------------------------------
 
-    def resume(self) -> dict:
-        """Release a script parked at `xi::breakpoint("label")`.
-
-        Returns `{resumed: bool, label: str}`. `resumed=false` if no
-        breakpoint was active.
-        """
-        return self.call("resume")
-
     def shutdown(self) -> None:
         """Tell the backend to close the socket and exit. After this
         the client should not reuse the connection."""

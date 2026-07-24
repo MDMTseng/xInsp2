@@ -1,5 +1,16 @@
 # Command-usage ledger — 55 WS commands (in-tree evidence only)
 
+> **STATUS (2026-07): historical snapshot — the cutover happened.** The five
+> zero-caller candidates below (`watchdog_status`, `unload_script`,
+> `unquarantine_plugin`, `load_plugin`, `get_project`) were retired at THE CUT;
+> `g_cmd_table` and `docs/reference/ws-protocol.md` now carry **50** commands.
+> The per-command caller tables below predate that and are kept as the evidence
+> record for the cut. Two consumer-side ghosts found later were also removed
+> (2026-07): the vscode-extension recording_{start,stop,replay} UI (feature
+> moved to the record_save/record_replay plugins via `exchange_instance`) and
+> the python client's `resume()` (the `xi::breakpoint` mechanism no longer
+> exists).
+
 **Purpose.** A decision aid for the cutover train, not a deletion list. Every one
 of the 55 commands is registered in `backend/src/service_main.cpp` (`g_cmd_table`)
 and documented in `docs/reference/ws-protocol.md` — so **all 55 are contract/wire
