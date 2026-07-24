@@ -211,6 +211,36 @@ public:
         return *this;
     }
 
+    // ---- custom components (the native side of the UI widget REGISTRY) ---
+    // comp(widget, key?) — a leaf whose widget NAME controls does not know; the
+    // webui resolves it via registerWidget(name, …) (mount-schema.mjs). This is
+    // the OUTPUT-side escape hatch: with a key it is a plugin-pushed data slot
+    // (readout semantics — feed it with set_readout(key, json); set_def never
+    // writes it). Keyless it is presentation/stream-only — pair with .channel().
+    // Declaring N comps with N keys/channels = N instances of the same component
+    // bound to different data sources.
+    Controls& comp(std::string widget, std::string key = "") {
+        if (key.empty()) { add_leaf_(Kind::Static, "", widget.c_str()); return *this; }
+        auto* n = add_leaf_(Kind::Readout, key, widget.c_str());
+        (void)n;
+        values_[key] = Value{Kind::Readout, 0, false, ""};
+        return *this;
+    }
+    // Data channel of the LAST-added leaf (a comp or view): the stream its UI
+    // component subscribes to — the high-rate path, vs the key's snapshot path.
+    Controls& channel(std::string ch) {
+        if (last_added_) last_added_->channel = std::move(ch);
+        return *this;
+    }
+    // Re-skin the LAST-added control with a REGISTERED widget name — the
+    // INPUT-side escape hatch: `.slider("pressure",0,0,10).as("gauge")` keeps the
+    // Float descriptor (clamping, min/max in the schema) and only swaps the
+    // presentation. The value contract never depends on the widget.
+    Controls& as(std::string widget) {
+        if (last_added_ && !last_added_->container) last_added_->widget = std::move(widget);
+        return *this;
+    }
+
     // ---- presentation-only leaves (no value, no key) ---------------------
     // A section heading, a paragraph of help/body text, a horizontal rule. They ride
     // the schema tree for the renderer but hold no config — get_def/set_def ignore

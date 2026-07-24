@@ -41,6 +41,22 @@ export { mountPluginlets } from "./pluginlet-mount.mjs";
 // Teach tools (task #77): pluggable draw tools for xi-image-editor.
 export { TOOLS, registerTool, makeTool } from "../../toolbox/pluginlets/live-view/ui/lib/tools.mjs";
 
+// Controls plet widget registry (doc 37): the webui's EXPLICIT extension point.
+// One line of app wiring — registerWidget("view", factory) — plugs another
+// plet's widget (live-view today, a chart plet tomorrow) into the controls
+// layout. Owned by the controls plet; re-exported for one-import convenience.
+// IDENTITY WARNING: the registry is MODULE-SCOPED. A bundle-consuming app must
+// take mountSchema AND registerWidget from THIS bundle — mixing the bundled copy
+// with a direct source import gives two registries, and a registration lands in
+// the one mountSchema doesn't read (the ⚠ placeholder will say so).
+export { mountSchema, registerWidget, unregisterWidget }
+  from "../../toolbox/pluginlets/controls/ui/mount-schema.mjs";
+// The live-view mount, the canonical thing to register under "view".
+export { mountLiveView } from "../../toolbox/pluginlets/live-view/ui/live-view.ui";
+// REFERENCE app-custom widget: a plain-Svelte composed panel (TeachPanel) whose
+// registration shows the mount()/unmount() + $state-bridge pattern.
+export { registerTeachPanelDemo } from "./demo/register-teach-panel.svelte.js";
+
 // HMI dashboard (task #81): importable cards + layout engine + mountDashboard, so
 // an external webapp can drop in the whole composable dashboard. Importing cards
 // registers the <xi-card-*> elements.

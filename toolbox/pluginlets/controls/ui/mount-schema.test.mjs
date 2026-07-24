@@ -42,7 +42,7 @@ const all = (el) => { const o = []; (function rec(n) { for (const c of n.childre
 const byTag = (el, t) => all(el).filter((e) => e.tagName === t.toUpperCase());
 const byClass = (el, c) => all(el).filter((e) => (e.className || "").split(" ").includes(c));
 
-const { mountSchema } = await import("./mount-schema.mjs");
+const { mountSchema, registerWidget, unregisterWidget } = await import("./mount-schema.mjs");
 const { mountInstancePanel } = await import("../../../../ui-components/src/auto-panel.mjs");
 
 function schemaDef() {
@@ -178,6 +178,129 @@ test("extended widgets: stepper/file/color degrade + carry sem; range → two co
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(client.calls.at(-1).high, 180, "band high patched");
   assert.equal(client.calls.at(-1).low, 60, "band low patched in the same write");
+});
+
+test("registerWidget: a factory extends the vocabulary and joins refresh/destroy", async () => {
+  // A "chart plet" claims the widget name `chart` — controls never heard of it.
+  const seen = { nodes: [], updates: [], destroyed: 0 };
+  registerWidget("chart", (node, ctx) => {
+    seen.nodes.push(node);
+    assert.equal(typeof ctx.pushDef, "function", "ctx exposes the def write path");
+    assert.equal(ctx.instance, "cd");
+    const el = ctx.doc.createElement("xi-chart");
+    return {
+      el,
+      update: (state) => seen.updates.push(state.series),
+      destroy: () => seen.destroyed++,
+    };
+  });
+  try {
+    const $schema = { type: "root", children: [
+      { type: "control", widget: "chart", key: "series", label: "Trend", span: 12 },
+    ] };
+    const client = {
+      def: { series: "a", $schema },
+      async getInstanceDef() { return { ...this.def }; },
+      async setInstanceDef() {},
+    };
+    const host = doc.createElement("div"); host.ownerDocument = doc;
+    const panel = await mountSchema(host, { client, instance: "cd" });
+
+    assert.equal(byTag(host, "xi-chart").length, 1, "factory's element mounted");
+    assert.equal(byTag(host, "xi-chart")[0].style.gridColumn, "span 12", "span applied to it");
+    assert.equal(seen.nodes[0].key, "series", "factory sees its schema node");
+
+    client.def.series = "b";
+    await panel.refresh();
+    assert.deepEqual(seen.updates, ["b"], "update() joins refresh with fresh state");
+    panel.destroy();
+    assert.equal(seen.destroyed, 1, "destroy() joins the panel's destroy");
+  } finally { unregisterWidget("chart"); }
+});
+
+test("registerWidget: overriding `view` mounts a real widget in the layout slot", async () => {
+  // The live-view wiring: ONE explicit line in the webui replaces the empty
+  // .xi-view placeholder with an actual viewer, channel defaulting to ui/<instance>.
+  registerWidget("view", (node, { doc, instance }) => {
+    const el = doc.createElement("div");
+    el.className = "xi-live";
+    el.dataset.channel = node.channel || `ui/${instance}`;
+    return el;                                   // bare-element form
+  });
+  try {
+    const client = mockClient();
+    const host = doc.createElement("div"); host.ownerDocument = doc;
+    await mountSchema(host, { client, instance: "cd" });
+    assert.equal(byClass(host, "xi-view").length, 0, "built-in placeholder replaced");
+    assert.equal(byClass(host, "xi-live")[0].dataset.channel, "ui/cam0/preview",
+      "schema-declared channel wins");
+  } finally { unregisterWidget("view"); }
+
+  // built-in behaviour restored after unregister
+  const host2 = doc.createElement("div"); host2.ownerDocument = doc;
+  await mountSchema(host2, { client: mockClient(), instance: "cd" });
+  assert.equal(byClass(host2, "xi-view").length, 1, "unregister restores the built-in");
+});
+
+test("registerWidget: tag-string form and per-mount `widgets` override", async () => {
+  registerWidget("gauge", "xi-gauge");           // tag form: a bound value control
+  try {
+    const $schema = { type: "root", children: [
+      { type: "control", widget: "gauge", key: "pressure", min: 0, max: 10 },
+      { type: "control", widget: "slider", key: "thr", min: 0, max: 255 },
+    ] };
+    const client = {
+      def: { pressure: 4, thr: 128, $schema }, calls: [],
+      async getInstanceDef() { return { ...this.def }; },
+      async setInstanceDef(n, d) { this.calls.push(d); },
+    };
+    const host = doc.createElement("div"); host.ownerDocument = doc;
+    await mountSchema(host, { client, instance: "cd" });
+    const g = byTag(host, "xi-gauge")[0];
+    assert.ok(g, "tag-string impl rendered");
+    assert.equal(g.value, 4, "seeded from def like any bound control");
+    g.dispatchEvent(new CustomEvent("change", { detail: { value: 7 } }));
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(client.calls.at(-1).pressure, 7, "edits flow through set_instance_def");
+
+    // per-mount widgets beats the global registry (here: replace the built-in slider)
+    const host2 = doc.createElement("div"); host2.ownerDocument = doc;
+    await mountSchema(host2, { client, instance: "cd",
+      widgets: { slider: "xi-dial" } });
+    assert.equal(byTag(host2, "xi-dial").length, 1, "per-mount override applied");
+    assert.equal(byTag(host2, "xi-slider").length, 0, "built-in tag not used");
+  } finally { unregisterWidget("gauge"); }
+});
+
+test("an unknown widget renders an info placeholder naming the missing wiring", async () => {
+  const $schema = { type: "root", children: [
+    { type: "control", widget: "histogram", key: "bins", label: "Histogram", span: 12 },
+    { type: "control", widget: "slider", key: "thr", min: 0, max: 255 },
+  ] };
+  const client = {
+    def: { bins: "[]", thr: 128, $schema },
+    async getInstanceDef() { return { ...this.def }; },
+    async setInstanceDef() {},
+  };
+  const host = doc.createElement("div"); host.ownerDocument = doc;
+  await mountSchema(host, { client, instance: "cd" });
+
+  const ph = byClass(host, "xi-missing")[0];
+  assert.ok(ph, "placeholder rendered instead of a guessed control");
+  assert.ok(ph.textContent.includes('"histogram"'), "names the missing widget");
+  assert.ok(ph.textContent.includes("bins"), "names the orphaned key");
+  assert.ok(ph.textContent.includes('registerWidget("histogram"'), "tells the user the exact wiring line");
+  assert.equal(ph.style.gridColumn, "span 12", "keeps its layout slot");
+  assert.equal(byTag(host, "xi-slider").length, 1, "known widgets unaffected");
+
+  // registering it afterwards resolves the placeholder on the next mount
+  registerWidget("histogram", (node, { doc: d }) => d.createElement("xi-hist"));
+  try {
+    const host2 = doc.createElement("div"); host2.ownerDocument = doc;
+    await mountSchema(host2, { client, instance: "cd" });
+    assert.equal(byClass(host2, "xi-missing").length, 0, "no placeholder once wired");
+    assert.equal(byTag(host2, "xi-hist").length, 1, "the registered component mounts");
+  } finally { unregisterWidget("histogram"); }
 });
 
 test("the plet renderer returns null when there is no $schema (it never falls back)", async () => {

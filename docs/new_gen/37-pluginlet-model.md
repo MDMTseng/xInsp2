@@ -786,9 +786,61 @@ the sections above as describing shipped behaviour:
   divider, with semantic types (`sem`). The dedicated **xi-stepper / xi-range /
   xi-color / xi-file** elements and the **host-owned touch numpad**
   (`ui/lib/numpad.mjs`, one surface per page — Qt-Virtual-Keyboard model) are now
-  LANDED too, so nothing degrades. STILL DESIGN ONLY within it: wiring `sem` to
+  LANDED too, so nothing degrades.
+
+  **The widget REGISTRY (rev 6, LANDED)** — CT's direction: zero-code is not the
+  goal; a clear, small API with one explicit line of wiring beats magic. The
+  controls plet is an **extensible widget vocabulary**, not a closed set:
+  `registerWidget(name, impl)` / `unregisterWidget(name)` (owned by
+  `mount-schema.mjs`, re-exported by `@xinsp2/components`) lets the consuming
+  webui add a widget name or override a built-in. An impl is a tag string (a
+  bound value control, e.g. a chart plet's `"xi-chart"`) or a factory
+  `(node, ctx) => el | {el, update?(state), destroy?()}` with
+  `ctx = {doc, client, instance, state, pushDef}`; `update` joins the panel's
+  `refresh()`, `destroy` its `destroy()`. Per-mount overrides:
+  `mountSchema(host, {widgets: {name: impl}})` beats the global registry. This is
+  how OTHER plets plug into the controls layout without controls knowing them —
+  the canonical case being **live-view claiming `view`**:
+
+      registerWidget("view", (node, { instance }) => {
+        const el = document.createElement("div");
+        const dispose = mountLiveView(el, node.channel || `ui/${instance}`, transport);
+        return { el, destroy: dispose };
+      });
+
+  (demoed with a synthetic frame source in `ui-components/demo/schema.html`;
+  channel defaults to `ui/<instance>` when the schema omits it, softening the
+  two-places-name-the-channel seam). Tested in `ui/mount-schema.test.mjs`
+  (factory + view override + tag-string + per-mount override + lifecycle).
+  Unknown widget (neither built-in nor registered) → an INFO placeholder in the
+  layout slot naming the widget, the orphaned key, and the exact
+  `registerWidget("…")` line missing — never a silently guessed control.
+  FOOTGUN (hit for real): the registry is MODULE-SCOPED, so a bundle-consuming
+  app must take `mountSchema` and `registerWidget` from the SAME bundle; mixing
+  the bundled copy with a direct source import gives two registries and the
+  registration lands in the one mountSchema doesn't read (the placeholder is
+  what surfaces it). App-custom widgets in Svelte: the reference is
+  `ui-components/src/demo/TeachPanel.svelte` + `register-teach-panel.svelte.js` —
+  a PLAIN (non-CE) Svelte component tree mounted by the factory via svelte
+  `mount()/unmount()`, a `$state` object bridging the panel's `refresh()` into
+  runes, child components composed normally, and the plet's xi-* custom elements
+  mixed in as plain tags.
+
+  **The NATIVE side of the registry** (same rev): the builder does not grow a
+  method per custom widget — it has two orthogonal escape hatches.
+  `.comp(widget, key?)` declares a leaf whose widget name controls does not
+  know: keyed = a plugin-pushed data slot (readout semantics — `set_readout(key,
+  json)` feeds it, set_def never writes it), keyless = presentation/stream-only,
+  paired with the `.channel(ch)` modifier. `.as(widget)` re-skins a typed INPUT
+  builder (`.slider("pressure",0,0,10).as("gauge")`) keeping its value contract —
+  clamping and min/max ride the schema unchanged, only presentation swaps.
+  Multiple graphs of one component = multiple `.comp("chart", key)` nodes, each
+  bound to its own key/channel (registration is per widget TYPE; instantiation is
+  per schema NODE). `test_controls` covers it (custom_components).
+  STILL DESIGN ONLY within the controls plet: wiring `sem` to
   units/format/touch-editor selection (it is carried, not yet acted on); the
-  **live-view mount** into the `view` slot's `data-channel`; native dynamic-tree
+  `view`↔live-view registration against a REAL backend transport (the registry
+  mechanism and the demo wiring exist; no e2e); native dynamic-tree
   `$rev` bumping (the tree is static today, `$rev` constant).
 - **plet settings persistence** — the delegated `plet/<fqname>` def slice: convention
   only, no helper written.

@@ -34,18 +34,48 @@
 </div>
 <div id="log">— edits log here —</div>
 <script type="module">
-  import "../dist/xi-components.esm.js";                 // registers <xi-*>
-  // the renderer is OWNED BY THE PLET (doc 37) — import it from there, not from
-  // the app layer. NOTE: serve the REPO ROOT so /toolbox/... resolves:
-  //   python -m http.server -d <repo> 8931  ->  /ui-components/demo/schema.html
-  import { mountSchema } from "../../toolbox/pluginlets/controls/ui/mount-schema.mjs";
+  // ONE import for everything: the renderer is still OWNED BY THE PLET (doc 37),
+  // but a bundle-consuming app must take mountSchema AND registerWidget from the
+  // SAME bundle — the registry is module-scoped, and mixing a source import with
+  // the bundled copy silently gives two registries (the ⚠ placeholder catches it).
+  import { mountSchema, registerWidget, mountLiveView, registerTeachPanelDemo }
+    from "../dist/xi-components.esm.js";
+
+  // THE explicit wiring line (doc 37 registry): the webui teaches the controls
+  // plet what a `view` slot renders — here, live-view fed by a synthetic JPEG
+  // source standing in for the backend. Channel defaults to ui/<instance>.
+  const transport = {
+    onFrame(channel, cb) {
+      const cv = document.createElement("canvas"); cv.width = 320; cv.height = 180;
+      const cx = cv.getContext("2d");
+      let t = 0;
+      const timer = setInterval(() => {
+        t += 0.06;
+        cx.fillStyle = "#05070c"; cx.fillRect(0, 0, 320, 180);
+        cx.strokeStyle = "#4b9fff"; cx.lineWidth = 2; cx.beginPath();
+        for (let x = 0; x <= 320; x += 4)
+          cx.lineTo(x, 90 + Math.sin(x / 28 + t) * 55);
+        cx.stroke();
+        cv.toBlob(async (b) => cb(new Uint8Array(await b.arrayBuffer())), "image/jpeg", 0.8);
+      }, 66);
+      return () => clearInterval(timer);
+    },
+    send(msg) { logEl.textContent = "viewport upstream: " + JSON.stringify(msg); },
+  };
+  registerTeachPanelDemo();   // the Svelte-composition custom widget (teach_panel)
+  registerWidget("view", (node, { instance }) => {
+    const el = document.createElement("div");
+    el.style.cssText = "min-height:120px;border-radius:8px;overflow:hidden;background:#05070c";
+    const dispose = mountLiveView(el, node.channel || `ui/${instance}`, transport);
+    return { el, destroy: dispose };
+  });
 
   const $schema = { type:"root", children:[
     { type:"tab", title:"Capture", children:[
       { type:"control", widget:"title", label:"Camera" },
       { type:"grid", columns:12, children:[
         { type:"control", widget:"slider", key:"fps", label:"Frame rate", min:1, max:60, span:6 },
-        { type:"control", widget:"number", key:"gain", label:"Gain", min:0.1, max:4, step:0.1, span:6 },
+        { type:"control", widget:"numpad", key:"gain", label:"Gain", min:0.1, max:4, step:0.1, span:6 },
         { type:"control", widget:"toggle", key:"streaming", label:"Streaming", span:6 },
         { type:"control", widget:"dropdown", key:"mode", label:"Mode", options:["fast","accurate"], span:6 },
         { type:"control", widget:"radio", key:"trigger", label:"Trigger", options:["soft","hardware","free"], span:12 },
@@ -60,6 +90,9 @@
       ]},
       { type:"control", widget:"divider" },
       { type:"control", widget:"view", channel:"ui/cd/preview", label:"Live", span:12, rows:5 },
+      { type:"control", widget:"divider" },
+      // app-custom widget: a plain-Svelte composed panel (registerTeachPanelDemo)
+      { type:"control", widget:"teach_panel", key:"roi", label:"Teach", span:12 },
     ]},
     { type:"tab", title:"Output", children:[
       { type:"section", title:"Results", children:[
@@ -73,7 +106,8 @@
   ]};
   const def = { fps:30, gain:1.6, streaming:true, mode:"accurate", trigger:"hardware",
                 count:12, exposure:8.5, low:40, high:200, tint:"#ff8800",
-                model:"net.onnx", ticks:"7", last_fps:"30", $v:1, $rev:1, $schema };
+                model:"net.onnx", ticks:"7", last_fps:"30", roi:"48,32,160,96",
+                $v:1, $rev:1, $schema };
 
   const logEl = document.getElementById("log");
   const client = {
