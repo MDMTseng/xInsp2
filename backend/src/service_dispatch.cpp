@@ -1,7 +1,7 @@
 //
 // service_dispatch.cpp — per-group dispatch lanes, pool lifecycle, trigger sink,
 // controlled teardown + host-tracked instance state. Split from service_main.cpp
-// (behavior-preserving; see service_internal.hpp).
+// (behavior-preserving; see service_state.hpp / service_cmds.hpp).
 //
 #include <algorithm>
 #include <chrono>
@@ -15,7 +15,7 @@
 #  include <cerrno>
 #endif
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
 
 using xi::EmitGate;
 using xi::EmitTurn;
@@ -33,7 +33,7 @@ using xi::EmitTurn;
 // total_created_), so a monitor can see total drops / peak depth across run
 // boundaries. dispatch_stats reports them as *_lifetime alongside the per-run ones.
 
-// GroupLane struct definition moved to service_internal.hpp.
+// GroupLane struct definition moved to service_state.hpp.
 // Lanes are shared_ptr + guarded by g_eng.lanes_mu so a producer (an emit thread /
 // the timer) that grabbed a lane can't have it destroyed under it by a concurrent
 // stop_group_pool_ — the shared_ptr keeps the GroupLane (its mutex/cv) alive until
@@ -756,7 +756,7 @@ void install_trigger_sink_(xi::ws::Server* srv) {
 // guard won't resume. CALLERS MUST HOLD IT (`auto g = quiesce_...`) for the op's
 // duration — a discarded temporary would resume immediately, before the op runs.
 // DispatchPoolGuard struct (incl. its inline resume()/skip_resume()) moved to
-// service_internal.hpp so lifecycle-op cmd handlers in other TUs can hold it.
+// service_cmds.hpp so lifecycle-op cmd handlers in other TUs can hold it.
 DispatchPoolGuard quiesce_dispatch_for_lifecycle_op_(const char* op_name,
                                                             xi::ws::Server* srv) {
     DispatchPoolGuard g;

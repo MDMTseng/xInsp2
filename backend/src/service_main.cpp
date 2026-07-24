@@ -74,10 +74,11 @@
 
 namespace xp = xi::proto;
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include <xi/xi_health.hpp>
 
 // The Engine struct + all shared globals/structs/constants/helpers moved to the
-// PRIVATE header service_internal.hpp (behavior-preserving split). The single
+// PRIVATE header service_state.hpp / service_cmds.hpp (behavior-preserving split). The single
 // DEFINITION of g_eng lives HERE (this TU); every other service_*.cpp sees it via
 // `extern Engine g_eng;` in the header.
 Engine g_eng;
@@ -134,7 +135,7 @@ using xi::seh_exception;
 // frame_path (optional) is carried on the A4 explicit per-run context
 // (RunContextScope); readable inside the script as
 // `xi::current_frame_path()`. Empty string means none.
-// run_one_inspection declared (with default args) in service_internal.hpp.
+// run_one_inspection declared (with default args) in service_cmds.hpp.
 
 // Path resolution for the script compiler. Backend derives its own dir at
 // startup and uses that to locate the xi headers we ship alongside the exe.
@@ -185,7 +186,7 @@ void send_rsp_ok(xi::ws::Server& srv, int64_t id, std::string data_json) {
 // run_id on the async two. Until that's fixed protocol-wide, this
 // ring lets the client pull "anything error-shaped that happened
 // in the last minute" with a single query.
-// kRecentErrorsCap moved to service_internal.hpp.
+// kRecentErrorsCap moved to service_state.hpp.
 int64_t now_ms_() { return xi::wall_ms(); }   // wall: RecentError ts
 
 void push_recent_error(std::string source, std::string message,

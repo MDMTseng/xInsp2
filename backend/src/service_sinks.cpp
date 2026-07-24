@@ -3,7 +3,7 @@
 // capture glue, ordered output sinks (stage/drain/flush), trigger-loop state,
 // trigger-access script callbacks, image-pool owner thunks, watchdog-slot
 // arm/disarm, and script_host_api_. Split from service_main.cpp
-// (behavior-preserving; see service_internal.hpp).
+// (behavior-preserving; see service_state.hpp / service_cmds.hpp).
 //
 #include <algorithm>
 #include <cstdio>
@@ -14,7 +14,8 @@
 #include <xi/xi_pack_abi.hpp>   // PackRegistry retain/release (use_push_pack_cb)
 #include <xi/xi_pack_contract.hpp> // U1 fault short-circuit (use_pack_process_cb, doc 15)
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include <xi/xi_use.hpp>
 
 // ---- Pipeline graph capture (stage 2) ----------------------------------
 // Opt-in dataflow-graph capture lives in xi_graph_capture.hpp (xi::GraphCapture
@@ -23,14 +24,14 @@
 
 // Defined after g_eng.plugin_mgr (declared further down); records a per-instance
 // process() crash so a crash loop is visible via get_state.
-// note_instance_crash_ declared in service_internal.hpp.
+// note_instance_crash_ declared in service_cmds.hpp.
 
 // Part III G2.1 — stamp the process-global crash culprit (xi::crash::g_culprit)
 // with the instance/plugin the host is about to enter, plus that plugin's
 // folder + dll so the FE can quarantine it on a death. Defined after
 // g_eng.plugin_mgr. Cheap on the dispatch hot path: a per-thread cache means the
 // manager lock is taken only when the active plugin on this thread changes.
-// stamp_culprit_ declared in service_internal.hpp.
+// stamp_culprit_ declared in service_cmds.hpp.
 
 // ---- item 14: post-fault quarantine policy (adoption-map item 14) -----------
 // The health-overlay + escalation POLICY lives HERE, at the fault boundary; the
@@ -101,7 +102,7 @@ void apply_pending_reinit_(const char* name, xi::CAbiInstanceAdapter* adapter) {
 // so parallel workers stage independently. (use() is script-only — a plugin can't
 // re-enter it — so staging only ever happens inside an inspect, where the guard +
 // flush bracket g_staged.)
-// StagedEmit struct moved to service_internal.hpp; g_staged DEFINED here.
+// StagedEmit struct moved to service_state.hpp; g_staged DEFINED here.
 thread_local std::vector<StagedEmit> g_staged;
 
 // ---- polaris2 gate P2: expose-from-script (use(sink).push(pack)) ----------------
@@ -359,7 +360,7 @@ using xi::EmitTurn;
 // (xi::crash::). These thin forwarders keep the dispatch hot-path call sites
 // (crash_ctx()/crash_set()/crash_set_phase()) terse and unchanged.
 xi::crash::Context& crash_ctx() { return xi::crash::ctx(); }
-// crash_set / crash_set_phase are defined inline in service_internal.hpp.
+// crash_set / crash_set_phase are defined inline in service_state.hpp.
 
 // Watchdog (P2.4). When > 0, inspect() calls have this many ms of wall-
 // clock budget. Default 0 = disabled (back-compat). Set via
@@ -376,7 +377,7 @@ xi::crash::Context& crash_ctx() { return xi::crash::ctx(); }
 // See docs/guides/writing-a-script.md (Parallel dispatch) + internals/fe-be.md.
 // Per-slot inspect deadline (steady_clock epoch-ms); 0 = free. Written by the
 // dispatch/run thread that owns the slot, read by the watchdog thread.
-// WATCHDOG_EXIT_CODE moved to service_internal.hpp.
+// WATCHDOG_EXIT_CODE moved to service_state.hpp.
 
 // Claim a free watchdog slot for `deadline` (steady-clock epoch-ms). Returns the
 // slot index, or -1 if all slots are busy (then this inspect runs unwatched —
@@ -519,7 +520,7 @@ void release_trigger_event_(xi::TriggerEvent& ev) {   // decl in header (cross-T
 // g_current_trigger was left dangling at a popped-stack ev (the next current_trigger
 // callback = UAF) and the event leaked. The dtor makes both impossible and a new
 // dispatch site can't get the sequence wrong.
-// CurrentTriggerScope declared in service_internal.hpp; ctor/dtor defined here
+// CurrentTriggerScope declared in service_state.hpp; ctor/dtor defined here
 // (they touch the file-local release_trigger_event_).
 CurrentTriggerScope::CurrentTriggerScope(xi::TriggerEvent& ev) : ev_(ev) {
     g_current_trigger = &ev;
@@ -542,7 +543,7 @@ CurrentTriggerScope::~CurrentTriggerScope() {
 // release-by-default, call dismiss() only where ownership is transferred. (A move
 // leaves `ev` empty, so even a missed dismiss() releases nothing — never a
 // double-free.) Same shape as DispatchPoolGuard.
-// TriggerEventReleaser moved to service_internal.hpp (used by dispatch TU).
+// TriggerEventReleaser moved to service_state.hpp (used by dispatch TU).
 
 // ---- staged-sink drain / flush (paired with use_push_pack_cb staging above) -----
 // Drain WITHOUT delivering — release every staged item's pack ref. The backstop for
@@ -552,7 +553,7 @@ void drain_staged_emits_() {   // decl in header
     for (auto& it : g_staged) release_trigger_event_(it.rec);
     g_staged.clear();
 }
-// StagedEmitGuard struct moved to service_internal.hpp.
+// StagedEmitGuard struct moved to service_state.hpp.
 
 // Deliver every staged sink call, in call order, to its target's process() via the
 // SEH-guarded inline path. Called inside the EmitTurn gate (after wait_turn) so the
@@ -596,7 +597,7 @@ void flush_staged_emits_(int64_t run_id) {   // decl in header
     if (g_staged.empty()) g_staged.swap(staged);
 }
 
-// CurrentTriggerInfoC struct moved to service_internal.hpp.
+// CurrentTriggerInfoC struct moved to service_cmds.hpp.
 void trigger_info_cb(CurrentTriggerInfoC* out) {
     if (!out) return;
     if (!g_current_trigger) { warn_trigger_off_thread_(); *out = {{0,0}, 0, 0, 0, 0}; return; }
@@ -613,7 +614,7 @@ void trigger_info_cb(CurrentTriggerInfoC* out) {
 // longer exist; scripts now read the frame payload through t.pack() off the pack
 // plane. trigger_info_cb (identity/timestamp only) stays. The wiring that installed
 // these (set_trigger_*_callback in service_cmd_lifecycle.cpp, decls in
-// service_internal.hpp) is reconciled with THE CUT.
+// service_cmds.hpp) is reconciled with THE CUT.
 
 // ---- Image-pool owner get/set thunks (C1) ----------------------------------
 // Bridge the backend's ImagePool owner thread_local across the ABI seam so SDK

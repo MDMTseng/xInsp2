@@ -1,7 +1,7 @@
 //
 // service_toolchain.cpp — C++ toolchain resolution + per-project override, script
 // external-dep parsing, project DLL search path, and the instance crash-breadcrumb
-// helpers. Split from service_main.cpp (behavior-preserving; see service_internal.hpp).
+// helpers. Split from service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
 //
 #include <cstdio>
 #include <cstring>
@@ -14,7 +14,7 @@
 #include <xi/xi_toolchain.hpp>
 #include <xi/xi_project.hpp>
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
 
 // ---- C++ toolchain health + per-project override -----------------------------
 //

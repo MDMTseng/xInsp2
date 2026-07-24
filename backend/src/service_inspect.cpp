@@ -3,7 +3,7 @@
 // invocation + SEH boundary + crash breadcrumb + watchdog) and EMISSION half
 // (metrics + ordered-emit gate + staged flush + result/events), plus the thin
 // run_one_inspection driver. Split from service_main.cpp (behavior-preserving;
-// see service_internal.hpp).
+// see service_state.hpp / service_cmds.hpp).
 //
 #include <algorithm>
 #include <chrono>
@@ -14,7 +14,9 @@
 #include <yyjson.h>
 #include <xi/xi_metrics.hpp>
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include <xi/xi_ws_server.hpp>
+#include <xi/xi_use.hpp>
 
 using xi::EmitGate;
 using xi::EmitTurn;

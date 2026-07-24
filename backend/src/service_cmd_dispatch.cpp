@@ -1,6 +1,6 @@
 //
 // service_cmd_dispatch.cpp — dispatch-control command handlers, split from
-// service_main.cpp (behavior-preserving; see service_internal.hpp).
+// service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
 //
 #include <algorithm>
 #include <cstdio>
@@ -13,10 +13,10 @@
 
 #include <xi/xi_pack_abi.hpp>   // v12: cmd:run injects a sealed pack (pack_v1_iface)
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
 
 // Item-14 caught-fault policy helpers are DEFINED in service_sinks.cpp and
-// declared in service_internal.hpp (guarded_plugin_call — the shared plugin-
+// declared in service_cmds.hpp (guarded_plugin_call — the shared plugin-
 // entry fault boundary — needs them from every cmd TU now).
 
 // ---- dispatch-control ------------------------------------------------------
@@ -384,7 +384,7 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             // commit_group, and gating prepare dead-ended that recovery at step 1
             // (commit alone cannot re-stage). Same config-plane rationale as
             // set_def/commit — see the gate_quarantined comment in
-            // service_internal.hpp.
+            // service_cmds.hpp.
             auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
             bool ok = false;
             auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
