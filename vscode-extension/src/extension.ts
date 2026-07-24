@@ -21,6 +21,9 @@ import { parseHealth, mergeHealthEvent, enteredProblem, failingComponents,
          componentSummary, summarizeFailing,
          STATE_RUNNING, STATE_DEGRADED, STATE_FAULT,
          type HealthSnapshot } from './healthState';
+// The plugin↔its-own-UI webview envelope, shared byte-for-byte with the browser
+// shim (ui-components/src/vscode-shim.mjs) so both sides build the same shape.
+import { statusEnvelope, isExchange } from '../../ui-components/src/exchange-envelope.mjs';
 
 // --- Plugin Browser model building (pure; reads project.json + the filesystem) ---
 function pbExpandRoot(raw: string, projectFolder: string): string {
@@ -2804,15 +2807,14 @@ export function activate(context: vscode.ExtensionContext) {
 
             // Wire postMessage ↔ exchange_instance + preview polling
             panel.webview.onDidReceiveMessage(async (msg: any) => {
-                if (msg.type === 'exchange' && msg.cmd) {
+                if (isExchange(msg)) {
                     const rsp = await sendCmd('exchange_instance', {
                         name: instanceName,
                         cmd: msg.cmd,
                     });
                     if (rsp.ok && rsp.data) {
-                        panel.webview.postMessage({ type: 'status', ...JSON.parse(
-                            typeof rsp.data === 'string' ? rsp.data : JSON.stringify(rsp.data)
-                        )});
+                        const parsed = typeof rsp.data === 'string' ? JSON.parse(rsp.data) : rsp.data;
+                        panel.webview.postMessage(statusEnvelope(parsed));
                     }
                 } else if (msg.type === 'request_process') {
                     // Plugin UI wants to run process() and see results
@@ -2835,7 +2837,7 @@ export function activate(context: vscode.ExtensionContext) {
             });
             if (statusRsp.ok && statusRsp.data) {
                 const parsed = typeof statusRsp.data === 'string' ? JSON.parse(statusRsp.data) : statusRsp.data;
-                panel.webview.postMessage({ type: 'status', ...parsed });
+                panel.webview.postMessage(statusEnvelope(parsed));
             }
         })
     );
@@ -2891,7 +2893,7 @@ export function activate(context: vscode.ExtensionContext) {
             const panel = pluginUIPanels.get(instanceName);
             if (panel && rsp.ok && rsp.data) {
                 const parsed = typeof rsp.data === 'string' ? JSON.parse(rsp.data) : rsp.data;
-                panel.webview.postMessage({ type: 'status', ...parsed });
+                panel.webview.postMessage(statusEnvelope(parsed));
             }
             return rsp;
         },
