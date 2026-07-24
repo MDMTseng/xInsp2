@@ -1,6 +1,6 @@
 //
 // service_cmd_plugin.cpp — plugin-mgmt command handlers, split from
-// service_main.cpp (behavior-preserving; see service_internal.hpp).
+// service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
 //
 #include <algorithm>
 #include <cstdio>
@@ -13,7 +13,8 @@
 #include <yyjson.h>
 #include <xi/xi_toolchain.hpp>
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include <xi/xi_ws_server.hpp>
 
 // ---- plugin-mgmt -----------------------------------------------------------
 void cmd_set_process_priority_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {

@@ -2,7 +2,7 @@
 // service_result.cpp — the status registry (set_status_internal / status_cb) and
 // the per-run Result surface (result_cb, trigger_id_hex, outcome_class_for_code,
 // emit_run_result). Split from service_main.cpp (behavior-preserving; see
-// service_internal.hpp).
+// service_state.hpp / service_cmds.hpp).
 //
 #include <cstdio>
 #include <cstring>
@@ -10,7 +10,9 @@
 
 #include <yyjson.h>
 
-#include "service_internal.hpp"
+#include "service_state.hpp"
+#include <xi/xi_ws_server.hpp>
+#include <xi/xi_use.hpp>
 
 // ---- Status registry -------------------------------------------------------
 // Sticky last-value status per component: instance name, or "@script" for the
@@ -55,7 +57,7 @@ void status_cb(const char* text) {
 // One Result per trigger: a signed status code + message. See
 // docs/roadmap/run-result.md. Framework system-fail enum lives in a reserved band
 // (<= -990000) the user API (xi::result) refuses to set.
-// XI_SYS_* enum, RunResult struct + kResultSystemBand moved to service_internal.hpp.
+// XI_SYS_* enum, RunResult struct + kResultSystemBand moved to service_state.hpp.
 // g_run_result DEFINED here (thread_local; parallel lanes don't clobber each other).
 thread_local RunResult g_run_result;
 

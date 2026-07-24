@@ -1,6 +1,6 @@
 //
 // service_cmd_project.cpp — project-CRUD command handlers, split from
-// service_main.cpp (behavior-preserving; see service_internal.hpp).
+// service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
 //
 #include <algorithm>
 #include <cstdio>
@@ -14,7 +14,8 @@
 #include <yyjson.h>
 #include <xi/xi_project.hpp>
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include <xi/xi_ws_server.hpp>
 
 // ---- project-CRUD ----------------------------------------------------------
 void cmd_list_params_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {

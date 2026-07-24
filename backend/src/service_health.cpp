@@ -20,7 +20,8 @@
 #include <string>
 #include <vector>
 
-#include "service_internal.hpp"
+#include "service_state.hpp"
+#include <xi/xi_ws_server.hpp>
 #include <xi/xi_health.hpp>
 #include <xi/xi_health_mirror.hpp>
 

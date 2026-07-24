@@ -1,6 +1,6 @@
 //
 // service_cmd_lifecycle.cpp — lifecycle command handlers, split from
-// service_main.cpp (behavior-preserving; see service_internal.hpp).
+// service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
 //
 #include <algorithm>
 #include <cstdio>
@@ -17,7 +17,8 @@
 #include <xi/xi_owner_lock.hpp>
 #include <xi/xi_script_compiler.hpp>
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include <xi/xi_ws_server.hpp>
 
 // ---- lifecycle -------------------------------------------------------------
 void cmd_ping_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {

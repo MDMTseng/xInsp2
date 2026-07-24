@@ -1,6 +1,6 @@
 //
 // service_cmd_observability.cpp — observability command handlers, split from
-// service_main.cpp (behavior-preserving; see service_internal.hpp).
+// service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
 //
 #include <algorithm>
 #include <cstdio>
@@ -14,7 +14,8 @@
 #include <xi/xi_cap_abi.hpp>   // R2: cap_abi_detail::CapMetrics for cmd:metrics "capabilities"
 #include <xi/xi_graph_capture.hpp>
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include <xi/xi_health.hpp>
 
 // Read a file with a hard size cap (review 09 finding 4). Peeks the on-disk size
 // first so an oversized file is refused BEFORE the allocation — the whole point

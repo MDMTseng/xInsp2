@@ -1086,7 +1086,7 @@ target_compile_definitions(xinsp_fe PRIVATE
 # data-layer op, NOT the per-frame pipeline). Links only xi_core (header-only):
 # it drives the REAL TriggerBus/ImagePool/DocRegistry/EmitGate/MetricsRegistry and
 # reproduces GroupLane's queue plumbing as MiniLane (that plumbing is welded into
-# the backend exe behind the private service_internal.hpp). Gated as `perf_hotpath`
+# the backend exe behind the private service_state.hpp). Gated as `perf_hotpath`
 # on a closed-loop best-of MEDIAN latency; the verbose report (no args) also prints
 # p50/p95/p99 + throughput + a burst/overload tail. Baseline requires the
 # xi.perf-baseline/1 fingerprint, so it SKIPs-with-reason until recaptured on the
