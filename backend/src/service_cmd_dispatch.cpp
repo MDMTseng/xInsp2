@@ -1,6 +1,13 @@
 //
 // service_cmd_dispatch.cpp — dispatch-control command handlers, split from
 // service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
+// The WS verbs that drive the run loop + the staged-config plane: cmd:run / start /
+// stop / set_timer_fps and cmd:exchange_instance / prepare_instance / commit_group.
+//
+// Deliberately NOT here: the dispatch-pool MACHINERY these verbs steer — the
+// per-group lanes, pool lifecycle, trigger sink, controlled teardown — lives in the
+// sibling-named service_dispatch.cpp. The guarded_plugin_call / script_grow_retry
+// fault boundaries live in service_guard.hpp.
 //
 #include <algorithm>
 #include <cstdio>
@@ -14,6 +21,7 @@
 #include <xi/xi_pack_abi.hpp>   // v12: cmd:run injects a sealed pack (pack_v1_iface)
 
 #include "service_cmds.hpp"
+#include "service_guard.hpp"          // guarded_plugin_call + script_grow_retry (fault boundaries)
 #include <xi/xi_health.hpp>            // IWYU: xi::health()/CompHealth/SysState (formerly transitive via service_state.hpp)
 #include <xi/xi_plugin_manager.hpp>  // IWYU: PluginManager methods (formerly transitive via service_state.hpp; now pimpl-hidden)
 #include <xi/xi_script_loader.hpp>    // IWYU: LoadedScript members (formerly transitive via service_state.hpp; now pimpl-hidden)

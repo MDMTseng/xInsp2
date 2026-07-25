@@ -15,6 +15,7 @@
 #include <xi/xi_pack_contract.hpp> // U1 fault short-circuit (use_pack_process_cb, doc 15)
 
 #include "service_cmds.hpp"
+#include "service_guard.hpp"          // guarded_plugin_call (the plugin-entry fault boundary)
 #include <xi/xi_health.hpp>            // IWYU: xi::health()/CompHealth/SysState (formerly transitive via service_state.hpp)
 #include <xi/xi_use.hpp>
 
@@ -614,7 +615,7 @@ void trigger_info_cb(CurrentTriggerInfoC* out) {
 // the TriggerEvent's Record-era image map / leader_source / metadata doc, which no
 // longer exist; scripts now read the frame payload through t.pack() off the pack
 // plane. trigger_info_cb (identity/timestamp only) stays. The wiring that installed
-// these (set_trigger_*_callback in service_cmd_lifecycle.cpp, decls in
+// these (set_trigger_*_callback in compile_and_load, service_cmd_script.cpp, decls in
 // service_cmds.hpp) is reconciled with THE CUT.
 
 // ---- Image-pool owner get/set thunks (C1) ----------------------------------

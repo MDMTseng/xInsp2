@@ -19,9 +19,11 @@
 #include <xi/xi_script_loader.hpp>    // IWYU: LoadedScript members/nested types (formerly transitive via service_state.hpp; now pimpl-hidden)
 #include <xi/xi_ws_server.hpp>
 #include <xi/xi_use.hpp>
+#include <xi/xi_seh.hpp>              // this TU owns its own SEH boundary (hand-rolled, not the guarded_* templates); formerly transitive via service_cmds.hpp
 
 using xi::EmitGate;
 using xi::EmitTurn;
+using xi::seh_exception;
 
 // Run one full inspection cycle: reset → inspect → emit.
 // The inspect call is wrapped in SEH so a script crash (null deref,

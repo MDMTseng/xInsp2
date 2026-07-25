@@ -3,6 +3,9 @@
 // controlled teardown + host-tracked instance state. Split from service_main.cpp
 // (behavior-preserving; see service_state.hpp / service_cmds.hpp).
 //
+// Deliberately NOT here: the WS command handlers that DRIVE this pool — cmd:run /
+// start / stop / set_timer_fps — live in the sibling-named service_cmd_dispatch.cpp.
+//
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
