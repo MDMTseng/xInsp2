@@ -15,6 +15,7 @@
 #include <xi/xi_pack_contract.hpp> // U1 fault short-circuit (use_pack_process_cb, doc 15)
 
 #include "service_cmds.hpp"
+#include <xi/xi_health.hpp>            // IWYU: xi::health()/CompHealth/SysState (formerly transitive via service_state.hpp)
 #include <xi/xi_use.hpp>
 
 // ---- Pipeline graph capture (stage 2) ----------------------------------
@@ -22,16 +23,16 @@
 // singleton). OFF by default → the hot path below pays only a relaxed atomic
 // load. The ws handlers (graph_capture / graph_snapshot) drive it.
 
-// Defined after g_eng.plugin_mgr (declared further down); records a per-instance
-// process() crash so a crash loop is visible via get_state.
-// note_instance_crash_ declared in service_cmds.hpp.
+// Records a per-instance process() crash (via g_eng.plugin_mgr()) so a crash loop
+// is visible via get_state. note_instance_crash_ declared in service_cmds.hpp,
+// defined in service_toolchain.cpp.
 
 // Part III G2.1 — stamp the process-global crash culprit (xi::crash::g_culprit)
 // with the instance/plugin the host is about to enter, plus that plugin's
-// folder + dll so the FE can quarantine it on a death. Defined after
-// g_eng.plugin_mgr. Cheap on the dispatch hot path: a per-thread cache means the
+// folder + dll so the FE can quarantine it on a death. Reads
+// g_eng.plugin_mgr(). Cheap on the dispatch hot path: a per-thread cache means the
 // manager lock is taken only when the active plugin on this thread changes.
-// stamp_culprit_ declared in service_cmds.hpp.
+// stamp_culprit_ declared in service_cmds.hpp, defined in service_toolchain.cpp.
 
 // ---- item 14: post-fault quarantine policy (adoption-map item 14) -----------
 // The health-overlay + escalation POLICY lives HERE, at the fault boundary; the
