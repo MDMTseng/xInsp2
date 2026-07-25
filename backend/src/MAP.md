@@ -16,10 +16,11 @@ First sentence of each file's top comment (its responsibility).
 | `fe_main.cpp` | xinsp-fe.exe, the frontend supervisor. |
 | `runner_main.cpp` | xinsp-runner.exe Headless production runner. |
 | `service_cmd_dispatch.cpp` | dispatch-control command handlers, split from service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp). |
-| `service_cmd_lifecycle.cpp` | lifecycle command handlers, split from service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp). |
 | `service_cmd_observability.cpp` | observability command handlers, split from service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp). |
 | `service_cmd_plugin.cpp` | plugin-mgmt command handlers, split from service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp). |
 | `service_cmd_project.cpp` | project-CRUD command handlers, split from service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp). |
+| `service_cmd_project_lc.cpp` | PROJECT + working-copy lifecycle command handlers: open/close/create/save/load_project and commit/discard_working_copy, plus the small session handlers cmd:ping / cmd:version / cmd:shutdown (generic… |
+| `service_cmd_script.cpp` | SCRIPT lifecycle command handler: cmd:compile_and_load (compile-or-load the script .dll, then the run_mu+script_mu hot-swap that makes it the active script) plus the cross-frame state carried across… |
 | `service_dispatch.cpp` | per-group dispatch lanes, pool lifecycle, trigger sink, controlled teardown + host-tracked instance state. |
 | `service_health.cpp` | the core-owned health/state contract's service surface (adoption-map item 10 / triage Bucket E). |
 | `service_inspect.cpp` | the single-frame inspection cycle: COMPUTE half (script invocation + SEH boundary + crash breadcrumb + watchdog) and EMISSION half (metrics + ordered-emit gate + staged flush + result/events), plus… |
@@ -30,6 +31,7 @@ First sentence of each file's top comment (its responsibility).
 | `stb_impl.cpp` | Single translation unit that instantiates stb_image_write + stb_image. |
 | `xi_image_io.cpp` | Out-of-line installer of the backend's internal image-decode function. |
 | `service_cmds.hpp` | PRIVATE command / dispatch layer for the service_*.cpp TUs. |
+| `service_guard.hpp` | the fault-boundary templates shared by every backend TU that enters plugin or script-DLL code: guarded_plugin_call (the ONE plugin-entry SEH/exception boundary with the item-14 quarantine/on-fault… |
 | `service_state.hpp` | PRIVATE shared ENGINE STATE for the split service_*.cpp TUs. |
 | `xi_result_class.hpp` | the ONE home for the run-result reserved band. |
 
@@ -129,14 +131,14 @@ Parsed from `g_cmd_table` in `backend/src/service_main.cpp`.
 | Command | Handler | Defined in |
 | --- | --- | --- |
 | `clear_crash_reports` | `cmd_clear_crash_reports_` | `backend/src/service_cmd_observability.cpp` |
-| `close_project` | `cmd_close_project_` | `backend/src/service_cmd_lifecycle.cpp` |
+| `close_project` | `cmd_close_project_` | `backend/src/service_cmd_project_lc.cpp` |
 | `commit_group` | `cmd_commit_group_` | `backend/src/service_cmd_dispatch.cpp` |
-| `commit_working_copy` | `cmd_commit_working_copy_` | `backend/src/service_cmd_lifecycle.cpp` |
-| `compile_and_load` | `cmd_compile_and_load_` | `backend/src/service_cmd_lifecycle.cpp` |
+| `commit_working_copy` | `cmd_commit_working_copy_` | `backend/src/service_cmd_project_lc.cpp` |
+| `compile_and_load` | `cmd_compile_and_load_` | `backend/src/service_cmd_script.cpp` |
 | `crash_reports` | `cmd_crash_reports_` | `backend/src/service_cmd_observability.cpp` |
 | `create_instance` | `cmd_create_instance_` | `backend/src/service_cmd_project.cpp` |
-| `create_project` | `cmd_create_project_` | `backend/src/service_cmd_lifecycle.cpp` |
-| `discard_working_copy` | `cmd_discard_working_copy_` | `backend/src/service_cmd_lifecycle.cpp` |
+| `create_project` | `cmd_create_project_` | `backend/src/service_cmd_project_lc.cpp` |
+| `discard_working_copy` | `cmd_discard_working_copy_` | `backend/src/service_cmd_project_lc.cpp` |
 | `dispatch_stats` | `cmd_dispatch_stats_` | `backend/src/service_cmd_observability.cpp` |
 | `exchange_instance` | `cmd_exchange_instance_` | `backend/src/service_cmd_dispatch.cpp` |
 | `export_project_plugin` | `cmd_export_project_plugin_` | `backend/src/service_cmd_plugin.cpp` |
@@ -151,11 +153,11 @@ Parsed from `g_cmd_table` in `backend/src/service_main.cpp`.
 | `list_instances` | `cmd_list_instances_` | `backend/src/service_cmd_project.cpp` |
 | `list_params` | `cmd_list_params_` | `backend/src/service_cmd_project.cpp` |
 | `list_plugins` | `cmd_list_plugins_` | `backend/src/service_cmd_plugin.cpp` |
-| `load_project` | `cmd_load_project_` | `backend/src/service_cmd_lifecycle.cpp` |
+| `load_project` | `cmd_load_project_` | `backend/src/service_cmd_project_lc.cpp` |
 | `metrics` | `cmd_metrics_` | `backend/src/service_cmd_observability.cpp` |
-| `open_project` | `cmd_open_project_` | `backend/src/service_cmd_lifecycle.cpp` |
+| `open_project` | `cmd_open_project_` | `backend/src/service_cmd_project_lc.cpp` |
 | `open_project_warnings` | `cmd_open_project_warnings_` | `backend/src/service_cmd_observability.cpp` |
-| `ping` | `cmd_ping_` | `backend/src/service_cmd_lifecycle.cpp` |
+| `ping` | `cmd_ping_` | `backend/src/service_cmd_project_lc.cpp` |
 | `prepare_instance` | `cmd_prepare_instance_` | `backend/src/service_cmd_dispatch.cpp` |
 | `rebuild_plugins` | `cmd_rebuild_plugins_` | `backend/src/service_cmd_plugin.cpp` |
 | `recent_errors` | `cmd_recent_errors_` | `backend/src/service_cmd_observability.cpp` |
@@ -165,19 +167,19 @@ Parsed from `g_cmd_table` in `backend/src/service_main.cpp`.
 | `rescan_plugins` | `cmd_rescan_plugins_` | `backend/src/service_cmd_plugin.cpp` |
 | `run` | `cmd_run_` | `backend/src/service_cmd_dispatch.cpp` |
 | `save_instance_config` | `cmd_save_instance_config_` | `backend/src/service_cmd_project.cpp` |
-| `save_project` | `cmd_save_project_` | `backend/src/service_cmd_lifecycle.cpp` |
+| `save_project` | `cmd_save_project_` | `backend/src/service_cmd_project_lc.cpp` |
 | `set_instance_def` | `cmd_set_instance_def_` | `backend/src/service_cmd_project.cpp` |
 | `set_param` | `cmd_set_param_` | `backend/src/service_cmd_project.cpp` |
 | `set_process_priority` | `cmd_set_process_priority_` | `backend/src/service_cmd_plugin.cpp` |
 | `set_timer_fps` | `cmd_set_timer_fps_` | `backend/src/service_cmd_dispatch.cpp` |
 | `set_toolchain_override` | `cmd_set_toolchain_override_` | `backend/src/service_cmd_plugin.cpp` |
 | `set_watchdog_ms` | `cmd_set_watchdog_ms_` | `backend/src/service_cmd_observability.cpp` |
-| `shutdown` | `cmd_shutdown_` | `backend/src/service_cmd_lifecycle.cpp` |
+| `shutdown` | `cmd_shutdown_` | `backend/src/service_cmd_project_lc.cpp` |
 | `start` | `cmd_start_` | `backend/src/service_cmd_dispatch.cpp` |
 | `status` | `cmd_status_` | `backend/src/service_cmd_observability.cpp` |
 | `stop` | `cmd_stop_` | `backend/src/service_cmd_dispatch.cpp` |
 | `toolchain_health` | `cmd_toolchain_health_` | `backend/src/service_cmd_plugin.cpp` |
-| `version` | `cmd_version_` | `backend/src/service_cmd_lifecycle.cpp` |
+| `version` | `cmd_version_` | `backend/src/service_cmd_project_lc.cpp` |
 
 ## ③ Plugins (toolbox/*/plugin.json)
 
