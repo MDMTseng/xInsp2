@@ -16,6 +16,9 @@
 #endif
 
 #include "service_cmds.hpp"
+#include <xi/xi_health.hpp>            // IWYU: xi::health()/CompHealth/SysState (formerly transitive via service_state.hpp)
+#include <xi/xi_plugin_manager.hpp>  // IWYU: PluginManager methods (formerly transitive via service_state.hpp; now pimpl-hidden)
+#include <xi/xi_script_loader.hpp>    // IWYU: LoadedScript members (formerly transitive via service_state.hpp; now pimpl-hidden)
 
 using xi::EmitGate;
 using xi::EmitTurn;
@@ -355,8 +358,8 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
         g_eng.lanes.clear();
         // F4: capture default_group with this lane set so lane_for_ routes against
         // a name that exists in g_eng.lanes (the synthesized default lane below is "").
-        g_eng.default_group_snapshot = g_eng.plugin_mgr.project().default_group;
-        for (auto& gc : g_eng.plugin_mgr.project().groups) {
+        g_eng.default_group_snapshot = g_eng.plugin_mgr().project().default_group;
+        for (auto& gc : g_eng.plugin_mgr().project().groups) {
             auto lane = std::make_shared<GroupLane>(); lane->cfg = gc; g_eng.lanes.push_back(std::move(lane));
         }
         if (g_eng.lanes.empty()) {
@@ -365,7 +368,7 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
             // path (the legacy single pool is gone). name "" matches an untagged
             // event's empty group via lane_for_(); the timer tick also targets
             // default_group (== "" here) -> this lane.
-            const auto& p = g_eng.plugin_mgr.project();
+            const auto& p = g_eng.plugin_mgr().project();
             xi::ProjectInfo::DispatchGroup def;
             def.name         = "";
             def.max_parallel = p.dispatch_threads < 1 ? 1 : p.dispatch_threads;
@@ -479,7 +482,7 @@ void spawn_group_pool_(xi::ws::Server* srv_ptr, int interval_ms) {
     // trigger-only (the default group isn't loaded with synthetic ticks).
     (void)interval_ms;
     g_eng.timer_thread = std::thread([] {
-        const std::string dg = g_eng.plugin_mgr.project().default_group;
+        const std::string dg = g_eng.plugin_mgr().project().default_group;
         while (g_eng.continuous.load()) {
             int iv = g_eng.timer_interval_ms.load();
             if (iv <= 0) {
@@ -642,7 +645,7 @@ void controlled_shutdown_teardown_() {
     }
     { std::lock_guard<std::mutex> rl(g_eng.run_mu); }     // belt-and-suspenders
     xi::TriggerBus::instance().reset();               // prune the per-source emit-time map (source names go out of scope here)
-    { std::lock_guard<std::mutex> lk(g_eng.script_mu); xi::script::unload_script(g_eng.script); }
+    { std::lock_guard<std::mutex> lk(g_eng.script_mu); xi::script::unload_script(g_eng.script()); }
     // Close the open project (if any) NOW — while the ImagePool singleton is still
     // alive — so plugin instances are destroyed in the correct order (instances first,
     // THEN FreeLibrary) and their image-handle sweep runs against a live pool. The
@@ -655,7 +658,7 @@ void controlled_shutdown_teardown_() {
     // run_mu above are a terminal SUPERSET of quiesce_dispatch_for_lifecycle_
     // op_, with no resume by design). Assert that explicitly instead of
     // constructing a resume-shaped guard inside teardown.
-    g_eng.plugin_mgr.close_project(xi::QuiesceToken::assert_no_dispatch());
+    g_eng.plugin_mgr().close_project(xi::QuiesceToken::assert_no_dispatch());
     g_eng.srv_for_bp = nullptr;                            // last: every emitter is quiesced now
     g_eng.teardown_done.store(true);                       // T2: unblock a waiting console handler
 }
@@ -708,7 +711,7 @@ void install_trigger_sink_(xi::ws::Server* srv) {
     // B1: apply the project's one-shot in-flight ceiling. Installed on every
     // compile_and_load, so a project's parallelism.max_inflight takes effect
     // WITHOUT needing cmd:start (one-shot dispatch works pre-start). <=0 → default.
-    g_eng.inflight.set_cap(g_eng.plugin_mgr.project().max_inflight);
+    g_eng.inflight.set_cap(g_eng.plugin_mgr().project().max_inflight);
     xi::TriggerBus::instance().set_sink([srv](xi::TriggerEvent ev) {
         if (g_eng.continuous.load()) {
             // Route by the emitting source instance's "group" (default_group if
@@ -717,7 +720,7 @@ void install_trigger_sink_(xi::ws::Server* srv) {
             // lane (group "") — see spawn_group_pool_. instance_group() does the
             // lookup UNDER PluginManager's lock — this sink runs on a source's emit
             // thread, concurrent with create/remove/rename_instance.
-            ev.group = g_eng.plugin_mgr.instance_group(ev.leader_source);
+            ev.group = g_eng.plugin_mgr().instance_group(ev.leader_source);
             (void)enqueue_to_lane_(std::move(ev));
         } else {
             dispatch_one_shot_(srv, std::move(ev));
@@ -822,7 +825,7 @@ const char* inst_state_str(InstState s) {
 
 void set_inst_state(const std::string& name, InstState s,
                            const std::string& err) {
-    g_eng.plugin_mgr.set_instance_state(name, s, err);
+    g_eng.plugin_mgr().set_instance_state(name, s, err);
     // Health contract: re-activating an instance clears any runtime-fault overlay
     // (an operator re-committing a crash-quarantined instance recovers it). The
     // base active/faulted health is DERIVED from InstState at get_health time, so
@@ -842,5 +845,5 @@ void set_inst_state(const std::string& name, InstState s,
     }
 }
 void clear_inst_state() {
-    g_eng.plugin_mgr.clear_instance_states();
+    g_eng.plugin_mgr().clear_instance_states();
 }

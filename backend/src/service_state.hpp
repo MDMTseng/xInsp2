@@ -6,12 +6,20 @@
 // the shared thread_local run/trigger globals, the shared structs / enums /
 // constants, and the low-level response / status / result / crash-breadcrumb
 // helpers. It pulls ONLY the engine headers the Engine + GroupLane definitions
-// need BY VALUE (script loader, inflight runs, plugin manager, trigger bus,
-// emit gate, quiesce token) plus the std-leaf crash-dump header.
+// need BY VALUE (inflight runs, trigger bus, emit gate, quiesce token) plus the
+// std-leaf crash-dump header.
 //
-// It deliberately does NOT pull the heavier / narrower engine surfaces —
-// xi_ws_server.hpp (Server is used only by reference/pointer here, so a forward
-// declaration suffices), xi_health.hpp, xi_use.hpp, and xi_seh.hpp. TUs that
+// The two heaviest engine surfaces the Engine used to hold by value — the
+// PluginManager and the LoadedScript — now live behind an opaque Engine::EngineImpl
+// (pimpl), so this header only FORWARD-DECLARES them and their definitions
+// (xi_plugin_manager.hpp / xi_script_loader.hpp) stay out of the shared foundation.
+// The impl + Engine ctor/dtor + the plugin_mgr()/script() accessors are defined in
+// service_main.cpp (where g_eng is defined). TUs that actually call PluginManager /
+// LoadedScript members include those two headers directly.
+//
+// It likewise deliberately does NOT pull the other heavier / narrower engine
+// surfaces — xi_ws_server.hpp (Server is used only by reference/pointer here, so a
+// forward declaration suffices), xi_health.hpp, xi_use.hpp, and xi_seh.hpp. TUs that
 // actually call those include them directly; command-handler / dispatch-pool /
 // plugin-fault machinery lives in the sibling service_cmds.hpp (which includes
 // this header). See that file for the command layer.
@@ -27,6 +35,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -38,9 +47,13 @@
 #include <xi/xi_image.hpp>
 #include <xi/xi_protocol.hpp>
 #include <xi/xi_project.hpp>
-#include <xi/xi_plugin_manager.hpp>
+// xi_project_model.hpp: the data model (ProjectInfo/InstanceInfo/InstState/…).
+// GroupLane holds `xi::ProjectInfo::DispatchGroup cfg` BY VALUE and the host-tracked
+// instance-state helpers below take `xi::InstState`, so this header uses the model
+// directly — it used to arrive transitively via xi_plugin_manager.hpp, which is now
+// pimpl-hidden, so include the model header directly (it is a light data-only leaf).
+#include <xi/xi_project_model.hpp>
 #include <xi/xi_quiesce_token.hpp>
-#include <xi/xi_script_loader.hpp>
 #include <xi/xi_inflight_runs.hpp>
 #include <xi/xi_trigger_bus.hpp>
 #include <xi/xi_emit_gate.hpp>
@@ -65,6 +78,14 @@ namespace xp = xi::proto;
 // shared foundation. TUs that call Server methods include <xi/xi_ws_server.hpp>.
 namespace xi { namespace ws { class Server; } }
 
+// PluginManager + LoadedScript are held inside the opaque Engine::EngineImpl (pimpl),
+// so this header only forward-declares them — Engine exposes them via the
+// plugin_mgr()/script() accessors below. class/struct keywords match the defining
+// headers (xi_plugin_manager.hpp: `class xi::PluginManager`;
+// xi_script_loader.hpp: `struct xi::script::LoadedScript`).
+namespace xi { class PluginManager; }
+namespace xi { namespace script { struct LoadedScript; } }
+
 // ---- Engine: the host's process-wide mutable state -------------------------
 static constexpr int WD_SLOTS = 64;   // max concurrent in-flight inspects tracked (Engine::wd_deadlines size)
 
@@ -87,8 +108,25 @@ struct RecentError {
 struct GroupLane;
 
 struct Engine {
+    // pimpl: opaque holder for the two heaviest by-value members — the
+    // xi::PluginManager and the xi::script::LoadedScript — reached via the
+    // plugin_mgr()/script() accessors. Declared FIRST so it destructs LAST
+    // (conservative: the plugin manager / script outlive every other Engine
+    // member on the never-taken static-destruction fallback path — teardown is
+    // otherwise fully explicit via controlled_shutdown_teardown_). Defined,
+    // together with Engine()/~Engine() and the accessors, in service_main.cpp.
+    struct EngineImpl;
+    std::unique_ptr<EngineImpl> impl_;
+
+    Engine();
+    ~Engine();
+
+    // Non-const refs — callers assign through them (g_eng.script() = std::move(next))
+    // and pass by ref to migrate_kv / unload_script / PluginManager methods.
+    xi::PluginManager&        plugin_mgr();
+    xi::script::LoadedScript& script();
+
     std::atomic<int64_t> run_id{0};
-    xi::script::LoadedScript script;
     std::mutex script_mu;
     std::atomic<int64_t> script_generation{0};
     // U2 (docs/new_gen/16): the kv channel — canonical-mp BYTES (may contain
@@ -124,7 +162,6 @@ struct Engine {
     std::string project_folder;
     std::string include_dir_default;
     DLL_DIRECTORY_COOKIE proj_dll_dir = nullptr;
-    xi::PluginManager plugin_mgr;
     std::atomic<bool> should_exit{false};
     std::atomic<bool> teardown_done{false};
     std::mutex recent_errors_mu;

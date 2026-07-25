@@ -15,6 +15,9 @@
 #include <xi/xi_project.hpp>
 
 #include "service_cmds.hpp"
+#include <xi/xi_health.hpp>            // IWYU: xi::health()/CompHealth/SysState (formerly transitive via service_state.hpp)
+#include <xi/xi_plugin_manager.hpp>  // IWYU: PluginManager methods (formerly transitive via service_state.hpp; now pimpl-hidden)
+#include <xi/xi_script_loader.hpp>    // IWYU: LoadedScript members (formerly transitive via service_state.hpp; now pimpl-hidden)
 #include <xi/xi_ws_server.hpp>
 
 // ---- project-CRUD ----------------------------------------------------------
@@ -24,11 +27,11 @@ void cmd_list_params_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pars
         std::string params_json;
         {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
-            if (g_eng.script.ok() && g_eng.script.list_params) {
+            if (g_eng.script().ok() && g_eng.script().list_params) {
                 std::vector<char> buf(64 * 1024);
                 // list_params has no -1 error return — every negative is -needed.
                 int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
-                    [&](char* b, int len) { return g_eng.script.list_params(b, len); });
+                    [&](char* b, int len) { return g_eng.script().list_params(b, len); });
                 if (n > 0) params_json.assign(buf.data(), (size_t)n);
             }
         }
@@ -66,9 +69,9 @@ void cmd_set_param_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed
         int rc = 0; bool called = false;
         {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
-            if (g_eng.script.ok() && g_eng.script.set_param) {
+            if (g_eng.script().ok() && g_eng.script().set_param) {
                 called = true;
-                rc = g_eng.script.set_param(pname->c_str(), val.c_str());
+                rc = g_eng.script().set_param(pname->c_str(), val.c_str());
                 // Cache an accepted value so compile_and_load replays it into the next
                 // DLL load (else the new DLL's file-scope default silently overwrites it).
                 if (rc == 0) g_eng.param_cache[*pname] = val;
@@ -84,24 +87,24 @@ void cmd_list_instances_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
         std::string inst_json, params_json;
         {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
-            if (g_eng.script.ok()) {
+            if (g_eng.script().ok()) {
                 std::vector<char> buf(64 * 1024);
                 // list_instances / list_params have no -1 error return — every
                 // negative is -needed (grow + retry).
-                if (g_eng.script.list_instances) {
+                if (g_eng.script().list_instances) {
                     int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
-                        [&](char* b, int len) { return g_eng.script.list_instances(b, len); });
+                        [&](char* b, int len) { return g_eng.script().list_instances(b, len); });
                     if (n > 0) inst_json.assign(buf.data(), (size_t)n);
                 }
-                if (g_eng.script.list_params) {
+                if (g_eng.script().list_params) {
                     int n = script_grow_retry(buf, /*minus_one_is_terminal=*/false,
-                        [&](char* b, int len) { return g_eng.script.list_params(b, len); });
+                        [&](char* b, int len) { return g_eng.script().list_params(b, len); });
                     if (n > 0) params_json.assign(buf.data(), (size_t)n);
                 }
             }
         }
         // Also include backend-managed instances (from PluginManager)
-        auto& proj = g_eng.plugin_mgr.project();
+        auto& proj = g_eng.plugin_mgr().project();
         std::string backend_inst = "[";
         int bi = 0;
         for (auto& [k, v] : proj.instances) {
@@ -196,9 +199,9 @@ void cmd_set_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             }
         } else {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
-            if (g_eng.script.ok() && g_eng.script.set_instance_def) {
+            if (g_eng.script().ok() && g_eng.script().set_instance_def) {
                 try {
-                    int rc = g_eng.script.set_instance_def(iname->c_str(), def_str.c_str());
+                    int rc = g_eng.script().set_instance_def(iname->c_str(), def_str.c_str());
                     // Cache an accepted def so compile_and_load replays it into the next
                     // DLL load (else the new DLL's file-scope ctor silently reverts it).
                     if (rc == 0) g_eng.instance_def_cache[*iname] = def_str;
@@ -263,14 +266,14 @@ void cmd_get_instance_def_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             }
         } else {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
-            if (g_eng.script.ok() && g_eng.script.get_instance_def) {
+            if (g_eng.script().ok() && g_eng.script().get_instance_def) {
                 try {
                     std::vector<char> buf(256 * 1024);
                     // -1 = instance not found (terminal); other negatives = -needed
                     // (this site always had the correct fork — now the helper's).
                     int n = script_grow_retry(buf, /*minus_one_is_terminal=*/true,
                         [&](char* b, int len) {
-                            return g_eng.script.get_instance_def(iname->c_str(), b, len);
+                            return g_eng.script().get_instance_def(iname->c_str(), b, len);
                         });
                     if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "instance not found: " + *iname);
@@ -296,7 +299,7 @@ void cmd_create_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // Ensure plugin is loaded — surface WHY if it can't be (missing DLL,
         // missing factory symbol, ABI mismatch, etc.) instead of a generic failure.
         std::string load_err;
-        if (!g_eng.plugin_mgr.load_plugin(*plugin, &load_err)) {
+        if (!g_eng.plugin_mgr().load_plugin(*plugin, &load_err)) {
             send_rsp_err(srv, id, load_err.empty() ? "failed to load plugin" : load_err);
             return;
         }
@@ -312,11 +315,11 @@ void cmd_create_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // the culprit so a factory fault is attributed to this plugin.
         stamp_culprit_(iname->c_str(), *plugin);
         std::string create_err;
-        auto* ii = g_eng.plugin_mgr.create_instance(_create_guard.token(), *iname, *plugin, &create_err);
+        auto* ii = g_eng.plugin_mgr().create_instance(_create_guard.token(), *iname, *plugin, &create_err);
         if (ii) {
             // create_instance records the Created state internally (atomic with the
             // instance add) — no separate set_inst_state needed.
-            send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
+            send_rsp_ok(srv, id, g_eng.plugin_mgr().to_json());
         } else {
             send_rsp_err(srv, id, create_err.empty() ? "failed to create instance" : create_err);
         }
@@ -338,13 +341,13 @@ void cmd_remove_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // remaining instances comes back on scope exit. Closes the ledger
         // mis-attribution UAF window and narrows the cap-plane transient.
         auto _rm_guard = quiesce_dispatch_for_lifecycle_op_("remove_instance", &srv);
-        if (g_eng.plugin_mgr.remove_instance(_rm_guard.token(), *iname, delete_folder)) {
+        if (g_eng.plugin_mgr().remove_instance(_rm_guard.token(), *iname, delete_folder)) {
             // remove_instance drops the lifecycle state internally (atomic with the
             // unregister) — no separate drop_inst_state needed. Health contract:
             // drop any runtime-fault overlay for the removed instance so it no
             // longer holds the top-level state `degraded`.
             xi::health().clear_instance_degraded(*iname);
-            send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
+            send_rsp_ok(srv, id, g_eng.plugin_mgr().to_json());
         } else {
             send_rsp_err(srv, id, "instance not found: " + *iname);
         }
@@ -363,7 +366,7 @@ void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
         // Quiesce dispatch first, exactly like every sibling lifecycle op.
         auto _rn_guard = quiesce_dispatch_for_lifecycle_op_("rename_instance", &srv);
         using RR = xi::PluginManager::RenameResult;
-        RR rr = g_eng.plugin_mgr.rename_instance(_rn_guard.token(), *old_name, *new_name);
+        RR rr = g_eng.plugin_mgr().rename_instance(_rn_guard.token(), *old_name, *new_name);
         if (rr == RR::Rejected) {
             send_rsp_err(srv, id, "rename failed — name in use or instance missing");
         } else {
@@ -378,7 +381,7 @@ void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
                 send_rsp_err(srv, id, "renamed in memory but could not persist to disk "
                                       "(disk full / read-only?) — may revert on restart");
             else
-                send_rsp_ok(srv, id, g_eng.plugin_mgr.to_json());
+                send_rsp_ok(srv, id, g_eng.plugin_mgr().to_json());
         }
 }
 
@@ -388,7 +391,7 @@ void cmd_rename_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
 void cmd_save_instance_config_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        if (g_eng.plugin_mgr.save_instance(*iname)) {
+        if (g_eng.plugin_mgr().save_instance(*iname)) {
             send_rsp_ok(srv, id);
         } else {
             send_rsp_err(srv, id, "instance not found: " + *iname);

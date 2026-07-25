@@ -15,6 +15,8 @@
 #include <xi/xi_graph_capture.hpp>
 
 #include "service_cmds.hpp"
+#include <xi/xi_plugin_manager.hpp>  // IWYU: PluginManager methods (formerly transitive via service_state.hpp; now pimpl-hidden)
+#include <xi/xi_script_loader.hpp>    // IWYU: LoadedScript members (formerly transitive via service_state.hpp; now pimpl-hidden)
 #include <xi/xi_health.hpp>
 
 // Read a file with a hard size cap (review 09 finding 4). Peeks the on-disk size
@@ -162,7 +164,7 @@ void cmd_get_state_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
         InstState st; std::string err; long long crashes = 0;
-        bool known = g_eng.plugin_mgr.get_instance_state(*iname, st, err, &crashes);
+        bool known = g_eng.plugin_mgr().get_instance_state(*iname, st, err, &crashes);
         if (!known) {
             // No tracked transition — report "created" if the instance actually
             // exists, else a clean not-found.
@@ -240,15 +242,15 @@ void cmd_image_pool_stats_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
         labels[0] = "<host>";
         {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
-            if (g_eng.script.owner_id != 0) {
-                labels[g_eng.script.owner_id] =
-                    "script:" + std::filesystem::path(g_eng.script.path).filename().string();
+            if (g_eng.script().owner_id != 0) {
+                labels[g_eng.script().owner_id] =
+                    "script:" + std::filesystem::path(g_eng.script().path).filename().string();
             }
         }
         // Locked snapshot (shared_ptr-owning) instead of iterating project().instances
         // unlocked — an unlocked read races create/remove/rename_instance's map
         // mutations. The snapshot's shared_ptr keeps each instance alive for the cast.
-        for (auto& snap : g_eng.plugin_mgr.snapshot_instances()) {
+        for (auto& snap : g_eng.plugin_mgr().snapshot_instances()) {
             if (auto* a = dynamic_cast<xi::CAbiInstanceAdapter*>(snap.instance.get())) {
                 labels[a->owner_id()] = "instance:" + snap.name + " (" + snap.plugin_name + ")";
             }
@@ -326,10 +328,10 @@ void cmd_dispatch_stats_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
             dropped += lp->dropped.load();
         }
         data  = "{\"queue_depth_now\":" + std::to_string(qsz);
-        data += ",\"queue_depth_cap\":" + std::to_string(g_eng.plugin_mgr.project().queue_depth);
+        data += ",\"queue_depth_cap\":" + std::to_string(g_eng.plugin_mgr().project().queue_depth);
         data += ",\"queue_depth_high_watermark\":" + std::to_string(hw);
-        data += ",\"overflow\":\"" + g_eng.plugin_mgr.project().overflow + "\"";
-        data += ",\"dispatch_threads\":" + std::to_string(g_eng.plugin_mgr.project().dispatch_threads);
+        data += ",\"overflow\":\"" + g_eng.plugin_mgr().project().overflow + "\"";
+        data += ",\"dispatch_threads\":" + std::to_string(g_eng.plugin_mgr().project().dispatch_threads);
         data += ",\"dropped\":" + std::to_string(dropped);
         // P1-8: process-uptime cumulatives (NOT reset by cmd:start).
         data += ",\"dropped_lifetime\":" + std::to_string(g_eng.dropped_lifetime.load());
@@ -420,7 +422,7 @@ void cmd_open_project_warnings_(xi::ws::Server& srv, int64_t id, const xp::Parse
         // individual instances fail (skip-bad-instance), so this is
         // how a UI / agent surfaces those problems instead of having
         // to scrape backend stderr.
-        auto warnings = g_eng.plugin_mgr.open_warnings();
+        auto warnings = g_eng.plugin_mgr().open_warnings();
         std::string data = "{\"warnings\":[";
         bool first = true;
         for (auto& w : warnings) {

@@ -81,6 +81,23 @@ namespace xp = xi::proto;
 // PRIVATE header service_state.hpp / service_cmds.hpp (behavior-preserving split). The single
 // DEFINITION of g_eng lives HERE (this TU); every other service_*.cpp sees it via
 // `extern Engine g_eng;` in the header.
+//
+// pimpl seam: the Engine's two heaviest by-value members — the PluginManager and
+// the LoadedScript — live in this opaque impl, so service_state.hpp forward-declares
+// them instead of pulling xi_plugin_manager.hpp / xi_script_loader.hpp into every
+// service_*.cpp TU. The impl, the out-of-line Engine ctor/dtor, and the
+// plugin_mgr()/script() accessors are ALL defined HERE (this TU sees both full
+// definitions via the includes above), which is what lets the unique_ptr<EngineImpl>
+// member's implicit teardown compile against the complete type.
+struct Engine::EngineImpl {
+    xi::PluginManager        plugin_mgr;
+    xi::script::LoadedScript script;
+};
+Engine::Engine() : impl_(std::make_unique<EngineImpl>()) {}
+Engine::~Engine() = default;
+xi::PluginManager&        Engine::plugin_mgr() { return impl_->plugin_mgr; }
+xi::script::LoadedScript& Engine::script()     { return impl_->script; }
+
 Engine g_eng;
 
 
@@ -595,17 +612,17 @@ int main(int argc, char** argv) {
     }
     // G1.3 — certify each discovered plugin in a throwaway child (this same
     // backend exe, --certify-plugin mode) before arming it during the scan. A DLL
-    // that crashes certification is skipped + surfaced (g_eng.plugin_mgr.certify_
+    // that crashes certification is skipped + surfaced (g_eng.plugin_mgr().certify_
     // warnings()), so discovery can never load a known-bad DLL into the backend.
     {
         char exe[MAX_PATH];
         DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-        if (n) g_eng.plugin_mgr.set_certify_exe(std::string(exe, n));
+        if (n) g_eng.plugin_mgr().set_certify_exe(std::string(exe, n));
     }
     if (!g_eng.plugins_dir.empty()) {
         // QuiesceToken: boot-time scan — the serve loop / dispatch pool does not
         // exist yet, so there is nothing to quiesce (see xi_quiesce_token.hpp).
-        int n = g_eng.plugin_mgr.scan_plugins(xi::QuiesceToken::assert_no_dispatch(),
+        int n = g_eng.plugin_mgr().scan_plugins(xi::QuiesceToken::assert_no_dispatch(),
                                               g_eng.plugins_dir);
         std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, g_eng.plugins_dir.c_str());
     }
@@ -617,7 +634,7 @@ int main(int argc, char** argv) {
             continue;
         }
         // QuiesceToken: still boot — dispatch pool not started yet.
-        int n = g_eng.plugin_mgr.scan_plugins(xi::QuiesceToken::assert_no_dispatch(), dir);
+        int n = g_eng.plugin_mgr().scan_plugins(xi::QuiesceToken::assert_no_dispatch(), dir);
         std::fprintf(stderr, "[xinsp2] scanned %d plugins from %s\n", n, dir.c_str());
     }
 
@@ -625,7 +642,7 @@ int main(int argc, char** argv) {
     // FE-quarantined) into the recent-errors ring so cmd:recent_errors + the
     // extension toast tell the operator WHICH plugin is disabled and why (not just
     // a silently-missing plugin). The scan already logged each to stderr.
-    for (auto& w : g_eng.plugin_mgr.certify_warnings())
+    for (auto& w : g_eng.plugin_mgr().certify_warnings())
         push_recent_error("plugin", w.reason);
 
     std::fprintf(stderr, "[xinsp2] include_dir=%s\n", g_eng.include_dir.c_str());
@@ -650,7 +667,7 @@ int main(int argc, char** argv) {
         const char* env = std::getenv("XINSP2_AUTOLOAD_LIB");
         bool autoload_lib = xi::cli::has_flag(argc, argv, "--autoload-lib") ||
                             (env && *env && std::strcmp(env, "0") != 0);
-        g_eng.plugin_mgr.set_autoload_enabled(autoload_lib);
+        g_eng.plugin_mgr().set_autoload_enabled(autoload_lib);
         // Deployment lib-plugin config (per machine): --lib-config <path> / env
         // XINSP2_LIB_CONFIG. A JSON OBJECT mapping plugin name -> its def object,
         // applied to each autoloaded machine provider via set_def BEFORE it serves.
@@ -687,13 +704,13 @@ int main(int argc, char** argv) {
                     if (!lm.empty()) {
                         std::fprintf(stderr, "[xinsp2] --lib-config: %zu entry(s) from %s\n",
                                      lm.size(), cfg_path.c_str());
-                        g_eng.plugin_mgr.set_lib_config(std::move(lm));
+                        g_eng.plugin_mgr().set_lib_config(std::move(lm));
                     }
                 }
             }
         }
         if (autoload_lib) {
-            int nlib = g_eng.plugin_mgr.autoload_machine_providers();
+            int nlib = g_eng.plugin_mgr().autoload_machine_providers();
             std::fprintf(stderr, "[xinsp2] lib autoload ENABLED — %d machine "
                                  "provider(s) up\n", nlib);
         }
@@ -717,7 +734,7 @@ int main(int argc, char** argv) {
     // .dll too (compile_and_load loads a .dll directly).
     env.aot = xi::cli::has_flag(argc, argv, "--aot");
     if (env.aot) std::fprintf(stderr, "[xinsp2] AOT mode: loading prebuilt plugin/script DLLs (no compiler)\n");
-    g_eng.plugin_mgr.set_compile_env(env);
+    g_eng.plugin_mgr().set_compile_env(env);
 
     xi::ws::Server srv;
     srv.on_open  = [&] {
@@ -1007,7 +1024,7 @@ int main(int argc, char** argv) {
                 if (sp.is_relative()) sp = std::filesystem::path(project) / sp;
                 script = sp.string();
             } else {
-                script = g_eng.plugin_mgr.project().script_path;
+                script = g_eng.plugin_mgr().project().script_path;
             }
             if (script.empty() || !std::filesystem::exists(script)) {
                 std::fprintf(stderr,
@@ -1025,7 +1042,7 @@ int main(int argc, char** argv) {
                 // port up (operator can attach + fix) but the line CANNOT inspect,
                 // so mark degraded and withhold "ready" — the FE then treats a
                 // non-inspecting line as unhealthy instead of silently "healthy".
-                if (!g_eng.script.ok()) {
+                if (!g_eng.script().ok()) {
                     degraded = true;
                     std::fprintf(stderr,
                         "[xinsp2] autostart: degraded - script failed to compile/load; "
