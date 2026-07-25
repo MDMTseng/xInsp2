@@ -1306,6 +1306,21 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_retired_terms.py)
     set_tests_properties(retired_terms PROPERTIES LABELS "docs")
+    # backend_map_check: the freeze guard for backend/src/MAP.md, the coding-agent
+    # navigation index. gen_backend_map.py DISCOVERS its inputs from source — the
+    # g_cmd_table dispatch table, the cmd_*_ handler definitions across the
+    # service_cmd_*.cpp TUs, each file's top-comment responsibility, and the
+    # toolbox/**/plugin.json flags/exchange/capabilities — and regenerates MAP.md;
+    # `--check` fails if the committed file is stale. Because it discovers rather
+    # than assumes, a TU split/rename (e.g. the service_cmd_lifecycle.cpp split)
+    # just changes the generated rows, and this gate demands the map be
+    # regenerated in the same commit. Same pure-stdlib Python, same "docs" label as
+    # the doc_coverage / retired_terms gates; WORKING_DIRECTORY is the repo root.
+    add_test(NAME backend_map_check
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/gen_backend_map.py --check
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    set_tests_properties(backend_map_check PROPERTIES LABELS "docs")
     # doc_debt: the manual companion to the two derived guards — docs/DOC_DEBT.md
     # is the ledger where a code change that invalidates a doc page records one
     # `- [ ]` line instead of fixing it in-branch; this fails while any unchecked
