@@ -20,9 +20,10 @@
 // It likewise deliberately does NOT pull the other heavier / narrower engine
 // surfaces — xi_ws_server.hpp (Server is used only by reference/pointer here, so a
 // forward declaration suffices), xi_health.hpp, xi_use.hpp, and xi_seh.hpp. TUs that
-// actually call those include them directly; command-handler / dispatch-pool /
-// plugin-fault machinery lives in the sibling service_cmds.hpp (which includes
-// this header). See that file for the command layer.
+// actually call those include them directly; the command-handler / dispatch-pool
+// layer lives in the sibling service_cmds.hpp (which includes this header), and the
+// plugin-fault-boundary templates (guarded_plugin_call / guarded_script_call) live
+// in service_guard.hpp on top of it. See those files for the command layer.
 //
 // NOT a public API. Do not include from outside backend/src/service_*.cpp.
 //

@@ -1,6 +1,12 @@
 //
 // service_cmd_plugin.cpp — plugin-mgmt command handlers, split from
 // service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
+// The plugin + toolchain WS verbs: cmd:list_plugins / rescan_plugins /
+// rebuild_plugins, export_project_plugin / recompile_project_plugin, get_plugin_ui,
+// set_process_priority, and cmd:toolchain_health / set_toolchain_override.
+//
+// Deliberately NOT here: the toolchain RESOLUTION these toolchain_health /
+// set_toolchain_override handlers report on lives in service_toolchain.cpp.
 //
 #include <algorithm>
 #include <cstdio>

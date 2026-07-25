@@ -277,7 +277,8 @@ void send_hello(xi::ws::Server& srv) {
 // -- bodies reference srv / id / parsed->args_json exactly as the arms did.
 // ============================================================================
 
-// ---- lifecycle handlers extracted to service_cmd_lifecycle.cpp -------------
+// ---- script lifecycle (compile_and_load + hot-swap) extracted to service_cmd_script.cpp ----
+// ---- project + working-copy lifecycle + ping/version/shutdown extracted to service_cmd_project_lc.cpp ----
 // ---- dispatch-control handlers extracted to service_cmd_dispatch.cpp --------
 // ---- observability handlers extracted to service_cmd_observability.cpp ------
 // ---- project-CRUD handlers extracted to service_cmd_project.cpp ------------

@@ -999,7 +999,8 @@ add_executable(xinsp_backend
     src/service_toolchain.cpp
     src/service_result.cpp
     src/service_dispatch.cpp
-    src/service_cmd_lifecycle.cpp
+    src/service_cmd_script.cpp
+    src/service_cmd_project_lc.cpp
     src/service_cmd_dispatch.cpp
     src/service_cmd_plugin.cpp
     src/service_cmd_project.cpp

@@ -1,6 +1,16 @@
 //
 // service_cmd_project.cpp — project-CRUD command handlers, split from
 // service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
+// The PARAM + INSTANCE surface WITHIN an already-open project: cmd:set_param /
+// list_params, cmd:set_instance_def / get_instance_def / list_instances,
+// cmd:create_instance / remove_instance / rename_instance, save_instance_config,
+// and get_dashboard.
+//
+// Deliberately NOT here: the project-FILE lifecycle — open/close/create/save/
+// load_project and commit/discard_working_copy — lives in service_cmd_project_lc.cpp.
+// The swap-time replay of set_param / set_instance_def across a hot recompile lives
+// with compile_and_load in service_cmd_script.cpp. The guarded_plugin_call /
+// script_grow_retry fault boundaries live in service_guard.hpp.
 //
 #include <algorithm>
 #include <cstdio>
@@ -15,6 +25,7 @@
 #include <xi/xi_project.hpp>
 
 #include "service_cmds.hpp"
+#include "service_guard.hpp"          // guarded_plugin_call + script_grow_retry + seh_exception (fault boundaries)
 #include <xi/xi_health.hpp>            // IWYU: xi::health()/CompHealth/SysState (formerly transitive via service_state.hpp)
 #include <xi/xi_plugin_manager.hpp>  // IWYU: PluginManager methods (formerly transitive via service_state.hpp; now pimpl-hidden)
 #include <xi/xi_script_loader.hpp>    // IWYU: LoadedScript members (formerly transitive via service_state.hpp; now pimpl-hidden)

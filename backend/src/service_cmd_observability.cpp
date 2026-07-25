@@ -1,6 +1,12 @@
 //
 // service_cmd_observability.cpp — observability command handlers, split from
 // service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
+// The read-only introspection verbs: cmd:get_state / status / metrics /
+// image_pool_stats / dispatch_stats / recent_errors / crash_reports (+ clear),
+// graph_capture / graph_snapshot, set_watchdog_ms and open_project_warnings.
+//
+// Deliberately NOT here: the health/state contract reply (cmd:get_health) lives in
+// service_health.cpp.
 //
 #include <algorithm>
 #include <cstdio>
