@@ -62,24 +62,8 @@ async function run() {
     assert.ok(det.inputs >= 1 && det.outputs >= 1, 'det carries I/O counts from its manifest');
     console.log(`  ✓ extractPipelineNodes: det (${det.plugin}) ${det.inputs} in · ${det.outputs} out`);
 
-    // #1 — VAR chips (the script glue) are interleaved with plugin nodes.
-    const items = api.extractPipelineItems();
-    const varItems = items.filter(i => i.kind === 'var');
-    assert.ok(items.some(i => i.kind === 'node' && i.name === 'det'), 'det node in items');
-    assert.ok(varItems.length >= 3, `script VAR chips surface (got ${varItems.length})`);
-    console.log(`  ✓ pipeline items interleave ${varItems.length} VAR chips (e.g. ${varItems.slice(0,3).map(v=>v.name).join(', ')})`);
-
-    // VAR chip → jump to code: revealVarSite puts the cursor on the VAR's line.
-    // Reads the script from disk — no compile needed, so it's deterministic.
-    const aVar = varItems[0].name;
-    await api.revealVarSite(aVar);
-    await sleep(400);
-    const ed = vscode.window.activeTextEditor;
-    assert.ok(ed, 'an editor is active after revealVarSite');
-    const line = ed.document.lineAt(ed.selection.active.line).text;
-    assert.ok(/\bVAR(?:_RAW)?\s*\(/.test(line) && line.includes(aVar),
-        `cursor landed on the VAR(${aVar}) line, got: ${line.trim()}`);
-    console.log(`  ✓ VAR chip → code: cursor on "${line.trim()}"`);
+    // (The VAR-chip assertions that used to sit here died with the VAR()/EMIT()
+    // macros — the framework hard-deleted them, so chips can never surface.)
 
     // #2 — capture with NO explicit frame: auto-picks a sample from <project>/frames.
     // Compile-dependent — tolerate a transient script-DLL lock (another backend

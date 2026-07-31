@@ -12,15 +12,9 @@
 # The checker flags a stale rule (one that matched nothing this run), so prune
 # this file when the underlying legacy content is finally removed.
 
-# --- VS Code extension: the VAR-chip pipeline-graph parser ------------------
-# extension.ts contains a graph view that PARSES `VAR(...)`/`EMIT(...)` tokens out
-# of the USER's script to draw chips. That is runtime logic, not a blessed
-# example — the generated-project TEMPLATE in the same file is already clean.
-# Silence ONLY the two graph-parser comment lines (anchored to phrases unique to
-# that feature) — NOT any bare "VAR" line, so an injected VAR(...) in the
-# generated inspect.cpp TEMPLATE further down the same file is still caught.
-vscode-extension/src/extension.ts::is declared and: extension VAR-chip graph-parser comment — runtime logic that reads user VAR()/EMIT() tokens, not an authored example
-vscode-extension/src/extension.ts::the script surfaces between them: extension VAR-chip graph-parser comment — runtime logic describing how user VAR()/EMIT() tokens become chips, not an authored example
+# (The extension's VAR-chip graph parser — the one runtime consumer of the
+# retired VAR/EMIT tokens — was deleted 2026-07-31, so its two anchored rules
+# are gone; any reintroduced token form in extension.ts is now caught bare.)
 
 # --- write-a-script.md: the compatibility appendix + legacy-signature section
 # This guide intentionally teaches the CURRENT API first, then documents the
