@@ -146,6 +146,25 @@ static void test_parse_edge_cases() {
     }
 }
 
+// Bool flags must parse regardless of spacing: Python's json.dumps emits
+// `"key": true` WITH a space, and the old substring-match idiom silently read
+// false for it (the delete_folder bug — the folder was quietly kept).
+static void test_get_bool_field() {
+    SECTION("get_bool_field spacing + defaults");
+    CHECK(get_bool_field(R"({"delete_folder":true})",  "delete_folder") == true);
+    CHECK(get_bool_field(R"({"delete_folder": true})", "delete_folder") == true);  // json.dumps spacing
+    CHECK(get_bool_field(R"({ "delete_folder" :  true })", "delete_folder") == true);
+    CHECK(get_bool_field(R"({"delete_folder":false})", "delete_folder") == false);
+    CHECK(get_bool_field(R"({"delete_folder": false})", "delete_folder", true) == false);
+    // Absent / non-bool → default.
+    CHECK(get_bool_field(R"({})", "delete_folder") == false);
+    CHECK(get_bool_field(R"({})", "delete_folder", true) == true);
+    CHECK(get_bool_field(R"({"delete_folder":"true"})", "delete_folder") == false);
+    // Must not false-match the key inside a nested object or a string value.
+    CHECK(get_bool_field(R"({"note":"delete_folder:true"})", "delete_folder") == false);
+    CHECK(get_bool_field(R"({"nested":{"delete_folder":true}})", "delete_folder") == false);
+}
+
 // strip_quotes must reverse every escape the writers can emit — including the
 // \uXXXX / \b / \f forms used for control chars. Decoding only the
 // \" \\ \n \r \t subset silently corrupted any name/path carrying one (a
@@ -282,6 +301,7 @@ int main() {
     test_rsp_err();
     test_log_event();
     test_parse_edge_cases();
+    test_get_bool_field();
     test_strip_quotes_unescape();
     test_recover_cmd_id();
     test_dispatch_shell();

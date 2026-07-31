@@ -435,4 +435,15 @@ inline std::optional<double> get_number_field(std::string_view json, std::string
     try { return std::stod(v); } catch (...) { return std::nullopt; }
 }
 
+// Boolean flag with a default. Use this instead of substring-matching
+// `"key":true` in handlers: Python's json.dumps emits `"key": true` WITH a
+// space, so an un-spaced substring check silently reads false.
+inline bool get_bool_field(std::string_view json, std::string_view key, bool def = false) {
+    std::string v;
+    if (!detail::find_key(json.data(), json.data() + json.size(), key, v)) return def;
+    if (v == "true")  return true;
+    if (v == "false") return false;
+    return def;
+}
+
 } // namespace xi::proto

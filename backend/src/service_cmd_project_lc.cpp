@@ -331,8 +331,7 @@ void cmd_open_project_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         // working_copy: operate on a <project>/.xinsp_work scratch copy
         // (resume if present, else seed) so edits are transactional + crash-
         // durable. Default false = legacy in-place behaviour.
-        bool working_copy = parsed->args_json.find("\"working_copy\":true") != std::string::npos
-                          || parsed->args_json.find("\"working_copy\": true") != std::string::npos;
+        bool working_copy = xp::get_bool_field(parsed->args_json, "working_copy");
         // O2 (round-10 red-team): the launch-pause must be HELD across open_project()'s
         // teardown of the OLD project (it FreeLibrary's the old plugin DLLs) — releasing
         // it early let a straggler source-emit one-shot launch (paused_==0) into an

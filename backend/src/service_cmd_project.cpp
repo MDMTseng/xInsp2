@@ -339,8 +339,7 @@ void cmd_create_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
 void cmd_remove_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         auto iname = xp::get_string_field(parsed->args_json, "name");
         if (!iname) { send_rsp_err(srv, id, "missing name"); return; }
-        bool delete_folder =
-            parsed->args_json.find("\"delete_folder\":true") != std::string::npos;
+        bool delete_folder = xp::get_bool_field(parsed->args_json, "delete_folder");
         // Finding 5 (red-team): remove_instance DESTROYS a DLL-backed runtime
         // object (adapter dtor → xi_plugin_destroy + pack/cap owner sweeps) while
         // dispatch workers and backpressured in-flight events may still hold

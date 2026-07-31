@@ -208,9 +208,8 @@ void cmd_compile_and_load_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                           req.openmp_max_threads, req.allow_raw_omp);
         // Fast dev compile (/Od) by default — the interactive edit→run loop wants
         // fast COMPILE, not fast runtime. A client benchmarking / the autostart
-        // boot path passes "optimize":true to get /O2. (Both spacings, like has_ui.)
-        bool want_optimize = parsed->args_json.find("\"optimize\":true") != std::string::npos ||
-                             parsed->args_json.find("\"optimize\": true") != std::string::npos;
+        // boot path passes "optimize":true to get /O2.
+        bool want_optimize = xp::get_bool_field(parsed->args_json, "optimize");
         req.fast = !want_optimize;
 
         // P2-6: emit a `compile_started` event before kicking off cl.exe.

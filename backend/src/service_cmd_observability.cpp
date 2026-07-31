@@ -129,8 +129,7 @@ void cmd_set_watchdog_ms_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
 void cmd_graph_capture_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // Toggle pipeline-graph dataflow capture (stage 2). Default off → no
         // hot-path cost. Enabling clears any prior recording.
-        bool enable = parsed->args_json.find("\"enable\":true")  != std::string::npos ||
-                      parsed->args_json.find("\"enable\": true") != std::string::npos;
+        bool enable = xp::get_bool_field(parsed->args_json, "enable");
         xi::GraphCapture::instance().set(enable);
         send_rsp_ok(srv, id, std::string("{\"capturing\":") + (enable ? "true" : "false") + "}");
 }
