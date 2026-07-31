@@ -1,6 +1,12 @@
 //
 // service_cmd_plugin.cpp — plugin-mgmt command handlers, split from
-// service_main.cpp (behavior-preserving; see service_internal.hpp).
+// service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
+// The plugin + toolchain WS verbs: cmd:list_plugins / rescan_plugins /
+// rebuild_plugins, export_project_plugin / recompile_project_plugin, get_plugin_ui,
+// set_process_priority, and cmd:toolchain_health / set_toolchain_override.
+//
+// Deliberately NOT here: the toolchain RESOLUTION these toolchain_health /
+// set_toolchain_override handlers report on lives in service_toolchain.cpp.
 //
 #include <algorithm>
 #include <cstdio>
@@ -13,7 +19,9 @@
 #include <yyjson.h>
 #include <xi/xi_toolchain.hpp>
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include <xi/xi_plugin_manager.hpp>  // IWYU: PluginManager methods (formerly transitive via service_state.hpp; now pimpl-hidden)
+#include <xi/xi_ws_server.hpp>
 
 // ---- plugin-mgmt -----------------------------------------------------------
 void cmd_set_process_priority_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
@@ -29,7 +37,7 @@ void cmd_set_process_priority_(xi::ws::Server& srv, int64_t id, const xp::Parsed
 }
 
 void cmd_list_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
-        auto plugins = g_eng.plugin_mgr.list_plugins();
+        auto plugins = g_eng.plugin_mgr().list_plugins();
         std::string out = "[";
         auto esc = [](const std::string& s) {
             std::string o; for (char c : s) { if (c=='\\'||c=='"') o.push_back('\\'); o.push_back(c); } return o;
@@ -40,13 +48,24 @@ void cmd_list_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             out += "{\"name\":\"" + esc(p.name) + "\",\"description\":\"" + esc(p.description) + "\"";
             out += ",\"folder\":\"" + esc(p.folder_path) + "\"";
             out += ",\"has_ui\":" + std::string(p.has_ui ? "true" : "false");
+            // doc 37: the plugin's pluginlet opt-in list — the RUNTIME consumer of
+            // plugin.json's "pluginlets". A UI reads it to auto-mount each plet's
+            // half (e.g. the controls plet's $schema panel) with no bespoke UI.
+            if (!p.pluginlets.empty()) {
+                out += ",\"pluginlets\":[";
+                for (size_t k = 0; k < p.pluginlets.size(); ++k) {
+                    if (k) out += ",";
+                    out += "\"" + esc(p.pluginlets[k]) + "\"";
+                }
+                out += "]";
+            }
             out += ",\"loaded\":" + std::string(p.handle ? "true" : "false");
             // cmake/prebuilt plugins get the per-item "Rebuild" action in the
             // extension's Plugin Browser (rebuild_plugins {plugins:[name]}).
             out += ",\"prebuilt\":" + std::string(p.prebuilt ? "true" : "false");
             // Same origin field as to_json — the extension's Plugin Browser relies
             // on it to badge project plugins, e2e journey asserts it.
-            bool is_proj = g_eng.plugin_mgr.is_project_plugin(p.name);
+            bool is_proj = g_eng.plugin_mgr().is_project_plugin(p.name);
             out += ",\"origin\":\"" + std::string(is_proj ? "project" : "global") + "\"";
             // Optional `manifest` block from plugin.json (free-form;
             // see docs/reference/c-abi.md). AI agents and doc
@@ -75,7 +94,7 @@ void cmd_rescan_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* p
             // instance. (Also bounds J6: dispatch is paused, so holding mu_ across a
             // certify subprocess can't stall the emit hot path.)
             auto _rescan_guard = quiesce_dispatch_for_lifecycle_op_("rescan_plugins", &srv);
-            n = g_eng.plugin_mgr.scan_plugins(_rescan_guard.token(), dir);
+            n = g_eng.plugin_mgr().scan_plugins(_rescan_guard.token(), dir);
         }
         std::string out = "{\"scanned\":";
         xp::json_escape_into(out, dir);
@@ -96,14 +115,14 @@ void cmd_export_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::Parse
         auto pname = xp::get_string_field(parsed->args_json, "plugin");
         auto dest  = xp::get_string_field(parsed->args_json, "dest");
         if (!pname || !dest) { send_rsp_err(srv, id, "missing plugin or dest"); return; }
-        if (!g_eng.plugin_mgr.is_project_plugin(*pname)) {
+        if (!g_eng.plugin_mgr().is_project_plugin(*pname)) {
             send_rsp_err(srv, id, "not a project plugin: " + *pname);
             return;
         }
         // export_project_plugin recompiles in Release; quiesce so no dispatcher
         // worker is mid-call into the same plugin's instances.
         auto _export_guard = quiesce_dispatch_for_lifecycle_op_("export_project_plugin", &srv);  // resumes at block end
-        auto er = g_eng.plugin_mgr.export_project_plugin(_export_guard.token(), *pname, *dest);
+        auto er = g_eng.plugin_mgr().export_project_plugin(_export_guard.token(), *pname, *dest);
         std::string data = "{\"plugin\":";
         xp::json_escape_into(data, *pname);
         data += ",\"dest\":";
@@ -132,7 +151,7 @@ void cmd_recompile_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::Pa
         // loaded so running inspection isn't disrupted.
         auto pname = xp::get_string_field(parsed->args_json, "plugin");
         if (!pname) { send_rsp_err(srv, id, "missing plugin"); return; }
-        if (!g_eng.plugin_mgr.is_project_plugin(*pname)) {
+        if (!g_eng.plugin_mgr().is_project_plugin(*pname)) {
             send_rsp_err(srv, id, "not a project plugin: " + *pname);
             return;
         }
@@ -141,7 +160,7 @@ void cmd_recompile_project_plugin_(xi::ws::Server& srv, int64_t id, const xp::Pa
         // on those instances from a dispatcher worker would dereference
         // freed code. Drain first.
         auto guard = quiesce_dispatch_for_lifecycle_op_("recompile_project_plugin", &srv);
-        auto rr = g_eng.plugin_mgr.recompile_project_plugin(guard.token(), *pname);
+        auto rr = g_eng.plugin_mgr().recompile_project_plugin(guard.token(), *pname);
         // Build diagnostics JSON — same shape as compile_and_load.
         std::string diag_json = "[";
         for (size_t i = 0; i < rr.diagnostics.size(); ++i) {
@@ -224,7 +243,7 @@ void cmd_rebuild_plugins_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* 
             yyjson_doc_free(adoc);
         }
         auto guard = quiesce_dispatch_for_lifecycle_op_("rebuild_plugins", &srv);
-        auto rep = g_eng.plugin_mgr.rebuild_cmake_plugins(
+        auto rep = g_eng.plugin_mgr().rebuild_cmake_plugins(
             guard.token(),
             cmake_exe ? *cmake_exe : std::string("cmake"),
             config    ? *config    : std::string("Release"),
@@ -258,7 +277,7 @@ void cmd_get_plugin_ui_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* pa
         // load it into a webview.
         auto plugin = xp::get_string_field(parsed->args_json, "plugin");
         if (!plugin) { send_rsp_err(srv, id, "missing plugin"); return; }
-        auto* pi = g_eng.plugin_mgr.find_plugin(*plugin);
+        auto* pi = g_eng.plugin_mgr().find_plugin(*plugin);
         if (pi && pi->has_ui) {
             std::string data = "{\"ui_path\":";
             xp::json_escape_into(data, pi->ui_path);

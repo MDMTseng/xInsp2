@@ -14,8 +14,16 @@
 
 // WS close code the serve.mjs reverse-proxy uses to relay a backend
 // `503 single-client-busy` upgrade reject to a browser (which cannot read the
-// HTTP status itself). Application range (4000-4999). Keep in sync with hmi/serve.mjs.
+// HTTP status itself). Application range (4000-4999). This is the ONE definition:
+// hmi/serve.mjs imports it from here rather than re-declaring a copy to hand-sync.
 export const BUSY_CLOSE_CODE = 4003;
+
+// The canonical "does the backend look like a real semver build" probe used by
+// `connect({checkVersion: true})`. Exported so callers can reference the one
+// source of truth instead of re-pasting the literal (it was copy-pasted at ~7
+// call sites). A caller that needs a stricter/looser rule still passes its own
+// RegExp/string/function to checkVersion — see connect().
+export const XI_VERSION_RE = /\d+\.\d+\.\d+/;
 
 // Classify why a socket closed. `busy` means the backend refused us because
 // another client already owns it (single-client enforcement, ws-protocol.md
@@ -56,13 +64,55 @@ export class XiClient {
 
   // Open the socket; resolves once it's open. If opts.checkVersion is set, also
   // runs `cmd:version` and rejects on mismatch (fail-fast on protocol drift).
-  //   checkVersion: (info) => boolean | RegExp | string   (string/RegExp tests info.version)
+  //   checkVersion: true | RegExp | string | (info) => boolean
+  //     true       → test info.version against the canonical XI_VERSION_RE
+  //     RegExp/str → test/compare info.version
+  //     function   → the caller decides from the full version info object
   // Emits an `open` event on connect and a `close` event on disconnect; the close
   // payload is {busy, code, reason} (busy = single-client rejection, see
   // classifyClose). Rejects on any failure BEFORE open (bad URL, refused, 503
   // busy) with an Error carrying `.busy`/`.reason`, so a caller that never got an
-  // `open` still gets one settled promise. Auto-reconnect is the caller's job.
+  // `open` still gets one settled promise.
+  //
+  // opts.retry (opt-in) re-attempts a BEFORE-open failure (refused / closed
+  // before open):
+  //   retry: { attempts, delayMs, busy }
+  //     attempts → total tries incl. the first (default 1 = no retry)
+  //     delayMs  → wait between tries (default 0)
+  //     busy     → also wait out a single-client-busy reject (default true —
+  //                the slot is held by another client and frees when they leave);
+  //                set false to surface a busy reject immediately.
+  // A post-open failure (version mismatch) is NOT retried — retrying can't fix a
+  // wrong build. With no `retry` the semantics are exactly the single-attempt
+  // default. Auto-reconnect (after a healthy connection later drops) is still the
+  // caller's job; retry only covers the initial connect.
   connect(opts = {}) {
+    const { retry } = opts;
+    if (!retry) return this._connectOnce(opts);
+    const attempts = Math.max(1, Number(retry.attempts) || 1);
+    const delayMs = Math.max(0, Number(retry.delayMs) || 0);
+    const retryBusy = retry.busy !== false;   // busy waits-out by default
+    return (async () => {
+      let lastErr;
+      for (let n = 1; n <= attempts; n++) {
+        try { return await this._connectOnce(opts); }
+        catch (e) {
+          lastErr = e;
+          // Only a genuine pre-open connection failure is retriable; a version
+          // mismatch (or any post-open error) has no `beforeOpen` flag and falls
+          // straight through. A busy reject is retriable unless opted out.
+          const retriable = e && e.beforeOpen && (retryBusy || !e.busy);
+          if (!retriable || n >= attempts) throw e;
+          if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+        }
+      }
+      throw lastErr;   // unreachable: the loop always returns or throws above
+    })();
+  }
+
+  // One connection attempt — the original single-shot connect. `connect()` wraps
+  // this with the optional retry loop; everything else calls it directly.
+  _connectOnce(opts = {}) {
     return new Promise((resolve, reject) => {
       let ws, opened = false;
       try { ws = new this._WS(this.url); } catch (e) { reject(e); return; }
@@ -94,6 +144,7 @@ export class XiClient {
         const e = new Error(info.busy ? "single-client-busy: another client owns the backend"
                                       : "connection failed before open");
         e.busy = info.busy; e.reason = info.reason; e.code = info.code;
+        e.beforeOpen = true;   // marks this as a retriable pre-open failure (see connect())
         reject(e);
       };
       ws.onerror = () => {
@@ -114,9 +165,12 @@ export class XiClient {
           if (opts.checkVersion) {
             const info = await this.cmd("version");
             const v = info && info.version;
-            const ok = typeof opts.checkVersion === "function"
-              ? opts.checkVersion(info)
-              : (opts.checkVersion instanceof RegExp ? opts.checkVersion.test(v) : v === opts.checkVersion);
+            // `true` selects the canonical probe; otherwise the caller's own
+            // function / RegExp / exact-string rule applies.
+            const check = opts.checkVersion === true ? XI_VERSION_RE : opts.checkVersion;
+            const ok = typeof check === "function"
+              ? check(info)
+              : (check instanceof RegExp ? check.test(v) : v === check);
             if (!ok) { reject(new Error(`backend version mismatch: got ${v}`)); ws.close(); return; }
           }
           resolve(this);

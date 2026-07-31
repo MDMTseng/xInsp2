@@ -63,7 +63,16 @@ export type Widget =
   // --- presentation-only (no value, no key) ---
   | "title"     // a section heading (text in `label`)
   | "label"     // a paragraph of help / body text (text in `label`)
-  | "divider";  // a horizontal rule
+  | "divider"   // a horizontal rule
+  // --- REGISTERED (open vocabulary) ---
+  | (string & {}); // any name claimed via registerWidget() (mount-schema.mjs).
+                   // Native side: .comp(widget, key?) — keyed = plugin-pushed
+                   // readout semantics (set_readout(key, json); set_def never
+                   // writes it); keyless = presentation/stream (.channel()).
+                   // .as(widget) re-skins a typed INPUT builder, keeping its
+                   // value contract (min/max/clamp) — only presentation changes.
+                   // N nodes with one widget name = N instances of the same
+                   // component, each bound to its OWN key/channel.
 
 export interface Control {
   type: "control";
@@ -71,7 +80,7 @@ export interface Control {
   key?: string;                // value/readout binding key (absent for button/title/label/divider/view)
   key2?: string;               // range only: the HIGH-bound def key (`key` is the low)
   command?: string;            // button only: the exchange command to fire
-  channel?: string;            // view only: the live-view channel to mount here
+  channel?: string;            // view/comp: the stream channel this slot subscribes to
   sem?: string;                // semantic type hint (threshold/gain/roi/angle/percent/…),
                                // orthogonal to `widget`: drives units/format/touch editor
                                // so the same semantic looks the same across plugins

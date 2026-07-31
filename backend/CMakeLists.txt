@@ -999,7 +999,8 @@ add_executable(xinsp_backend
     src/service_toolchain.cpp
     src/service_result.cpp
     src/service_dispatch.cpp
-    src/service_cmd_lifecycle.cpp
+    src/service_cmd_script.cpp
+    src/service_cmd_project_lc.cpp
     src/service_cmd_dispatch.cpp
     src/service_cmd_plugin.cpp
     src/service_cmd_project.cpp
@@ -1086,7 +1087,7 @@ target_compile_definitions(xinsp_fe PRIVATE
 # data-layer op, NOT the per-frame pipeline). Links only xi_core (header-only):
 # it drives the REAL TriggerBus/ImagePool/DocRegistry/EmitGate/MetricsRegistry and
 # reproduces GroupLane's queue plumbing as MiniLane (that plumbing is welded into
-# the backend exe behind the private service_internal.hpp). Gated as `perf_hotpath`
+# the backend exe behind the private service_state.hpp). Gated as `perf_hotpath`
 # on a closed-loop best-of MEDIAN latency; the verbose report (no args) also prints
 # p50/p95/p99 + throughput + a burst/overload tail. Baseline requires the
 # xi.perf-baseline/1 fingerprint, so it SKIPs-with-reason until recaptured on the
@@ -1306,6 +1307,21 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_retired_terms.py)
     set_tests_properties(retired_terms PROPERTIES LABELS "docs")
+    # backend_map_check: the freeze guard for backend/src/MAP.md, the coding-agent
+    # navigation index. gen_backend_map.py DISCOVERS its inputs from source — the
+    # g_cmd_table dispatch table, the cmd_*_ handler definitions across the
+    # service_cmd_*.cpp TUs, each file's top-comment responsibility, and the
+    # toolbox/**/plugin.json flags/exchange/capabilities — and regenerates MAP.md;
+    # `--check` fails if the committed file is stale. Because it discovers rather
+    # than assumes, a TU split/rename (e.g. the service_cmd_lifecycle.cpp split)
+    # just changes the generated rows, and this gate demands the map be
+    # regenerated in the same commit. Same pure-stdlib Python, same "docs" label as
+    # the doc_coverage / retired_terms gates; WORKING_DIRECTORY is the repo root.
+    add_test(NAME backend_map_check
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/gen_backend_map.py --check
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    set_tests_properties(backend_map_check PROPERTIES LABELS "docs")
     # doc_debt: the manual companion to the two derived guards — docs/DOC_DEBT.md
     # is the ledger where a code change that invalidates a doc page records one
     # `- [ ]` line instead of fixing it in-branch; this fails while any unchecked

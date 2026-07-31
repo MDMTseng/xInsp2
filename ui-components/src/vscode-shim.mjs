@@ -23,17 +23,13 @@
 // getState/setState are sessionStorage-backed, matching the webview's persistence
 // contract (a panel that stashes UI state across reloads keeps working).
 //
+// The envelope shape itself (statusEnvelope / isExchange) lives in the shared
+// exchange-envelope.mjs so the real VS Code host builds the byte-identical shape.
+//
+
+import { statusEnvelope, isExchange } from "./exchange-envelope.mjs";
 
 const STATE_KEY = "__xi_vscode_state__";
-
-// Wrap an exchange reply as the `{type:'status', …body}` message a panel expects.
-function statusEnvelope(reply) {
-  if (reply && typeof reply === "object" && !Array.isArray(reply)) {
-    return { ...reply, type: "status" };   // type LAST: never shadowed by a body field
-  }
-  // A non-object reply (rare — exchange bodies are status JSON): keep it reachable.
-  return { type: "status", value: reply };
-}
 
 /**
  * Build one `vscode`-API object bound to a single instance + XiClient.
@@ -57,7 +53,7 @@ export function createVsCodeApi(opts = {}) {
     // The panel's ONLY outbound channel. Non-exchange messages are ignored (the
     // real host bridge only forwards exchange; other verbs are host details).
     postMessage(msg) {
-      if (!msg || msg.type !== "exchange" || !msg.cmd) return;
+      if (!isExchange(msg)) return;
       if (onSend) { try { onSend(msg.cmd); } catch { /* hook threw */ } }
       // Defer so the reply arrives as an async 'message' event (matches a real
       // webview and avoids re-entrancy inside the panel's send handler).

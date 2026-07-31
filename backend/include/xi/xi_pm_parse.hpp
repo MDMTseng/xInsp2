@@ -124,6 +124,29 @@ inline bool detail_find_key(const std::string& json, const std::string& key,
 // parse-fail → empty (treat as "no declared capabilities", the common case).
 // Top-level only (same hardening as extract_string/json_flag_true) so an example
 // buried in a nested `manifest` block can't fabricate a requirement.
+// doc 37: plugin.json `"pluginlets": ["controls", "live-view"]` — the plugin's
+// opt-in list of pluginlets. Parsed here (the ONE manifest parse point) so the
+// runtime can surface it; the C++ and webui builds read the same key from the
+// manifest themselves. Non-string / empty entries are skipped; absent → empty.
+inline std::vector<std::string> parse_pluginlets(const std::string& json) {
+    std::vector<std::string> out;
+    yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
+    yyjson_val* root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    if (root) {
+        yyjson_val* arr = yyjson_obj_get(root, "pluginlets");
+        if (arr && yyjson_is_arr(arr)) {
+            size_t idx, max; yyjson_val* el;
+            yyjson_arr_foreach(arr, idx, max, el) {
+                if (!yyjson_is_str(el) || !yyjson_get_str(el)) continue;
+                std::string s = yyjson_get_str(el);
+                if (!s.empty()) out.push_back(std::move(s));
+            }
+        }
+    }
+    if (doc) yyjson_doc_free(doc);
+    return out;
+}
+
 inline std::vector<IfaceReq> parse_iface_reqs(const std::string& json,
                                               const char* key) {
     std::vector<IfaceReq> out;
@@ -277,6 +300,9 @@ inline PluginInfo parse_manifest(const std::string& path, const std::string& fol
     // ones are advisory (the plugin null-checks them at runtime). See parse_iface_reqs.
     pi.required_ifaces = parse_iface_reqs(content, "requires");
     pi.optional_ifaces = parse_iface_reqs(content, "optional");
+    // doc 37: the plugin's pluginlet opt-in list, surfaced so a UI can auto-mount
+    // each plet's half (the runtime consumer of the one declaration).
+    pi.pluginlets = parse_pluginlets(content);
     pi.folder_path = folder;
     if (pi.has_ui) {
         pi.ui_path = (std::filesystem::path(folder) / "ui").string();

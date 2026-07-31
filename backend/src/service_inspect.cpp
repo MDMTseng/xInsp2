@@ -3,7 +3,7 @@
 // invocation + SEH boundary + crash breadcrumb + watchdog) and EMISSION half
 // (metrics + ordered-emit gate + staged flush + result/events), plus the thin
 // run_one_inspection driver. Split from service_main.cpp (behavior-preserving;
-// see service_internal.hpp).
+// see service_state.hpp / service_cmds.hpp).
 //
 #include <algorithm>
 #include <chrono>
@@ -14,10 +14,16 @@
 #include <yyjson.h>
 #include <xi/xi_metrics.hpp>
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include <xi/xi_health.hpp>            // IWYU: xi::health()/CompHealth/SysState (formerly transitive via service_state.hpp)
+#include <xi/xi_script_loader.hpp>    // IWYU: LoadedScript members/nested types (formerly transitive via service_state.hpp; now pimpl-hidden)
+#include <xi/xi_ws_server.hpp>
+#include <xi/xi_use.hpp>
+#include <xi/xi_seh.hpp>              // this TU owns its own SEH boundary (hand-rolled, not the guarded_* templates); formerly transitive via service_cmds.hpp
 
 using xi::EmitGate;
 using xi::EmitTurn;
+using xi::seh_exception;
 
 // Run one full inspection cycle: reset → inspect → emit.
 // The inspect call is wrapped in SEH so a script crash (null deref,
@@ -44,7 +50,7 @@ static void emit_run_event_(xi::ws::Server& srv, int64_t run_id, const char* nam
 // trigger, the script handle). Deliberately NOT here: the EmitTurn and StagedEmitGuard,
 // whose RAII lifetimes straddle the seam and MUST stay in the driver.
 // B7 (burr audit): the per-frame script snapshot. run_inspection_compute_ used
-// to copy the WHOLE LoadedScript (out.s = g_eng.script) under script_mu every
+// to copy the WHOLE LoadedScript (out.s = g_eng.script()) under script_mu every
 // frame — including the `path` std::string, which no frame path ever reads
 // (errors here report via run_id/frame_path, never the DLL path). Snapshot only
 // what a frame needs: the module-lifetime pin (shared_ptr copy = one atomic
@@ -89,11 +95,11 @@ static bool run_inspection_compute_(xi::ws::Server& srv, int frame_hint,
         std::lock_guard<std::mutex> lk(g_eng.script_mu);
         // B7: field-wise snapshot — no `path` string copy per frame. The
         // module_lifetime copy pins the DLL exactly as the whole-struct copy did.
-        out.s.module_lifetime = g_eng.script.module_lifetime;
-        out.s.owner_id        = g_eng.script.owner_id;
-        out.s.inspect         = g_eng.script.inspect;
-        out.s.inspect_tv      = g_eng.script.inspect_tv;
-        out.s.reset           = g_eng.script.reset;
+        out.s.module_lifetime = g_eng.script().module_lifetime;
+        out.s.owner_id        = g_eng.script().owner_id;
+        out.s.inspect         = g_eng.script().inspect;
+        out.s.inspect_tv      = g_eng.script().inspect_tv;
+        out.s.reset           = g_eng.script().reset;
         // Snapshot the active-script generation under the SAME lock as the
         // script handle, so the reported generation is exactly the one that
         // owns the DLL this run will call. A swap to N+1 that happens mid-run

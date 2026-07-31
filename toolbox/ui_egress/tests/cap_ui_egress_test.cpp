@@ -234,6 +234,54 @@ int main() {
         CHECK(vp.empty());
     }
 
+    SECTION("GENERIC control relay (doc 37): a NEW key needs no expose change");
+    {
+        // Read an arbitrary control key off the probe reply — the same path
+        // live-view uses for "viewport", but for a key expose has never heard of.
+        auto probe_key = [&](const char* chan, const char* key, std::string& out) {
+            xi_pack_builder b = pk->builder_new();
+            pk->builder_add_str(b, "$channel", chan, (int32_t)std::strlen(chan));
+            xi_pack_handle req = pk->builder_seal(b), rsp = XI_PACK_NULL;
+            cap->call("xi.ui.sink", req, &rsp);
+            pk->release(req);
+            out.clear();
+            if (rsp != XI_PACK_NULL) {
+                const char* sp = nullptr; int32_t sn = 0;
+                if (pk->get_str(rsp, key, &sp, &sn) && sp && sn > 0) out.assign(sp, (size_t)sn);
+                pk->release(rsp);
+            }
+        };
+
+        // A pluginlet expose knows nothing about sets its own key...
+        expose->exchange("{\"command\":\"control\",\"channel\":\"ui/x\",\"key\":\"hist_bins\",\"value\":\"64\"}");
+        std::string bins; probe_key("ui/x", "hist_bins", bins);
+        CHECK(bins == "64");                       // relayed verbatim, byte-blind
+
+        // ...and it coexists with viewport: BOTH keys ride the same probe reply.
+        std::string vp2; probe_key("ui/x", "viewport", vp2);
+        CHECK(vp2 == "10,20,100,50");
+
+        // Latest-wins per key.
+        expose->exchange("{\"command\":\"control\",\"channel\":\"ui/x\",\"key\":\"hist_bins\",\"value\":\"128\"}");
+        probe_key("ui/x", "hist_bins", bins);
+        CHECK(bins == "128");
+
+        // A missing key is refused; an unsubscribed channel still stores nothing.
+        std::string bad = expose->exchange("{\"command\":\"control\",\"channel\":\"ui/x\",\"value\":\"9\"}");
+        CHECK(bad.find("missing key") != std::string::npos);
+        expose->exchange("{\"command\":\"control\",\"channel\":\"ui/nosub\",\"key\":\"k\",\"value\":\"v\"}");
+        std::string none; probe_key("ui/nosub", "k", none);
+        CHECK(none.empty());
+
+        // Unsubscribing drops EVERY control for the channel (no stale state).
+        expose->exchange("{\"command\":\"unsubscribe\",\"channels\":[\"ui/x\"]}");
+        expose->exchange("{\"command\":\"subscribe\",\"channels\":[\"ui/x\"]}");
+        probe_key("ui/x", "hist_bins", bins);
+        CHECK(bins.empty());
+        probe_key("ui/x", "viewport", vp2);
+        CHECK(vp2.empty());
+    }
+
     SECTION("NO SUBSCRIBER -> ZERO ENCODE: an unsubscribed channel drops at the probe");
     {
         const int enc0 = jint(stats(egress.get()), "encodes");

@@ -15,7 +15,9 @@ invariant, and a prior-art survey — and overturned two more positions. Revisio
 "Developer experience"), reflecting landed code: the controls native+webui halves,
 controls_demo (verified live), stepper/range/file/color widgets + semantic types,
 and the `xi_use_pluginlet` / `plugin.json "pluginlets"` build wiring. See the
-**Corrections log**. Items still marked DESIGN ONLY below are unbuilt.
+**Corrections log**. Revision 5 (2026-07-21) inverts the frontend layering — a plet
+OWNS its UI half (source), the app depends on the plet — and records the webui build
+consumer; see "Frontend layering". Items still marked DESIGN ONLY below are unbuilt.
 
 ## The observation (CT)
 
@@ -84,9 +86,13 @@ in-process. That equivalence is the proof the observation is right: a pluginlet 
 
 ```
 toolbox/pluginlets/live-view/
-├── live_view.hpp        native: xi::pluginlet::LiveView (the Derived cell), #include'd into the host plugin DLL
-├── live_view.ui.ts      ui:     mount(el, channel) → renders frames, emits viewport back
-└── contract.(ts|json)   SHARED: channel naming, viewport message schema, control schema
+├── pluginlet.json          the INDEX: halves / build / requires / version / contract
+├── live_view.hpp           native: xi::pluginlet::LiveView (the Derived cell), #include'd into the host plugin DLL
+├── contract.ts             SHARED: channel naming, viewport message schema, control schema
+└── ui/                     the UI half (SOURCE — the webui build compiles it)
+    ├── live-view.ui.ts     mount(el, channel) → renders frames, emits viewport back
+    ├── widgets/            xi-image-viewer.svelte, xi-image-editor.svelte
+    └── lib/                viewport.mjs, tools.mjs (+ their tests)
 ```
 
 Author-facing surface is two lines of C++ plus one manifest key:
@@ -508,13 +514,19 @@ above the frozen ABI** — zero `xi_core` / C-ABI change. Precisely:
   change, no core change — a convention each plet honors.
 - **config** — a named slice of the host's existing def. No new mechanism.
 
-**The one shared piece that is NOT per-plet, and is not `xi_core` either:** the
-upstream-control relay in **expose** (a plugin). Today it is hard-coded to `viewport`
-(the landed relay). To keep every FUTURE plet purely additive, generalize it ONCE
-into a generic per-channel control store (byte-blind, additive to expose); after that
-one enabling change every plet rides it with no further expose or core change. So the
-honest statement is: **zero frozen-ABI / zero xi_core change; one generic additive
-enabler in expose; everything else per-plet additive.**
+**The one shared piece that is NOT per-plet** — the upstream-control relay in
+**expose** (a plugin, not `xi_core`) — **is now generic, so the invariant holds
+fully.** It was hard-coded to `viewport`, which meant every new plet wanting
+upstream control had to edit expose. It is now a byte-blind per-channel control
+store: `{command:"control", channel, key, value}` writes any key, and the
+`xi.ui.sink` probe reply hands back every control for that channel as its own
+entry. `viewport` is simply one key (the `{command:"viewport", x,y,w,h}` sugar
+still works, so live-view's native half is unchanged). Controls are stored only
+while the channel is SUBSCRIBED and dropped on unsubscribe, so the store is
+bounded by `subscribed_` with no separate cap.
+
+So the statement is now unqualified: **zero frozen-ABI / zero xi_core change, and
+a new pluginlet — including one that needs upstream control — is purely additive.**
 
 ## Prior art (control-panel frameworks surveyed) — what to adopt
 
@@ -579,8 +591,8 @@ roles" pattern again (identity / build address / bind address):
 | consumer | what it does with `"pluginlets"` | status |
 |---|---|---|
 | **C++ build** | `xi_wire_pluginlets(target dir)` reads it → `xi_use_pluginlet(target <name>)` per entry → applies the plet's include root + `build.native.links` from its manifest | **landed** |
-| **webui build** | bundle each plet's `ui` half + register its widgets | not built |
-| **runtime** | the host knows which plets a plugin uses → the UI auto-mounts `mountSchema` / a live-view into the `view` slot | not built |
+| **webui build** | the `xi-pluginlet-ui` vite plugin scans each manifest's `build.ui.widgets` and compiles/bundles them | **landed** |
+| **runtime** | the backend surfaces `pluginlets` on `list_plugins`; `mountPluginlets(host,{client,instance,pluginlets})` mounts each plet's UI from a manifest-generated registry | **landed** |
 
 The C++ consumer is landed: `xi_use_pluginlet` / `xi_wire_pluginlets`
 (toolbox/CMakeLists.txt) turn "declare the plet in plugin.json" into the only step —
@@ -625,6 +637,71 @@ widgets — a plet's UI half is host-agnostic and portable (any HTML/VS-Code-web
 React host uses `<xi-*>` without adopting Svelte). This suits "plet = distributable
 folder" better than committing the whole UI to one framework.
 
+## Frontend layering: a plet OWNS its UI, the app depends on the plet
+
+Revision 4 still had the UI backwards: `mountSchema` lived in the app library
+(`@xinsp2/components`) and the plet borrowed it. That makes the app a shared hub
+everything couples to. **Inverted (CT): a pluginlet is a LEAF that owns its own UI;
+the app layer — extension / HMI / core — DEPENDS ON the plet when it wants that
+UI, never the reverse.** This is the same principle the codebase already applies to
+plugins (`expose` owns its UI; core is a plugin hub), extended to plets.
+
+```
+                design tokens / theme CSS          ← the real consistency contract
+                          ▲
+   controls plet                      live-view plet          ← LEAVES; own their UI
+   ui/mount-schema.mjs                ui/live-view.ui.ts
+   ui/widgets/xi-{slider,number,      ui/widgets/xi-image-{viewer,editor}
+     toggle,radio,dropdown,text}      ui/lib/{viewport,tools}.mjs
+   ui/lib/options.mjs
+                          ▲
+   @xinsp2/components (app): dashboard cards, layout engine, XiClient,
+   vscode-shim, webapp export, xi-button/badge/trace    ← extension + HMI
+```
+
+**Plets are SOURCE, both halves.** Like the native `.hpp`, the UI half ships as
+source and the CONSUMER'S build compiles it (native → the plugin's CMake via
+`xi_use_pluginlet`; UI → the webui's vite/Svelte build). A plet never ships a
+prebuilt artifact. The honest consequence, symmetric on both sides: vendoring a
+plet requires the consumer to have the toolchain — a C++ compiler for the native
+half, a Svelte/vite build for the UI half.
+
+**The webui build is the third consumer of the manifest.** `xi-pluginlet-ui` (a
+vite plugin in `ui-components/vite.config.js`) scans every
+`toolbox/pluginlets/*/pluginlet.json` for `build.ui.widgets` and exposes them as
+one virtual module, so `src/index.js` just imports `virtual:xi-pluginlet-ui`.
+Adding or removing a plet widget needs no edit in the app — exactly mirroring
+`xi_use_pluginlet` on the native side. That closes two of the three consumers from
+"One declaration, three consumers"; only the runtime auto-mount remains.
+
+**A plet must not import upward — and the build enforces it.** Moving the widgets
+proved this concretely: `xi-image-editor` imported `../lib/viewport.mjs` from the
+app layer and the build failed loudly. Each shared lib turned out to be used by
+exactly one plet's widgets, so `options.mjs` went to controls and
+`viewport.mjs`/`tools.mjs` to live-view. A plet's upward import is now a build
+error, not a silent coupling.
+
+**Consistency does NOT come from sharing component code** — that would be
+consistency by coincidence, and it dies the moment anything is reimplemented. It
+comes from three things that survive independent implementations:
+
+1. **design tokens / theme CSS** (`vscode-theme.css`) — spacing, colour, dark/light;
+2. **the declarative contract** — `$schema` + the widget vocabulary (`contract.ts`);
+3. **semantic types** (`sem`) — the same semantic renders with the same units and
+   the same touch editor everywhere, regardless of which element draws it.
+
+**Widget authoring stays Svelte, and that is not a leak.** Each widget compiles to
+a standard custom element (`<svelte:options customElement>`), so consumers use
+`<xi-slider>` with no framework of their own; Svelte is an implementation detail
+contained by the build. A plet's UI half is therefore host-agnostic and portable,
+which is what makes "plet = distributable folder" viable.
+
+**What stays in the app layer:** anything not tied to a plet — dashboard cards, the
+layout engine, `XiClient`, the vscode shim, webapp export, and the widgets no plet
+owns (`xi-button`, `xi-badge`, `xi-trace`). The app also keeps the *chooser*
+(`mountInstancePanel`: `$schema` → the plet renderer, else the flat panel) — a plet
+never falls back, because picking a renderer is not a plet's business.
+
 ## Corrections log (what this doc got wrong first)
 
 Recorded because the discarded positions are attractive and will be re-proposed:
@@ -646,6 +723,13 @@ Recorded because the discarded positions are attractive and will be re-proposed:
    ABI change per primitive. *Overturned by:* the same "zero core change" thesis this
    doc rests on. Corrected: overlay is itself a **plet**; the vocabulary is its
    contract, a new primitive is a plet version bump.
+6. **"the UI half is a module in the app library that the plet points at"** (rev 2-4)
+   — backwards: it made `@xinsp2/components` a hub every plet coupled to, and the
+   plet folder was not self-contained. *Overturned by:* CT — a plet is a LEAF that
+   owns its UI; the app (extension/HMI/core) depends on the plet. Corrected in code:
+   mountSchema + the form widgets + their libs now live in the plets, discovered by
+   the build from each manifest. Consistency comes from tokens + `$schema` + `sem`,
+   not from sharing component code.
 5. **"live-view is the first/reference pluginlet"** (rev 1 framing) — streaming is the
    fancy ~20% case. *Reframed:* the **controls plet** (schema-driven config panel) is
    the default UI ~80%+ of plugins actually need and is simpler; if anything is built
@@ -691,32 +775,85 @@ the sections above as describing shipped behaviour:
 - **the controls plet — LANDED (native + webui renderer + a live plugin).** Native
   `xi::pluginlet::Controls` (`toolbox/pluginlets/controls/controls.hpp` + `contract.ts` +
   manifest; `test_controls`, 14 tests). Webui `mountSchema`
-  (ui-components/src/auto-panel.mjs) renders the `$schema` tree with the real built
-  xi-* Svelte custom elements, wired to set_instance_def (`schema-panel.node.mjs`,
-  5 tests + a Playwright render of both tabs). `controls_demo` (a real plugin) proves
+  (`toolbox/pluginlets/controls/ui/mount-schema.mjs` — OWNED BY THE PLET, rev 5)
+  renders the `$schema` tree with the real built xi-* Svelte custom elements, wired
+  to set_instance_def (`ui/mount-schema.test.mjs`, 6 tests + a Playwright render of
+  both tabs). The plet also owns its widgets (`ui/widgets/xi-{slider,number,toggle,
+  radio,dropdown,text}.svelte`) and `ui/lib/options.mjs`. `controls_demo` (a real plugin) proves
   get_def→`$schema` / set_def-validation / readouts live in the running backend, and
   builds purely from its `plugin.json "pluginlets"`. Widgets: slider/numpad/stepper/
   range/toggle/dropdown/radio/text/file/color + button/readout/view + title/label/
-  divider, with semantic types (`sem`). STILL DESIGN ONLY within it: the dedicated
-  Svelte **xi-stepper/xi-range/xi-color/xi-file** widgets (stepper→number, file/color→
-  text, range→two numbers degrade today, carrying `data-widget`/`data-sem`/`step`);
-  wiring `sem` to units/format/touch editors; the **touch numpad** (host-owned IME);
-  the **live-view mount** into the `view` slot's `data-channel`; native dynamic-tree
+  divider, with semantic types (`sem`). The dedicated **xi-stepper / xi-range /
+  xi-color / xi-file** elements and the **host-owned touch numpad**
+  (`ui/lib/numpad.mjs`, one surface per page — Qt-Virtual-Keyboard model) are now
+  LANDED too, so nothing degrades.
+
+  **The widget REGISTRY (rev 6, LANDED)** — CT's direction: zero-code is not the
+  goal; a clear, small API with one explicit line of wiring beats magic. The
+  controls plet is an **extensible widget vocabulary**, not a closed set:
+  `registerWidget(name, impl)` / `unregisterWidget(name)` (owned by
+  `mount-schema.mjs`, re-exported by `@xinsp2/components`) lets the consuming
+  webui add a widget name or override a built-in. An impl is a tag string (a
+  bound value control, e.g. a chart plet's `"xi-chart"`) or a factory
+  `(node, ctx) => el | {el, update?(state), destroy?()}` with
+  `ctx = {doc, client, instance, state, pushDef}`; `update` joins the panel's
+  `refresh()`, `destroy` its `destroy()`. Per-mount overrides:
+  `mountSchema(host, {widgets: {name: impl}})` beats the global registry. This is
+  how OTHER plets plug into the controls layout without controls knowing them —
+  the canonical case being **live-view claiming `view`**:
+
+      registerWidget("view", (node, { instance }) => {
+        const el = document.createElement("div");
+        const dispose = mountLiveView(el, node.channel || `ui/${instance}`, transport);
+        return { el, destroy: dispose };
+      });
+
+  (demoed with a synthetic frame source in `ui-components/demo/schema.html`;
+  channel defaults to `ui/<instance>` when the schema omits it, softening the
+  two-places-name-the-channel seam). Tested in `ui/mount-schema.test.mjs`
+  (factory + view override + tag-string + per-mount override + lifecycle).
+  Unknown widget (neither built-in nor registered) → an INFO placeholder in the
+  layout slot naming the widget, the orphaned key, and the exact
+  `registerWidget("…")` line missing — never a silently guessed control.
+  FOOTGUN (hit for real): the registry is MODULE-SCOPED, so a bundle-consuming
+  app must take `mountSchema` and `registerWidget` from the SAME bundle; mixing
+  the bundled copy with a direct source import gives two registries and the
+  registration lands in the one mountSchema doesn't read (the placeholder is
+  what surfaces it). App-custom widgets in Svelte: the reference is
+  `ui-components/src/demo/TeachPanel.svelte` + `register-teach-panel.svelte.js` —
+  a PLAIN (non-CE) Svelte component tree mounted by the factory via svelte
+  `mount()/unmount()`, a `$state` object bridging the panel's `refresh()` into
+  runes, child components composed normally, and the plet's xi-* custom elements
+  mixed in as plain tags.
+
+  **The NATIVE side of the registry** (same rev): the builder does not grow a
+  method per custom widget — it has two orthogonal escape hatches.
+  `.comp(widget, key?)` declares a leaf whose widget name controls does not
+  know: keyed = a plugin-pushed data slot (readout semantics — `set_readout(key,
+  json)` feeds it, set_def never writes it), keyless = presentation/stream-only,
+  paired with the `.channel(ch)` modifier. `.as(widget)` re-skins a typed INPUT
+  builder (`.slider("pressure",0,0,10).as("gauge")`) keeping its value contract —
+  clamping and min/max ride the schema unchanged, only presentation swaps.
+  Multiple graphs of one component = multiple `.comp("chart", key)` nodes, each
+  bound to its own key/channel (registration is per widget TYPE; instantiation is
+  per schema NODE). `test_controls` covers it (custom_components).
+  STILL DESIGN ONLY within the controls plet: wiring `sem` to
+  units/format/touch-editor selection (it is carried, not yet acted on); the
+  `view`↔live-view registration against a REAL backend transport (the registry
+  mechanism and the demo wiring exist; no e2e); native dynamic-tree
   `$rev` bumping (the tree is static today, `$rev` constant).
 - **plet settings persistence** — the delegated `plet/<fqname>` def slice: convention
   only, no helper written.
-- **generalizing expose's upstream relay** from the hard-coded `viewport` to a generic
-  per-channel control store — the one additive enabler that keeps future plets
-  purely additive (see "additive invariant"); not done.
 - **the thin `Plet` interface** (`publish()` + `stats()` for uniform lifecycle /
   metrics reporting under the host's owner name) — not written; plain members remain
   the recommendation until several pluginlets exist.
 - **prior-art landing route** (JSON-Forms skeleton + Tweakpane blades + Blender-style
   native declare) — a survey conclusion, not a commitment.
 
-The one known gap in what IS built: `live_view.ui.ts` infers full-image dimensions
-from the first frame, but the native half may already have downsampled it
+The one known gap in what IS built: `ui/live-view.ui.ts` infers full-image
+dimensions from the first frame, but the native half may already have downsampled it
 (`max_edge`), so the widget's viewport coordinate basis can be the downsampled size
 rather than true full-image pixels. Fixing it means the producer reporting true
-full-image `w,h` alongside the frame. The UI half is an unbuilt/untested TS sketch;
-only the native half and the expose relay are compiled and tested.
+full-image `w,h` alongside the frame. live-view's UI half is still an untested TS
+sketch (its widgets + viewport/tools libs now live in the plet and DO build); only
+its native half and the expose relay are compiled and tested.

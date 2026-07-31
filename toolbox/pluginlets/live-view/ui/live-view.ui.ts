@@ -18,7 +18,7 @@ import {
   Viewport,
   ViewportMessage,
   viewportMessage,
-} from "./contract";
+} from "../contract";
 
 /** How the widget reaches expose. The webui supplies one backed by its WS. */
 export interface LiveViewTransport {

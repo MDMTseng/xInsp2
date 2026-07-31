@@ -2,7 +2,7 @@
 //
 // xi_result_class.hpp — the ONE home for the run-result reserved band.
 //
-// Shared by the live backend (service_internal.hpp / service_result.cpp) and
+// Shared by the live backend (service_state.hpp / service_result.cpp) and
 // the headless runner (runner_main.cpp), which used to carry an acknowledged
 // hand-mirrored copy of these constants + the class mapping + the reserved-band
 // rejection ("mirrors service_main::outcome_class_for_code"). One header, no

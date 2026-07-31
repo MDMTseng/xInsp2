@@ -1,6 +1,13 @@
 //
 // service_cmd_dispatch.cpp — dispatch-control command handlers, split from
-// service_main.cpp (behavior-preserving; see service_internal.hpp).
+// service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
+// The WS verbs that drive the run loop + the staged-config plane: cmd:run / start /
+// stop / set_timer_fps and cmd:exchange_instance / prepare_instance / commit_group.
+//
+// Deliberately NOT here: the dispatch-pool MACHINERY these verbs steer — the
+// per-group lanes, pool lifecycle, trigger sink, controlled teardown — lives in the
+// sibling-named service_dispatch.cpp. The guarded_plugin_call / script_grow_retry
+// fault boundaries live in service_guard.hpp.
 //
 #include <algorithm>
 #include <cstdio>
@@ -13,10 +20,14 @@
 
 #include <xi/xi_pack_abi.hpp>   // v12: cmd:run injects a sealed pack (pack_v1_iface)
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include "service_guard.hpp"          // guarded_plugin_call + script_grow_retry (fault boundaries)
+#include <xi/xi_health.hpp>            // IWYU: xi::health()/CompHealth/SysState (formerly transitive via service_state.hpp)
+#include <xi/xi_plugin_manager.hpp>  // IWYU: PluginManager methods (formerly transitive via service_state.hpp; now pimpl-hidden)
+#include <xi/xi_script_loader.hpp>    // IWYU: LoadedScript members (formerly transitive via service_state.hpp; now pimpl-hidden)
 
 // Item-14 caught-fault policy helpers are DEFINED in service_sinks.cpp and
-// declared in service_internal.hpp (guarded_plugin_call — the shared plugin-
+// declared in service_cmds.hpp (guarded_plugin_call — the shared plugin-
 // entry fault boundary — needs them from every cmd TU now).
 
 // ---- dispatch-control ------------------------------------------------------
@@ -46,7 +57,7 @@ void cmd_run_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // for vars times out with an empty error and drops the WS. open_project
         // does not compile the project's script (that's compile_and_load's job),
         // so this is the common headless gotcha. (Reported bug BUG-3.)
-        if (!g_eng.script.ok()) {
+        if (!g_eng.script().ok()) {
             send_rsp_err(srv, id, "no script loaded — call compile_and_load first");
             return;
         }
@@ -242,7 +253,7 @@ void cmd_start_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parsed) {
         // exits for the FE to respawn. See the watchdog monitor thread in
         // service_main.cpp + docs/guides/write-a-script.md.
 
-        int n_threads = std::max(1, g_eng.plugin_mgr.project().dispatch_threads);
+        int n_threads = std::max(1, g_eng.plugin_mgr().project().dispatch_threads);
         // Health contract: dispatch is live → `running` (recompute may immediately
         // fold it to `degraded` if a component is already unhealthy).
         xi::health().set_state(xi::SysState::Running);
@@ -327,13 +338,13 @@ void cmd_exchange_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd
             }
         } else {
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
-            if (g_eng.script.ok() && g_eng.script.exchange_instance) {
+            if (g_eng.script().ok() && g_eng.script().exchange_instance) {
                 try {
                     std::vector<char> rsp(256 * 1024);
                     // -1 = instance not found (terminal); other negatives = grow+retry.
                     int n = script_grow_retry(rsp, /*minus_one_is_terminal=*/true,
                         [&](char* b, int len) {
-                            return g_eng.script.exchange_instance(iname->c_str(), cmd_str.c_str(), b, len);
+                            return g_eng.script().exchange_instance(iname->c_str(), cmd_str.c_str(), b, len);
                         });
                     if (n >= 0) send_rsp_ok(srv, id, std::string(rsp.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "exchange_instance failed");
@@ -384,7 +395,7 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             // commit_group, and gating prepare dead-ended that recovery at step 1
             // (commit alone cannot re-stage). Same config-plane rationale as
             // set_def/commit — see the gate_quarantined comment in
-            // service_internal.hpp.
+            // service_cmds.hpp.
             auto* adapter = dynamic_cast<xi::CAbiInstanceAdapter*>(inst.get());
             bool ok = false;
             auto r = guarded_plugin_call(iname->c_str(), adapter, inst->plugin_name(),
@@ -419,7 +430,7 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
             if (folder) { cmd += ",\"folder\":"; xp::json_escape_into(cmd, *folder); }
             cmd += "}";
             std::lock_guard<std::mutex> lk(g_eng.script_mu);
-            if (g_eng.script.ok() && g_eng.script.exchange_instance) {
+            if (g_eng.script().ok() && g_eng.script().exchange_instance) {
                 // Script-side prepare enters plugin code — guard like the backend
                 // path above (and exchange_instance) so a throw/fault isn't fatal.
                 try {
@@ -427,7 +438,7 @@ void cmd_prepare_instance_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd*
                     // -1 = instance not found (terminal); other negatives = grow+retry.
                     int n = script_grow_retry(buf, /*minus_one_is_terminal=*/true,
                         [&](char* b, int len) {
-                            return g_eng.script.exchange_instance(iname->c_str(), cmd.c_str(), b, len);
+                            return g_eng.script().exchange_instance(iname->c_str(), cmd.c_str(), b, len);
                         });
                     if (n >= 0) send_rsp_ok(srv, id, std::string(buf.data(), (size_t)n));
                     else        send_rsp_err(srv, id, "prepare failed");
@@ -487,7 +498,7 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
         auto group_sel  = xp::get_string_field(parsed->args_json, "group");
         auto plugin_sel = xp::get_string_field(parsed->args_json, "plugin");
         if (group_sel || plugin_sel) {
-            for (auto& [iname, ii] : g_eng.plugin_mgr.project().instances) {
+            for (auto& [iname, ii] : g_eng.plugin_mgr().project().instances) {
                 if (group_sel  && ii.group       != *group_sel)  continue;
                 if (plugin_sel && ii.plugin_name != *plugin_sel) continue;
                 add_target(iname);
@@ -535,7 +546,7 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
             } else {
                 // Script-side instances keep the exchange convention.
                 std::lock_guard<std::mutex> lk(g_eng.script_mu);
-                if (g_eng.script.ok() && g_eng.script.exchange_instance) {
+                if (g_eng.script().ok() && g_eng.script().exchange_instance) {
                     // Script-side commit enters plugin code — guard like the backend
                     // inst->commit() path above so a throw/fault isn't fatal (record
                     // it as a per-target failure and keep committing the rest).
@@ -545,7 +556,7 @@ void cmd_commit_group_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* par
                         // -1 = instance not found (terminal); other negatives = grow+retry.
                         int n = script_grow_retry(buf, /*minus_one_is_terminal=*/true,
                             [&](char* b, int len) {
-                                return g_eng.script.exchange_instance(targets[i].c_str(), commit_cmd, b, len);
+                                return g_eng.script().exchange_instance(targets[i].c_str(), commit_cmd, b, len);
                             });
                         if (n >= 0) { r.assign(buf.data(), (size_t)n); ok = true; }
                     } catch (const seh_exception& e) {

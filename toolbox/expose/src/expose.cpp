@@ -146,11 +146,12 @@ public:
         const void* fp = nullptr; int32_t fn = 0;
         const bool has_frame = pk->get_bin(in, "frame", &fp, &fn) && fp && fn > 0;
 
-        long long seen = 0; bool subscribed; std::string viewport;
+        long long seen = 0; bool subscribed;
+        std::map<std::string, std::string> controls;
         {
             std::lock_guard<std::mutex> lk(mu_);
             subscribed = subscribed_.count(channel) != 0;
-            if (subscribed) { auto v = viewport_.find(channel); if (v != viewport_.end()) viewport = v->second; }
+            if (subscribed) { auto v = controls_.find(channel); if (v != controls_.end()) controls = v->second; }
             if (has_frame) {
                 Channel& ch = store_channel_(channel);
                 ch.frame_bytes = std::make_shared<const std::vector<uint8_t>>(
@@ -163,11 +164,14 @@ public:
         xi_pack_builder b = pk->builder_new();
         pk->builder_add_i64(b, "subscribed", subscribed ? 1 : 0);
         pk->builder_add_i64(b, "seen", (int64_t)seen);
-        // Viewport relay (doc 37): hand back the browser's latest viewport for the
-        // channel so the producer's live-view pluginlet crops to it. Absent => the
-        // producer ships the full frame (clean degrade).
-        if (!viewport.empty())
-            pk->builder_add_str(b, "viewport", viewport.c_str(), (int32_t)viewport.size());
+        // Upstream control relay (doc 37): hand back EVERY control the browser has
+        // set for this channel, each as its own str entry under its own key. A
+        // pluginlet reads the key it owns and ignores the rest — live-view reads
+        // "viewport" and crops to it; absent => the producer ships the full frame
+        // (clean degrade). Adding a new control key needs no change here.
+        for (const auto& [k, v] : controls)
+            if (!k.empty() && !v.empty())
+                pk->builder_add_str(b, k.c_str(), v.c_str(), (int32_t)v.size());
         return pk->builder_seal(b);
     }
     static xi_pack_handle h_ui_sink(void* self, xi_pack_handle in) {
@@ -186,29 +190,50 @@ public:
                 const std::string name = v.as_string();
                 if (name.empty()) return;
                 if (sub) { subscribed_.insert(name); }
-                else     { subscribed_.erase(name); viewport_.erase(name); }  // drop stale viewport
+                else     { subscribed_.erase(name); controls_.erase(name); }  // drop stale controls
             });
             auto arr = xi::Json::array();
             for (auto& s : subscribed_) arr.push(s);
             return xi::Json::object().set("ok", true).set("subscribed", arr).dump();
         }
-        // Viewport relay (doc 37, live-view pluginlet): a UI widget reports the
-        // browser's current on-screen viewport for a channel (full-image px). We
-        // store the latest as an "x,y,w,h" CSV and hand it back in the xi.ui.sink
-        // probe reply, so the producer's pluginlet can crop+downsample to exactly
-        // what's visible. Byte-blind relay — we never interpret the numbers. Only
-        // stored for a SUBSCRIBED channel (an unwatched viewport is meaningless),
-        // which bounds viewport_ to subscribed_ and needs no separate cap.
-        if (c == "viewport") {
+        // GENERIC upstream control relay (doc 37): a UI widget reports some control
+        // state for a channel; we store the latest per (channel, key) and hand it
+        // back in the xi.ui.sink probe reply, so the PRODUCER's pluginlet can react
+        // (live-view crops to "viewport"; another plet could set its own key).
+        // Byte-blind — we never interpret a key or a value. Only stored for a
+        // SUBSCRIBED channel (nobody watching ⇒ the control is meaningless), which
+        // bounds controls_ to subscribed_ and needs no separate cap.
+        //
+        //   {command:"control", channel, key, value}          generic
+        //   {command:"viewport", channel, x, y, w, h}         sugar for key="viewport"
+        //
+        // The `viewport` form is kept because live-view's widget speaks it and it
+        // is the ergonomic shape for a rect; it now writes the SAME store as any
+        // other key. A new pluginlet uses `control` and needs NO change here.
+        if (c == "control" || c == "viewport") {
             const std::string channel = p["channel"].as_string("default");
-            if (subscribed_.count(channel)) {
+            std::string key, value;
+            if (c == "viewport") {
                 char csv[64];
                 std::snprintf(csv, sizeof(csv), "%d,%d,%d,%d",
                               (int)p["x"].as_int(0), (int)p["y"].as_int(0),
                               (int)p["w"].as_int(0), (int)p["h"].as_int(0));
-                viewport_[channel] = csv;
+                key = "viewport"; value = csv;
+            } else {
+                key = p["key"].as_string();
+                // A value may be a string or a number; both land as a string (the
+                // relay is byte-blind, the owning plet parses it).
+                if (p["value"].is_string())      value = p["value"].as_string();
+                else if (p["value"].is_number()) value = std::to_string(p["value"].as_double());
+                else if (p["value"].is_bool())   value = p["value"].as_bool() ? "1" : "0";
+                if (key.empty())
+                    return xi::Json::object().set("ok", false).set("channel", channel)
+                        .set("reason", "missing key").dump();
+            }
+            if (subscribed_.count(channel)) {
+                controls_[channel][key] = value;
                 return xi::Json::object().set("ok", true).set("channel", channel)
-                    .set("viewport", csv).dump();
+                    .set("key", key).set("value", value).dump();
             }
             return xi::Json::object().set("ok", false).set("channel", channel)
                 .set("reason", "not subscribed").dump();
@@ -509,10 +534,17 @@ private:
     uint64_t                        touch_ctr_ = 0;      // monotonic write order for bounded eviction
     static constexpr size_t         kMaxChannels = 256;  // cap on retained channels (F-B)
     std::set<std::string>           subscribed_;
-    // Viewport relay (doc 37): channel -> "x,y,w,h" CSV, the browser's latest
-    // on-screen viewport, handed back in the xi.ui.sink probe reply. Bounded by
-    // subscribed_ (only stored while subscribed; erased on unsubscribe).
-    std::map<std::string, std::string> viewport_;
+    // Upstream CONTROL relay (doc 37): channel -> {key -> value}, the browser's
+    // latest control state for that channel, handed back verbatim in the
+    // xi.ui.sink probe reply so the PRODUCER can react (crop to a viewport, change
+    // a histogram's bins, …). Byte-blind: expose never interprets a key or value.
+    //
+    // GENERIC on purpose. This started as a hard-coded `viewport` field, which
+    // meant every new pluginlet wanting upstream control had to edit expose —
+    // breaking doc 37's additive invariant. Now `viewport` is just one key like
+    // any other, so a new plet needs NO change here (see additive invariant).
+    // Bounded by subscribed_ (stored only while subscribed; erased on unsubscribe).
+    std::map<std::string, std::map<std::string, std::string>> controls_;
     bool                            wire_v3_ = true;    // v12 default: XEX1-v3 (v1 opt-out for one release)
 
     // --- xi.ui.sink@1 provider (spec 31): the egress -> transport ingestion ---

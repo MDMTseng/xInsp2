@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import {
   createViewport, screenToImage, imageToScreen, fit, oneToOne, zoomAt, panBy,
   SCALE_MIN, SCALE_MAX,
-} from "../src/lib/viewport.mjs";
+} from "./viewport.mjs";
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
 

@@ -20,7 +20,9 @@
 #include <string>
 #include <vector>
 
-#include "service_internal.hpp"
+#include "service_state.hpp"
+#include <xi/xi_plugin_manager.hpp>  // IWYU: PluginManager methods (formerly transitive via service_state.hpp; now pimpl-hidden)
+#include <xi/xi_ws_server.hpp>
 #include <xi/xi_health.hpp>
 #include <xi/xi_health_mirror.hpp>
 
@@ -97,11 +99,11 @@ void cmd_get_health_(xi::ws::Server& srv, int64_t id, const xp::ParsedCmd* parse
         // create/remove/rename_instance → erase-vs-read UAF). We only need the name;
         // the follow-up get_instance_state / instance_fault calls re-take mu_, so a
         // copied snapshot (lock released) is required — a locked visitor would deadlock.
-        for (auto& snap : g_eng.plugin_mgr.snapshot_instances()) {
+        for (auto& snap : g_eng.plugin_mgr().snapshot_instances()) {
             const std::string& iname = snap.name;
             InstState base = InstState::Created;
             std::string err; long long crashes = 0;
-            if (!g_eng.plugin_mgr.get_instance_state(iname, base, err, &crashes)) {
+            if (!g_eng.plugin_mgr().get_instance_state(iname, base, err, &crashes)) {
                 // No tracked transition yet → Created (born state). Still report it.
                 base = InstState::Created;
             }

@@ -225,6 +225,7 @@ inline bool PluginManager::register_plugin_folder_locked_(const std::string& fol
             existing->second.ui_path       = info.ui_path;
             existing->second.folder_path   = info.folder_path;
             existing->second.manifest_json = info.manifest_json;
+            existing->second.pluginlets    = info.pluginlets;   // doc 37
         }
     } else {
         plugins_[info.name] = std::move(info);

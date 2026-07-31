@@ -1,7 +1,7 @@
 //
 // service_toolchain.cpp — C++ toolchain resolution + per-project override, script
 // external-dep parsing, project DLL search path, and the instance crash-breadcrumb
-// helpers. Split from service_main.cpp (behavior-preserving; see service_internal.hpp).
+// helpers. Split from service_main.cpp (behavior-preserving; see service_state.hpp / service_cmds.hpp).
 //
 #include <cstdio>
 #include <cstring>
@@ -14,7 +14,9 @@
 #include <xi/xi_toolchain.hpp>
 #include <xi/xi_project.hpp>
 
-#include "service_internal.hpp"
+#include "service_cmds.hpp"
+#include <xi/xi_health.hpp>            // IWYU: xi::health()/CompHealth/SysState (formerly transitive via service_state.hpp)
+#include <xi/xi_plugin_manager.hpp>  // IWYU: PluginManager methods (formerly transitive via service_state.hpp; now pimpl-hidden)
 
 // ---- C++ toolchain health + per-project override -----------------------------
 //
@@ -146,7 +148,7 @@ void set_project_dll_search_(const std::string& folder) {
 // (forward-declared above use_process_cb) record a per-instance process() crash.
 void note_instance_crash_(const char* name, const char* why) {
     if (name) {
-        g_eng.plugin_mgr.note_instance_crash(name, why ? why : "process() crashed");
+        g_eng.plugin_mgr().note_instance_crash(name, why ? why : "process() crashed");
         // Health contract: a caught process()/exchange() crash marks the instance
         // runtime-degraded (the quarantine seed, adoption-map item 14). This is the
         // FAULT path — rare, off the per-frame verdict path — so touching the
@@ -169,7 +171,7 @@ void stamp_culprit_(const char* instance, const std::string& plugin) {
         t_folder.clear();
         t_dll.clear();
         if (!plugin.empty())
-            g_eng.plugin_mgr.plugin_location(plugin, t_folder, t_dll);  // lock only on change
+            g_eng.plugin_mgr().plugin_location(plugin, t_folder, t_dll);  // lock only on change
     }
     xi::crash::set_culprit(instance ? instance : "", plugin.c_str(),
                            t_folder.c_str(), t_dll.c_str());

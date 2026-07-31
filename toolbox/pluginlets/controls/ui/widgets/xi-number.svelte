@@ -6,23 +6,32 @@
       min: { type: "Number" },
       max: { type: "Number" },
       step: { type: "Number" },
+      numpad: { type: "Boolean" },
     },
   }}
 />
 
 <script>
   // Key-bound numeric input. Exposes `value` + emits `input`/`change` (tap-out).
-  let { value = $bindable(0), min, max, step = 1, label = "", disabled = false } = $props();
+  // With the `numpad` attribute it also opens the HOST-OWNED touch keypad on focus
+  // (lib/numpad.mjs) — the widget only declares the intent; the surface is shared.
+  import { openNumpad } from "../lib/numpad.mjs";
+  let { value = $bindable(0), min, max, step = 1, label = "", disabled = false,
+        numpad = false } = $props();
   const host = $host();
   const fire = (t) => host.dispatchEvent(new CustomEvent(t, { detail: { value }, bubbles: true, composed: true }));
   const read = (e) => (e.target.value === "" ? null : Number(e.target.value));
   function onInput(e) { value = read(e); fire("input"); }
   function onChange(e) { value = read(e); fire("change"); }
+  function onFocus() {
+    if (disabled || numpad === false || numpad === undefined) return;
+    openNumpad({ value, min, max, label, onCommit: (v) => { value = v; fire("change"); } });
+  }
 </script>
 
 <label class="xi-number">
   {#if label}<span class="lbl">{label}</span>{/if}
-  <input type="number" {min} {max} {step} {value} {disabled} oninput={onInput} onchange={onChange} />
+  <input type="number" {min} {max} {step} {value} {disabled} oninput={onInput} onchange={onChange} onfocus={onFocus} />
 </label>
 
 <style>

@@ -353,6 +353,46 @@ XI_TEST(snapshot_types) {
     XI_EXPECT_EQ(s.i("nonexistent"), 0);               // missing → zero, no crash
 }
 
+// comp()/channel()/as(): the native side of the UI widget registry. Same custom
+// component, several instances, each bound to its OWN data source (key or channel);
+// as() re-skins a typed input without touching its value contract.
+XI_TEST(custom_components) {
+    Controls c;
+    c.grid(12)
+        .comp("chart", "temp_trend").caption("Temp").span(6)
+        .comp("chart", "defect_rate").caption("Defects").span(6)
+        .comp("map").channel("ui/cd/points").span(12)
+        .slider("pressure", 2, 0, 10).as("gauge").sem("pressure").span(6);
+
+    // schema: three chart/map leaves carry their widget name + their own source
+    int charts = 0; bool map_ch = false, gauge = false;
+    Json d = Json::parse(c.get_def());
+    std::function<void(const Json&)> walk = [&](const Json& n) {
+        const std::string w = n["widget"].as_string();
+        if (w == "chart") { ++charts;
+            XI_EXPECT(n["key"].as_string() == "temp_trend" || n["key"].as_string() == "defect_rate"); }
+        if (w == "map")   { map_ch = n["channel"].as_string() == "ui/cd/points";
+            XI_EXPECT(!n["key"].valid()); }              // keyless comp: no def slot
+        if (w == "gauge") { gauge = true;
+            XI_EXPECT_EQ(n["key"].as_string(), std::string("pressure"));
+            XI_EXPECT_EQ(n["max"].as_int(-1), 10); }     // as() keeps the Float descriptor
+        Json kids = n["children"]; for (int i = 0;; ++i) { Json ch = kids[i]; if (!ch.valid()) break; walk(ch); }
+    };
+    walk(d["$schema"]);
+    XI_EXPECT_EQ(charts, 2);
+    XI_EXPECT(map_ch);
+    XI_EXPECT(gauge);
+
+    // keyed comp = plugin-pushed readout semantics: set_readout feeds it,
+    // set_def can NEVER write it (it is output, not config)…
+    c.set_readout("temp_trend", R"([1,2,3])");
+    c.set_def(R"({"temp_trend": "hacked", "pressure": 99})");
+    d = Json::parse(c.get_def());
+    XI_EXPECT_EQ(d["temp_trend"].as_string(), std::string("[1,2,3]"));
+    // …while the as()-skinned slider still validates as a Float (clamped to hi)
+    XI_EXPECT_EQ(d["pressure"].as_int(-1), 10);
+}
+
 // Concurrency: hammering set_def from one thread while another snapshots must not
 // crash or tear (shared_mutex + snapshot copy). Values stay within the clamp range.
 XI_TEST(concurrent_set_and_snapshot) {
